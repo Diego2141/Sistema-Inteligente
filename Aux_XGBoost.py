@@ -12,6 +12,8 @@ import seaborn as sns
 import statsmodels.api as sm
 
 plt.style.use('seaborn')
+plt.rcParams['figure.facecolor'] = 'white'
+plt.rcParams['axes.facecolor'] = 'white'
 
 ###############################################################################
 # Step1: simulate bike demand data
