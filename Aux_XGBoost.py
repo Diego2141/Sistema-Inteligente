@@ -345,13 +345,16 @@ test_loss = np.where(residual_test >= 0, 0.9 * residual_test, -0.1 * residual_te
 print(f"Test pinball loss: {test_loss:.4f}")
 
 
-from optuna.visualization import plot_optimization_history, plot_param_importances
+from optuna.visualization.matplotlib import plot_optimization_history, plot_param_importances
+import matplotlib.pyplot as plt
 # Optimization progress
-fig1 = plot_optimization_history(study)
-fig1.show()
+plot_optimization_history(study)
+plt.tight_layout()
+plt.show()
 # Parameter importance
-fig2 = plot_param_importances(study)
-fig2.show()
+plot_param_importances(study)
+plt.tight_layout()
+plt.show()
 
 
 
