@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import statsmodels.api as sm
 
-plt.style.use('seaborn-v0_8')
+plt.style.use('seaborn')
 
 ###############################################################################
 # Step1: simulate bike demand data
