@@ -396,12 +396,30 @@ def optimize_for_quantile(tau, n_trials=30):
     return study.best_params
 
 # Tune each quantile
+taus = [0.1, 0.5, 0.9]
 best_params_by_quantile = {}
-for tau in [0.1, 0.5, 0.9]:
+for tau in taus:
     print(f"\nOptimizing for τ={tau}...")
     best_params_by_quantile[tau] = optimize_for_quantile(tau, n_trials=30)
     print(f"Best params: {best_params_by_quantile[tau]}")
 
+# Train final models with best params and generate predictions on test set
+final_models = {}
+preds = {}
+for tau in taus:
+    best_p = best_params_by_quantile[tau]
+    final_params = {
+        'objective': 'quantile',
+        'alpha': tau,
+        'learning_rate': best_p['learning_rate'],
+        'num_leaves': best_p['num_leaves'],
+        'min_data_in_leaf': best_p['min_data_in_leaf'],
+        'verbose': -1,
+        'seed': 42
+    }
+    dtrain_full = lgb.Dataset(X_train, label=y_train)
+    final_models[tau] = lgb.train(final_params, dtrain_full, num_boost_round=300)
+    preds[tau] = final_models[tau].predict(X_test)
 
 # For each sample, enforce monotonicity across quantiles
 # Example: if sample i has Q_0.5 = 10 and Q_0.9 = 9 (crossing),
@@ -419,14 +437,16 @@ for tau in taus:
     
     
     
-# Weekly batch job
-coverage_weekly = (y_actual >= pred_lower) & (y_actual <= pred_upper).mean()
-if coverage_weekly < 0.75:  # Trigger alert if < 75% (target: 80%)
-    send_alert("QR model miscalibrated: retrain needed")
-    
-    
-# Save
-model.save_model(f'qr_tau09_v2.txt')
+# Coverage check with corrected predictions
+pred_lower = preds_corrected[0.1]
+pred_upper = preds_corrected[0.9]
+coverage_weekly = ((y_test >= pred_lower) & (y_test <= pred_upper)).mean()
+print(f"Coverage after monotonicity fix: {coverage_weekly:.2%}")
+if coverage_weekly < 0.75:
+    print("WARNING: QR model miscalibrated, coverage below 75%")
+
+# Save best tau=0.9 model
+final_models[0.9].save_model('qr_tau09_v2.txt')
 
 # Load
 loaded_model = lgb.Booster(model_file='qr_tau09_v2.txt')
