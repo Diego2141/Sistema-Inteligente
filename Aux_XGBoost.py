@@ -11,6 +11,8 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import statsmodels.api as sm
 
+plt.style.use('ggplot')
+
 ###############################################################################
 # Step1: simulate bike demand data
 ###############################################################################
