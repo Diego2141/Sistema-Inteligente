@@ -228,10 +228,18 @@ plt.tight_layout()
 plt.show()
 
 hp_importances = optuna.importance.get_param_importances(study)
-fig, ax = plt.subplots()
-ax.barh(list(hp_importances.keys()), list(hp_importances.values()), color='purple')
-ax.set_xlabel("Importance")
-ax.set_title("Hyperparameter Importances")
+hp_params = list(hp_importances.keys())
+hp_values  = list(hp_importances.values())
+
+fig, ax = plt.subplots(figsize=(10, 5))
+bars = ax.barh(hp_params, hp_values, color='cornflowerblue')
+for bar, val in zip(bars, hp_values):
+    ax.text(bar.get_width() + 0.005, bar.get_y() + bar.get_height() / 2,
+            f'{val:.2f}', va='center', fontsize=10)
+ax.set_xlabel("Hyperparameter Importance", fontsize=12)
+ax.set_ylabel("Hyperparameter", fontsize=12)
+ax.set_title("Hyperparameter Importances", fontsize=14)
+ax.set_xlim(0, max(hp_values) * 1.15)
 plt.tight_layout()
 plt.show()
 
