@@ -449,7 +449,7 @@ if coverage_weekly < 0.75:
 final_models[0.9].save_model('qr_tau09_v2.txt')
 
 # Load
-loaded_model = lgster(model_file='qr_tau09_v2.txt')
+loaded_model = lgb.Booster(model_file='qr_tau09_v2.txt')
 
 # Version with metadata
 model_metadata = {
