@@ -232,7 +232,7 @@ hp_params = list(hp_importances.keys())
 hp_values  = list(hp_importances.values())
 
 fig, ax = plt.subplots(figsize=(10, 5))
-bars = ax.barh(hp_params, hp_values, color='cornflowerblue')
+bars = ax.barh(hp_params, hp_values, color='green')
 for bar, val in zip(bars, hp_values):
     ax.text(bar.get_width() + 0.005, bar.get_y() + bar.get_height() / 2,
             f'{val:.2f}', va='center', fontsize=10)
