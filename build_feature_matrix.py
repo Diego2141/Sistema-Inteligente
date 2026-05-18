@@ -68,6 +68,7 @@ PARAMS = {
     "ruta_elecciones": r"RUTA\fechas_elecciones.xlsx",
     "ruta_aux_xgboost": r"RUTA\Aux_XGBoost.py",
     "ruta_output": r"RUTA\matriz_features.xlsx",
+    "ruta_diccionario": r"1. Data/Clean/diccionario_variables.xlsx",
 
     # APIs externas
     "fred_api_key": "TU_API_KEY",
@@ -1221,13 +1222,11 @@ if __name__ == "__main__":
     print(data_dict.to_string(index=False))
     print(f"\nTotal variables: {len(data_dict)}")
 
-    # Exportar diccionario a Excel junto a la matriz
-    ruta_dict = PARAMS.get("ruta_output", "matriz_features.xlsx")
-    if ruta_dict and "RUTA" not in ruta_dict:
-        try:
-            with pd.ExcelWriter(ruta_dict, engine="openpyxl", mode="a",
-                                if_sheet_exists="replace") as writer:
-                data_dict.to_excel(writer, sheet_name="Diccionario", index=False)
-            logger.info(f"  Diccionario exportado a hoja 'Diccionario' en: {ruta_dict}")
-        except Exception as e:
-            logger.warning(f"  No se pudo exportar diccionario: {e}")
+    # Exportar diccionario a Excel en 1. Data/Clean/
+    ruta_dict = PARAMS.get("ruta_diccionario", r"1. Data/Clean/diccionario_variables.xlsx")
+    try:
+        os.makedirs(os.path.dirname(ruta_dict), exist_ok=True)
+        data_dict.to_excel(ruta_dict, index=False, sheet_name="Diccionario")
+        logger.info(f"  Diccionario exportado a: {ruta_dict}")
+    except Exception as e:
+        logger.warning(f"  No se pudo exportar diccionario: {e}")
