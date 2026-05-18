@@ -678,6 +678,125 @@ def seasonal_features(fecha, bdays_mes_cache, peru_holidays, fechas_igv, fechas_
 ###############################################################################
 # PARTE 6 — Construcción de la matriz de features completa
 ###############################################################################
+def _build_seasonal_table(fechas_unicas, peru_holidays, fechas_igv, fechas_elecciones, peru_bday):
+    """
+    Calcula features estacionales para un conjunto de fechas únicas (t+h).
+    Retorna DataFrame indexado por fecha.
+    """
+    # Pre-calcular días hábiles por mes y trimestre una sola vez
+    meses_unicos = pd.PeriodIndex(fechas_unicas, freq="M").unique()
+    trims_unicos = pd.PeriodIndex(fechas_unicas, freq="Q").unique()
+
+    # Mapa: fecha → días hábiles de su mes
+    bdays_por_mes = {}
+    for m in meses_unicos:
+        inicio = m.start_time
+        fin    = m.end_time
+        bdays_por_mes[m] = pd.bdate_range(start=inicio, end=fin, freq=peru_bday)
+
+    # Mapa: fecha → días hábiles de su trimestre
+    bdays_por_trim = {}
+    for q in trims_unicos:
+        inicio = q.start_time
+        fin    = q.end_time
+        bdays_por_trim[q] = pd.bdate_range(start=inicio, end=fin, freq=peru_bday)
+
+    # Sets para lookups rápidos
+    hols_set  = set(peru_holidays)
+    igv_set   = set(pd.DatetimeIndex(fechas_igv))   if fechas_igv   else set()
+    elec_set  = set(pd.DatetimeIndex(fechas_elecciones)) if fechas_elecciones else set()
+    igv_arr   = np.array(sorted(igv_set),  dtype="datetime64[D]") if igv_set  else np.array([], dtype="datetime64[D]")
+    elec_arr  = np.array(sorted(elec_set), dtype="datetime64[D]") if elec_set else np.array([], dtype="datetime64[D]")
+
+    registros = []
+    for fecha in fechas_unicas:
+        ts = pd.Timestamp(fecha)
+        m  = ts.to_period("M")
+        q  = ts.to_period("Q")
+
+        bd_mes  = bdays_por_mes.get(m,  pd.DatetimeIndex([]))
+        bd_trim = bdays_por_trim.get(q, pd.DatetimeIndex([]))
+        bd_mes_list  = list(bd_mes)
+        bd_trim_list = list(bd_trim)
+
+        total_bdays_mes  = len(bd_mes_list)
+        total_bdays_trim = len(bd_trim_list)
+
+        try:
+            pos_en_mes  = bd_mes_list.index(ts) + 1
+        except ValueError:
+            pos_en_mes  = 1
+        try:
+            pos_en_trim = bd_trim_list.index(ts) + 1
+        except ValueError:
+            pos_en_trim = 1
+
+        dias_al_cierre_mes    = total_bdays_mes - pos_en_mes
+        dias_desde_cierre_mes = pos_en_mes - 1
+
+        is_penult_bday_trim = int(pos_en_trim == total_bdays_trim - 1)
+        is_ultimo_bday_trim = int(pos_en_trim == total_bdays_trim)
+        is_1er_bday_trim    = int(pos_en_trim == 1)
+        is_2do_bday_trim    = int(pos_en_trim == 2)
+        is_3er_bday_trim    = int(pos_en_trim == 3)
+
+        # Feriados (busca en ventana ±2 días calendario)
+        is_pre_feriado  = int(any((ts + pd.Timedelta(days=d)) in hols_set for d in [1, 2]))
+        is_post_feriado = int(any((ts - pd.Timedelta(days=d)) in hols_set for d in [1, 2]))
+
+        # IGV
+        if len(igv_arr) > 0:
+            ts_d = np.datetime64(ts, "D")
+            diffs = (igv_arr - ts_d).astype(int)
+            futuros = diffs[diffs >= 0]
+            dias_al_igv = int(futuros.min()) if len(futuros) > 0 else 30
+            dias_al_igv = min(dias_al_igv, 30)
+            is_igv = int(ts in igv_set)
+        else:
+            is_igv, dias_al_igv = 0, 30
+
+        # Elecciones
+        if len(elec_arr) > 0:
+            ts_d  = np.datetime64(ts, "D")
+            diffs = (elec_arr - ts_d).astype(int)
+            is_eleccion     = int(ts in elec_set)
+            futuros_e       = diffs[diffs > 0]
+            pasados_e       = (-diffs)[diffs < 0]
+            is_pre_eleccion  = int(len(futuros_e) > 0 and futuros_e.min() <= 7)
+            is_post_eleccion = int(len(pasados_e) > 0 and pasados_e.min() <= 7)
+        else:
+            is_eleccion = is_pre_eleccion = is_post_eleccion = 0
+
+        mes = ts.month
+        registros.append({
+            "fecha_th"             : ts,
+            "dias_al_cierre_mes"   : dias_al_cierre_mes,
+            "dias_desde_cierre_mes": dias_desde_cierre_mes,
+            "pos_en_mes"           : pos_en_mes,
+            "total_bdays_mes"      : total_bdays_mes,
+            "is_penult_bday_trim"  : is_penult_bday_trim,
+            "is_ultimo_bday_trim"  : is_ultimo_bday_trim,
+            "is_1er_bday_trim"     : is_1er_bday_trim,
+            "is_2do_bday_trim"     : is_2do_bday_trim,
+            "is_3er_bday_trim"     : is_3er_bday_trim,
+            "dia_semana"           : ts.dayofweek,
+            "mes"                  : mes,
+            "is_quincena"          : int(pos_en_mes == 15 or dias_al_cierre_mes == 0),
+            "is_cierre_encaje"     : int(dias_al_cierre_mes <= 1),
+            "is_fiestas_patrias"   : int(mes == 7 and ts.day in [27, 28, 29]),
+            "is_fin_anio"          : int(mes == 12 and ts.day >= 28),
+            "is_pre_feriado"       : is_pre_feriado,
+            "is_post_feriado"      : is_post_feriado,
+            "is_igv"               : is_igv,
+            "dias_al_igv"          : dias_al_igv,
+            "is_eleccion"          : is_eleccion,
+            "is_pre_eleccion"      : is_pre_eleccion,
+            "is_post_eleccion"     : is_post_eleccion,
+        })
+
+    return pd.DataFrame(registros).set_index("fecha_th")
+
+
 def build_feature_matrix(
     banco,
     datos_manuales,
@@ -691,141 +810,102 @@ def build_feature_matrix(
     h_max,
 ):
     """
-    Construye el dataset de entrenamiento para un banco.
-    Para cada fecha t disponible y cada horizonte h=h_min,...,h_max genera una fila.
+    Construye el dataset de entrenamiento para un banco de forma vectorizada.
     """
     logger.info(f"  Construyendo matriz para banco: {banco}")
 
-    df_bancarios = datos_manuales.get("bancarios", pd.DataFrame())
+    df_bancarios  = datos_manuales.get("bancarios",  pd.DataFrame())
     df_confirmados = datos_manuales.get("confirmados", pd.DataFrame())
 
-    # Determinar índice temporal de referencia
+    # Índice temporal de referencia
     if not df_bancarios.empty and f"{banco}_R" in df_bancarios.columns:
         fechas_t = df_bancarios.index
     elif not macro_features.empty:
         fechas_t = macro_features.index
     else:
-        logger.warning(f"  Sin fechas de referencia para {banco}. Usando rango histórico.")
+        logger.warning(f"  Sin fechas de referencia para {banco}.")
         return pd.DataFrame()
 
-    # Preparar datos bancarios del banco
+    fechas_t = pd.DatetimeIndex(fechas_t)
+
+    # ── 1. Grid (fecha_t × h) ────────────────────────────────────────────────
+    hs = np.arange(h_min, h_max + 1)
+    grid = pd.MultiIndex.from_product([fechas_t, hs], names=["fecha_t", "h"])
+    df = pd.DataFrame(index=grid).reset_index()
+    df["log_h"] = np.log(df["h"])
+    df["banco"] = banco
+
+    # Calcular fecha_th vectorialmente: aplicar el offset h veces
+    # Construimos un mapa fecha_t → array de fechas futuras
+    logger.info(f"    Calculando fechas futuras ({len(fechas_t)} × {len(hs)})...")
+    th_map = {}
+    for t in fechas_t:
+        th_map[t] = list(get_future_business_dates(t, h_max, peru_bday))
+
+    def get_th(row):
+        fechas = th_map.get(row["fecha_t"], [])
+        idx = row["h"] - 1
+        return fechas[idx] if idx < len(fechas) else pd.NaT
+
+    df["fecha_th"] = df.apply(get_th, axis=1)
+    df = df.dropna(subset=["fecha_th"])
+
+    # ── 2. Features bancarias (merge por fecha_t) ────────────────────────────
+    bf = bank_features.get(banco, pd.DataFrame())
+    if not bf.empty:
+        df = df.merge(bf.add_prefix(""), left_on="fecha_t", right_index=True, how="left")
+
+    # ── 3. Datos bancarios → target ──────────────────────────────────────────
     tiene_bancarios = (
         not df_bancarios.empty
         and f"{banco}_R" in df_bancarios.columns
         and f"{banco}_D" in df_bancarios.columns
     )
-
     if tiene_bancarios:
-        df_banco = df_bancarios[[f"{banco}_R", f"{banco}_D"]].rename(
-            columns={f"{banco}_R": "R", f"{banco}_D": "D"}
-        )
+        df_banco = df_bancarios[[f"{banco}_R", f"{banco}_D"]].copy()
+        df_banco.columns = ["R_th", "D_th"]
+        df_banco["target"] = df_banco["D_th"] - df_banco["R_th"]
+        df = df.merge(df_banco[["target"]], left_on="fecha_th", right_index=True, how="left")
     else:
-        df_banco = pd.DataFrame(columns=["R", "D"], index=fechas_t)
+        df["target"] = np.nan
 
-    # Features bancarias para este banco
-    bf = bank_features.get(banco, build_bank_features(
-        df_banco,
-        PARAMS["lags_cortos"],
-        PARAMS["lag_semana"],
-        PARAMS["lag_mes"],
-        PARAMS["ventanas_vol"],
-    ))
+    # ── 4. Confirmados (merge por fecha_t) ───────────────────────────────────
+    for col in ["R_conf_t1", "R_conf_t2", "D_conf_t1"]:
+        df[col] = np.nan
+    if not df_confirmados.empty and "banco" in df_confirmados.columns and "fecha" in df_confirmados.columns:
+        conf = df_confirmados[df_confirmados["banco"] == banco].set_index("fecha")
+        for col in ["R_conf_t1", "R_conf_t2", "D_conf_t1"]:
+            if col in conf.columns:
+                df[col] = df["fecha_t"].map(conf[col])
 
-    # Confirmados
-    tiene_confirmados = not df_confirmados.empty and "banco" in df_confirmados.columns
-    if tiene_confirmados:
-        conf_banco = df_confirmados[df_confirmados["banco"] == banco]
+    # ── 5. Macro (merge por fecha_t) ─────────────────────────────────────────
+    if not macro_features.empty:
+        df = df.merge(macro_features, left_on="fecha_t", right_index=True, how="left")
     else:
-        conf_banco = pd.DataFrame()
+        for col in ["VIX","delta_VIX","VIX_ma22","TC_PEN_USD","delta_TC",
+                    "tc_vol_5d","tc_vol_22d","EMBI_PERU","delta_EMBI",
+                    "TASA_REF_BCRP","FED_FUNDS","diferencial_tasas","T10Y"]:
+            df[col] = np.nan
 
-    bdays_mes_cache = {}
-    filas = []
+    # ── 6. Estacionales (calculadas una vez por fecha_th única) ──────────────
+    fechas_th_unicas = pd.DatetimeIndex(df["fecha_th"].unique())
+    logger.info(f"    Calculando estacionales para {len(fechas_th_unicas):,} fechas únicas...")
+    df_seasonal = _build_seasonal_table(
+        fechas_th_unicas, peru_holidays, fechas_igv, fechas_elecciones, peru_bday
+    )
+    df = df.merge(df_seasonal, left_on="fecha_th", right_index=True, how="left")
 
-    for t in fechas_t:
-        # Obtener fechas futuras t+h
-        try:
-            fechas_futuras = get_future_business_dates(t, h_max, peru_bday)
-        except Exception:
-            continue
+    # ── Reordenar columnas ───────────────────────────────────────────────────
+    cols_id = ["fecha_t", "banco", "h", "log_h"]
+    cols_resto = [c for c in df.columns if c not in cols_id + ["fecha_th"]]
+    df = df[cols_id + cols_resto].drop(columns=["fecha_th"], errors="ignore")
 
-        for idx_h, fecha_th in enumerate(fechas_futuras):
-            h = idx_h + 1
-            if h < h_min or h > h_max:
-                continue
+    # Reporte NaN
+    total = len(df)
+    nan_cols = {c: f"{df[c].isna().sum()/total:.1%}" for c in df.columns if df[c].isna().any()}
+    logger.info(f"  {banco}: {total:,} filas | columnas con NaN: {len(nan_cols)}")
 
-            fila = {
-                "fecha_t": t,
-                "banco": banco,
-                "h": h,
-                "log_h": np.log(h),
-            }
-
-            # Features bancarias en t
-            if not bf.empty and t in bf.index:
-                for col in bf.columns:
-                    fila[col] = bf.loc[t, col]
-            else:
-                for col in bf.columns:
-                    fila[col] = np.nan
-
-            # Features operativas confirmadas en t
-            fila["R_conf_t1"] = np.nan
-            fila["R_conf_t2"] = np.nan
-            fila["D_conf_t1"] = np.nan
-            if not conf_banco.empty:
-                if "fecha" in conf_banco.columns:
-                    fila_conf = conf_banco[conf_banco["fecha"] == t]
-                    if not fila_conf.empty:
-                        fila["R_conf_t1"] = fila_conf.iloc[0].get("R_conf_t1", np.nan)
-                        fila["R_conf_t2"] = fila_conf.iloc[0].get("R_conf_t2", np.nan)
-                        fila["D_conf_t1"] = fila_conf.iloc[0].get("D_conf_t1", np.nan)
-
-            # Features macroeconómicas en t
-            if not macro_features.empty and t in macro_features.index:
-                for col in macro_features.columns:
-                    fila[col] = macro_features.loc[t, col]
-            else:
-                macro_cols = [
-                    "VIX", "delta_VIX", "VIX_ma22",
-                    "TC_PEN_USD", "delta_TC", "tc_vol_5d", "tc_vol_22d",
-                    "EMBI_PERU", "delta_EMBI",
-                    "TASA_REF_BCRP", "FED_FUNDS", "diferencial_tasas", "T10Y",
-                ]
-                for col in macro_cols:
-                    fila[col] = np.nan
-
-            # Features estacionales en t+h
-            est = seasonal_features(
-                fecha_th, bdays_mes_cache, peru_holidays, fechas_igv, fechas_elecciones
-            )
-            fila.update(est)
-
-            # Target: D(b, t+h) - R(b, t+h)
-            fila["target"] = np.nan
-            if tiene_bancarios and fecha_th in df_banco.index:
-                r_th = df_banco.loc[fecha_th, "R"]
-                d_th = df_banco.loc[fecha_th, "D"]
-                if not pd.isna(r_th) and not pd.isna(d_th):
-                    fila["target"] = d_th - r_th
-
-            filas.append(fila)
-
-    if not filas:
-        logger.warning(f"  Sin filas generadas para banco: {banco}")
-        return pd.DataFrame()
-
-    df_matriz = pd.DataFrame(filas)
-
-    # Reporte de NaN
-    total = len(df_matriz)
-    nan_cols = {
-        col: f"{df_matriz[col].isna().sum() / total:.1%}"
-        for col in df_matriz.columns
-        if df_matriz[col].isna().any()
-    }
-    logger.info(f"  {banco}: {total:,} filas generadas | columnas con NaN: {len(nan_cols)}")
-
-    return df_matriz
+    return df
 
 
 def build_full_matrix(
