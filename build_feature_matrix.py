@@ -922,6 +922,102 @@ def build_full_matrix(
 
 
 ###############################################################################
+# Diccionario de variables
+###############################################################################
+def build_data_dictionary(params):
+    """
+    Retorna un DataFrame con todas las variables de la matriz,
+    su fuente, descripción y rezago/horizonte.
+    """
+    lags_cortos  = params["lags_cortos"]
+    lag_semana   = params["lag_semana"]
+    lag_mes      = params["lag_mes"]
+    ventanas_vol = params["ventanas_vol"]
+
+    registros = []
+
+    def add(variable, fuente, descripcion, rezago_dias=None, horizonte=None):
+        registros.append({
+            "variable"    : variable,
+            "fuente"      : fuente,
+            "descripcion" : descripcion,
+            "rezago_dias" : rezago_dias,
+            "horizonte"   : horizonte,
+        })
+
+    # ── Identificadores ──────────────────────────────────────────────────────
+    add("fecha_t",  "Sistema", "Fecha de origen de la predicción",       None, None)
+    add("banco",    "Sistema", "Identificador del banco",                 None, None)
+    add("h",        "Sistema", "Horizonte de predicción en días hábiles", None, "t+h")
+    add("log_h",    "Sistema", "Logaritmo natural del horizonte h",       None, "t+h")
+
+    # ── Features bancarias (observadas en t) ─────────────────────────────────
+    todos_lags = lags_cortos + [lag_semana, lag_mes]
+    for l in todos_lags:
+        add(f"R_t-{l}", "Datos bancarios", f"Retiro del banco en t-{l}", l, None)
+        add(f"D_t-{l}", "Datos bancarios", f"Depósito del banco en t-{l}", l, None)
+
+    for v in ventanas_vol:
+        add(f"sigma_R_{v}d", "Datos bancarios", f"Desv. estándar rolling {v}d de retiros",    None, None)
+        add(f"sigma_D_{v}d", "Datos bancarios", f"Desv. estándar rolling {v}d de depósitos",  None, None)
+        add(f"ma_R_{v}d",    "Datos bancarios", f"Media móvil {v}d de retiros",                None, None)
+        add(f"ma_D_{v}d",    "Datos bancarios", f"Media móvil {v}d de depósitos",              None, None)
+
+    add("delta_R", "Datos bancarios", "Variación diaria de retiros R(t) - R(t-1)",   1, None)
+    add("delta_D", "Datos bancarios", "Variación diaria de depósitos D(t) - D(t-1)", 1, None)
+
+    # ── Features operativas confirmadas (conocidas en t) ─────────────────────
+    add("R_conf_t1", "Confirmados operativos", "Retiro confirmado para t+1 (informado ayer)", -1, "t+1")
+    add("R_conf_t2", "Confirmados operativos", "Retiro confirmado para t+2 (informado hoy)",   0, "t+2")
+    add("D_conf_t1", "Confirmados operativos", "Depósito confirmado para t+1 (informado hoy)", 0, "t+1")
+
+    # ── Features macroeconómicas (observadas en t) ───────────────────────────
+    add("VIX",              "Yahoo Finance",  "Índice de volatilidad implícita S&P 500",          0, None)
+    add("delta_VIX",        "Yahoo Finance",  "Variación diaria del VIX",                         1, None)
+    add("VIX_ma22",         "Yahoo Finance",  "Media móvil 22d del VIX",                          None, None)
+    add("TC_PEN_USD",       "Yahoo Finance",  "Tipo de cambio PEN/USD (mercado)",                 0, None)
+    add("delta_TC",         "Yahoo Finance",  "Variación diaria del tipo de cambio",              1, None)
+    add("tc_vol_5d",        "Yahoo Finance",  "Volatilidad rolling 5d de retornos del TC",        None, None)
+    add("tc_vol_22d",       "Yahoo Finance",  "Volatilidad rolling 22d de retornos del TC",       None, None)
+    add("EMBI_PERU",        "API BCRP",       "EMBI Perú (riesgo país)",                          0, None)
+    add("delta_EMBI",       "API BCRP",       "Variación diaria del EMBI Perú",                   1, None)
+    add("TASA_REF_BCRP",    "API BCRP",       "Tasa de referencia del BCRP",                      0, None)
+    add("FED_FUNDS",        "FRED API",       "Tasa de política monetaria de la Fed",             0, None)
+    add("diferencial_tasas","Calculado",      "TASA_REF_BCRP - FED_FUNDS",                        0, None)
+    add("T10Y",             "Yahoo Finance",  "Rendimiento del bono del Tesoro EE.UU. a 10 años", 0, None)
+
+    # ── Features estacionales (en t+h — fecha futura, siempre conocidas) ─────
+    add("dias_al_cierre_mes",    "Calendario", "Días hábiles restantes hasta fin de mes en t+h",          None, "t+h")
+    add("dias_desde_cierre_mes", "Calendario", "Días hábiles transcurridos desde inicio de mes en t+h",   None, "t+h")
+    add("pos_en_mes",            "Calendario", "Posición del día hábil dentro del mes (1=primero)",        None, "t+h")
+    add("total_bdays_mes",       "Calendario", "Total de días hábiles del mes de t+h",                     None, "t+h")
+    add("is_penult_bday_trim",   "Calendario", "1 si t+h es penúltimo día hábil del trimestre",            None, "t+h")
+    add("is_ultimo_bday_trim",   "Calendario", "1 si t+h es último día hábil del trimestre",               None, "t+h")
+    add("is_1er_bday_trim",      "Calendario", "1 si t+h es primer día hábil del trimestre",               None, "t+h")
+    add("is_2do_bday_trim",      "Calendario", "1 si t+h es segundo día hábil del trimestre",              None, "t+h")
+    add("is_3er_bday_trim",      "Calendario", "1 si t+h es tercer día hábil del trimestre",               None, "t+h")
+    add("dia_semana",            "Calendario", "Día de la semana (0=lunes, 4=viernes)",                    None, "t+h")
+    add("mes",                   "Calendario", "Mes del año (1–12)",                                       None, "t+h")
+    add("is_quincena",           "Calendario", "1 si t+h es día 15 o último hábil del mes",                None, "t+h")
+    add("is_cierre_encaje",      "Calendario", "1 si t+h está en los últimos 2 días hábiles del mes",      None, "t+h")
+    add("is_fiestas_patrias",    "Calendario", "1 si t+h cae en semana de Fiestas Patrias (27-29 jul)",    None, "t+h")
+    add("is_fin_anio",           "Calendario", "1 si t+h es 28–31 de diciembre",                           None, "t+h")
+    add("is_pre_feriado",        "Calendario / holidays.Peru", "1 si el día siguiente a t+h es feriado",  None, "t+h")
+    add("is_post_feriado",       "Calendario / holidays.Peru", "1 si el día anterior a t+h es feriado",   None, "t+h")
+    add("is_igv",                "Archivo IGV", "1 si t+h es fecha de pago de IGV",                       None, "t+h")
+    add("dias_al_igv",           "Archivo IGV", "Días hábiles hasta el próximo vencimiento de IGV (cap 30)", None, "t+h")
+    add("is_eleccion",           "Archivo elecciones", "1 si t+h es día de elecciones",                   None, "t+h")
+    add("is_pre_eleccion",       "Archivo elecciones", "1 si t+h está dentro de los 7 días previos a elecciones", None, "t+h")
+    add("is_post_eleccion",      "Archivo elecciones", "1 si t+h está dentro de los 7 días posteriores a elecciones", None, "t+h")
+
+    # ── Target ────────────────────────────────────────────────────────────────
+    add("target", "Datos bancarios", "Flujo neto = D(b, t+h) - R(b, t+h). NaN si no hay datos.", None, "t+h")
+
+    df_dict = pd.DataFrame(registros)
+    return df_dict
+
+
+###############################################################################
 # Datos demo — se usa cuando PARAMS["usar_datos_demo"] = True
 ###############################################################################
 def generate_demo_data(params):
@@ -1036,3 +1132,22 @@ if __name__ == "__main__":
         )
     else:
         print("\nMatriz vacía. Verifique la configuración de PARAMS y los archivos de datos.")
+
+    # Diccionario de variables
+    data_dict = build_data_dictionary(PARAMS)
+    print(f"\n{'='*70}")
+    print("  DICCIONARIO DE VARIABLES")
+    print(f"{'='*70}")
+    print(data_dict.to_string(index=False))
+    print(f"\nTotal variables: {len(data_dict)}")
+
+    # Exportar diccionario a Excel junto a la matriz
+    ruta_dict = PARAMS.get("ruta_output", "matriz_features.xlsx")
+    if ruta_dict and "RUTA" not in ruta_dict:
+        try:
+            with pd.ExcelWriter(ruta_dict, engine="openpyxl", mode="a",
+                                if_sheet_exists="replace") as writer:
+                data_dict.to_excel(writer, sheet_name="Diccionario", index=False)
+            logger.info(f"  Diccionario exportado a hoja 'Diccionario' en: {ruta_dict}")
+        except Exception as e:
+            logger.warning(f"  No se pudo exportar diccionario: {e}")
