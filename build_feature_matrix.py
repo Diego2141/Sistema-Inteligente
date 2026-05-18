@@ -43,6 +43,9 @@ PARAMS = {
     "h_max": 90,
     "quantiles": [0.01, 0.05, 0.50, 0.95, 0.99],
 
+    # Modo demo (True mientras no lleguen los datos reales)
+    "usar_datos_demo": True,
+
     # Agrupación de bancos
     "umbral_banco_pequeño_pct": 0.05,   # bancos con < 5% del volumen → Otros
     "bancos_otros": [],                  # lista fija (tiene prioridad si no está vacía)
@@ -919,6 +922,59 @@ def build_full_matrix(
 
 
 ###############################################################################
+# Datos demo — se usa cuando PARAMS["usar_datos_demo"] = True
+###############################################################################
+def generate_demo_data(params):
+    """
+    Genera datos bancarios y macroeconómicos sintéticos para pruebas.
+    Simula 5 bancos de distintos tamaños para activar la agrupación automática.
+    """
+    logger.info("*** MODO DEMO: generando datos sintéticos ***")
+    np.random.seed(42)
+
+    fechas = pd.bdate_range(
+        start=params["fecha_inicio_historico"],
+        end="2024-12-31",
+    )
+    n = len(fechas)
+
+    # Cinco bancos con escalas muy distintas → banco_4 y banco_5 quedarán en Otros
+    escalas = {
+        "banco_1": 500,
+        "banco_2": 350,
+        "banco_3": 200,
+        "banco_4": 30,
+        "banco_5": 20,
+    }
+
+    df_bancarios = pd.DataFrame(index=fechas)
+    df_bancarios.index.name = "fecha"
+    for banco, escala in escalas.items():
+        tendencia = np.linspace(0, escala * 0.1, n)
+        ruido_R = np.random.normal(0, escala * 0.15, n)
+        ruido_D = np.random.normal(0, escala * 0.15, n)
+        df_bancarios[f"{banco}_R"] = escala + tendencia + ruido_R
+        df_bancarios[f"{banco}_D"] = escala + tendencia + ruido_D
+
+    # Macro sintética con tendencias plausibles
+    df_macro = pd.DataFrame(index=fechas)
+    df_macro["VIX"]           = np.clip(20 + np.cumsum(np.random.normal(0, 0.3, n)), 10, 80)
+    df_macro["TC_PEN_USD"]    = np.clip(3.3 + np.cumsum(np.random.normal(0, 0.005, n)), 3.0, 4.5)
+    df_macro["T10Y"]          = np.clip(3.5 + np.cumsum(np.random.normal(0, 0.02, n)) * 0.05, 1.0, 6.0)
+    df_macro["FED_FUNDS"]     = np.clip(1.0 + np.cumsum(np.random.normal(0, 0.01, n)) * 0.03, 0.0, 6.0)
+    df_macro["EMBI_PERU"]     = np.clip(130 + np.cumsum(np.random.normal(0, 1.0, n)), 80, 400)
+    df_macro["TASA_REF_BCRP"] = np.clip(4.0 + np.cumsum(np.random.normal(0, 0.01, n)) * 0.02, 1.5, 8.0)
+    df_macro["TC_BCRP"]       = df_macro["TC_PEN_USD"] + np.random.normal(0, 0.003, n)
+
+    datos_manuales = {
+        "bancarios"   : df_bancarios,
+        "confirmados" : pd.DataFrame(columns=["banco", "R_conf_t1", "R_conf_t2", "D_conf_t1"]),
+        "intervencion": pd.Series(dtype=float),
+    }
+    return datos_manuales, df_macro
+
+
+###############################################################################
 # Flujo principal
 ###############################################################################
 if __name__ == "__main__":
@@ -935,8 +991,12 @@ if __name__ == "__main__":
         ruta_elecciones=PARAMS["ruta_elecciones"],
     )
 
-    # 2. Datos manuales (no falla si no hay archivos)
-    datos_manuales = load_manual_data(PARAMS)
+    # 2. Datos manuales + macro
+    if PARAMS.get("usar_datos_demo"):
+        datos_manuales, macro_raw = generate_demo_data(PARAMS)
+    else:
+        datos_manuales = load_manual_data(PARAMS)
+        macro_raw      = download_external_series(PARAMS)
 
     # 3. Agrupación de bancos pequeños → Otros_bancos
     df_bancarios_agrupado, lista_bancos, reporte_agrupacion = agrupar_bancos(
@@ -954,8 +1014,7 @@ if __name__ == "__main__":
         )
         lista_bancos = ["banco_demo"]
 
-    # 4. Series externas
-    macro_raw = download_external_series(PARAMS)
+    # 4. Features macroeconómicas
     macro_features = build_macro_features(macro_raw)
 
     # 5. Matriz completa
