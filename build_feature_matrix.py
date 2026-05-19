@@ -340,7 +340,8 @@ def _descargar_yahoo(ticker, inicio, fin, proxies, nombre):
     }
 
     def _descarga():
-        r = requests.get(
+        import requests as req
+        r = req.get(
             url,
             headers=headers,
             proxies=proxies if proxies else None,
