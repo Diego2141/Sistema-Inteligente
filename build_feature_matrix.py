@@ -72,7 +72,7 @@ PARAMS = {
 
     # APIs externas
     "fred_api_key": "TU_API_KEY",
-    "proxy": "http://USUARIO:PASSWORD@bcrproxy:8080",
+    "proxy": "http://2577:fgh1103.@bcrproxy:8080",
 
     # Códigos BCRP
     "bcrp_embi": "PD04638DD",
