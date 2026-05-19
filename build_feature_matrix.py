@@ -72,10 +72,9 @@ PARAMS = {
 
     # Series BCRP descargadas manualmente con Add-In BCRPData
     # Un solo archivo Excel, cada serie en su propia hoja
-    # Flujo: BCRPData → Obtener Datos (EMBI en Hoja1, Tasa Ref en Hoja2) → guardar
-    "ruta_bcrp": r"1. Data/Raw/series_bcrp.xlsx",
-    "hoja_bcrp_embi":     "EMBI",       # nombre de la hoja con PD04709XD
-    "hoja_bcrp_tasa_ref": "TasaRef",    # nombre de la hoja con PD12301MD
+    "ruta_bcrp": r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Raw\series_bcrp.xlsx",
+    "hoja_bcrp_embi":     "EMBIG",      # hoja con PD04709XD (Spread EMBIG Perú)
+    "hoja_bcrp_tasa_ref": "TasaPM",     # hoja con PD12301MD (Tasa de Referencia)
 
     # APIs externas
     "fred_api_key": "TU_API_KEY",
@@ -447,7 +446,20 @@ def _leer_bcrp_excel(ruta, nombre, hoja=0):
 
         df = df[[col_fecha, col_valor]].copy()
         df.columns = ["fecha", nombre]
-        df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce")
+
+        # El Add-In BCRPData usa meses en español: Set=Sep, Ene=Jan, etc.
+        _meses_es = {
+            "Ene": "Jan", "Feb": "Feb", "Mar": "Mar", "Abr": "Apr",
+            "May": "May", "Jun": "Jun", "Jul": "Jul", "Ago": "Aug",
+            "Set": "Sep", "Oct": "Oct", "Nov": "Nov", "Dic": "Dec",
+        }
+        def _parse_fecha_bcrp(s):
+            s = str(s).strip()
+            for es, en in _meses_es.items():
+                s = s.replace(es, en)
+            return pd.to_datetime(s, errors="coerce", dayfirst=True)
+
+        df["fecha"] = df["fecha"].apply(_parse_fecha_bcrp)
         df[nombre] = pd.to_numeric(
             df[nombre].astype(str).str.replace(",", "."), errors="coerce"
         )
