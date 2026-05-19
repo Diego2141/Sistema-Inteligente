@@ -1314,7 +1314,7 @@ if __name__ == "__main__":
     peru_bday, peru_holidays, fechas_igv, fechas_elecciones = build_peru_calendar(
         años=PARAMS["años_calendario"],
         ruta_igv=PARAMS["ruta_igv"],
-        ruta_elecciones=PARAMS["ruta_elecciones"],
+        ruta_elecciones=None,  # eliminado: fechas hardcodeadas en build_peru_calendar()
     )
 
     # 2. Datos manuales + macro
