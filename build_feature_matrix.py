@@ -65,7 +65,7 @@ PARAMS = {
     "ruta_confirmados": r"RUTA\confirmados.xlsx",
     "ruta_intervencion": r"RUTA\intervencion.xlsx",
     "ruta_igv": r"RUTA\fechas_igv.xlsx",
-    "ruta_elecciones": r"RUTA\fechas_elecciones.xlsx",
+    # ruta_elecciones: eliminado — fechas presidenciales hardcodeadas en build_peru_calendar()
     "ruta_aux_xgboost": r"RUTA\Aux_XGBoost.py",
     "ruta_output": r"RUTA\matriz_features.xlsx",
     "ruta_diccionario": r"1. Data/Clean/diccionario_variables.xlsx",
@@ -102,8 +102,8 @@ def build_peru_calendar(años, ruta_igv, ruta_elecciones):
     """
     Retorna (peru_bday, peru_holidays, fechas_igv, fechas_elecciones).
 
-    Si los archivos de IGV o elecciones no existen o están vacíos,
-    retorna listas vacías sin lanzar error. Imprime advertencia.
+    Elecciones presidenciales hardcodeadas 2000-2041 (no requieren archivo externo).
+    Si los archivos de IGV no existen, retorna lista vacía sin lanzar error.
     """
     logger.info("PARTE 1: Construyendo calendario hábil peruano...")
 
@@ -134,18 +134,48 @@ def build_peru_calendar(años, ruta_igv, ruta_elecciones):
     except Exception:
         logger.warning(f"  No se pudo cargar fechas IGV desde: {ruta_igv}")
 
-    # Cargar fechas elecciones
-    fechas_elecciones = []
-    try:
-        df_elec = pd.read_excel(ruta_elecciones)
-        if not df_elec.empty:
-            col = df_elec.columns[0]
-            fechas_elecciones = pd.to_datetime(df_elec[col].dropna()).tolist()
-            logger.info(f"  Fechas elecciones cargadas: {len(fechas_elecciones)}")
-        else:
-            logger.warning(f"  Archivo elecciones vacío: {ruta_elecciones}")
-    except Exception:
-        logger.warning(f"  No se pudo cargar fechas elecciones desde: {ruta_elecciones}")
+    # Elecciones presidenciales peruanas hardcodeadas 2000-2041
+    # Fechas desde 2031 son estimadas (2do domingo de abril / 1er domingo de junio)
+    ULTIMA_FECHA_CONFIRMADA = pd.Timestamp("2026-06-07")
+    ULTIMO_ANIO_HORIZONTE   = 2041
+
+    _elecciones_raw = [
+        # ── Históricas confirmadas ──────────────────────────────
+        ("2000-04-09", "1ra vuelta"),  ("2000-05-28", "2da vuelta"),
+        ("2001-04-08", "1ra vuelta"),  ("2001-06-03", "2da vuelta"),
+        ("2006-04-09", "1ra vuelta"),  ("2006-06-04", "2da vuelta"),
+        ("2011-04-10", "1ra vuelta"),  ("2011-06-05", "2da vuelta"),
+        ("2016-04-10", "1ra vuelta"),  ("2016-06-05", "2da vuelta"),
+        ("2021-04-11", "1ra vuelta"),  ("2021-06-06", "2da vuelta"),
+        # ── Programadas / confirmadas ───────────────────────────
+        ("2026-04-12", "1ra vuelta"),  ("2026-06-07", "2da vuelta"),
+        # ── Estimadas (cada 5 años, 2do domingo abril / ~7 sem después) ──
+        ("2031-04-13", "1ra vuelta"),  ("2031-06-08", "2da vuelta"),
+        ("2036-04-12", "1ra vuelta"),  ("2036-06-07", "2da vuelta"),
+        ("2041-04-14", "1ra vuelta"),  ("2041-06-08", "2da vuelta"),
+    ]
+
+    fechas_elecciones = [pd.Timestamp(f) for f, _ in _elecciones_raw]
+    logger.info(
+        f"  Elecciones presidenciales cargadas: {len(fechas_elecciones)} fechas "
+        f"(2000-{ULTIMO_ANIO_HORIZONTE}, estimadas desde 2031)"
+    )
+
+    # Avisar cuando el horizonte de predicción se acerca al límite estimado
+    fecha_hoy = pd.Timestamp.today().normalize()
+    dias_al_limite = (pd.Timestamp(f"{ULTIMO_ANIO_HORIZONTE}-12-31") - fecha_hoy).days
+    if dias_al_limite < 365 * 3:
+        logger.warning(
+            f"  ⚠ HORIZONTE ELECTORAL: quedan ~{dias_al_limite // 365} años hasta el límite "
+            f"estimado ({ULTIMO_ANIO_HORIZONTE}). Considera extender las fechas en el código."
+        )
+    primera_estimada = pd.Timestamp("2031-04-13")
+    dias_a_estimada = (primera_estimada - fecha_hoy).days
+    if dias_a_estimada < 365 * 2:
+        logger.warning(
+            f"  ⚠ ELECCIONES ESTIMADAS: en ~{dias_a_estimada // 30} meses se entra a fechas "
+            f"estimadas (desde {primera_estimada.date()}). Verificar con JNE."
+        )
 
     logger.info("  Calendario construido correctamente.")
     return peru_bday, peru_holidays, fechas_igv, fechas_elecciones
