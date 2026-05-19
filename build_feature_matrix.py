@@ -71,9 +71,11 @@ PARAMS = {
     "ruta_diccionario": r"1. Data/Clean/diccionario_variables.xlsx",
 
     # Series BCRP descargadas manualmente con Add-In BCRPData
-    # Guardar como: Archivo → BCRPData → Obtener Datos → guardar el Excel resultante
-    "ruta_bcrp_embi":     r"1. Data/Raw/bcrp_embi.xlsx",
-    "ruta_bcrp_tasa_ref": r"1. Data/Raw/bcrp_tasa_ref.xlsx",
+    # Un solo archivo Excel, cada serie en su propia hoja
+    # Flujo: BCRPData → Obtener Datos (EMBI en Hoja1, Tasa Ref en Hoja2) → guardar
+    "ruta_bcrp": r"1. Data/Raw/series_bcrp.xlsx",
+    "hoja_bcrp_embi":     "EMBI",       # nombre de la hoja con PD04709XD
+    "hoja_bcrp_tasa_ref": "TasaRef",    # nombre de la hoja con PD12301MD
 
     # APIs externas
     "fred_api_key": "TU_API_KEY",
@@ -398,9 +400,9 @@ def _descargar_fred(serie_id, inicio, fin, api_key, proxies, nombre):
     return resultado
 
 
-def _leer_bcrp_excel(ruta, nombre):
+def _leer_bcrp_excel(ruta, nombre, hoja=0):
     """
-    Lee una serie BCRP desde un Excel descargado con el Add-In BCRPData.
+    Lee una serie BCRP desde una hoja de Excel descargado con el Add-In BCRPData.
 
     Formato esperado del Add-In:
         Fila 1: código de serie
@@ -411,6 +413,7 @@ def _leer_bcrp_excel(ruta, nombre):
         Fila 6: encabezados  Date | Valores
         Fila 7+: datos       fecha | valor
 
+    hoja: nombre o índice de la hoja dentro del Excel (default=0, primera hoja).
     Si el archivo no existe devuelve Series vacía con advertencia.
     """
     if not ruta or not os.path.exists(ruta):
@@ -422,7 +425,7 @@ def _leer_bcrp_excel(ruta, nombre):
 
     try:
         # header=None para leer desde fila 1 sin asumir encabezados
-        raw = pd.read_excel(ruta, header=None)
+        raw = pd.read_excel(ruta, sheet_name=hoja, header=None)
 
         # Buscar la fila de encabezado "Date" / "Valores"
         header_row = None
@@ -433,10 +436,9 @@ def _leer_bcrp_excel(ruta, nombre):
                 break
 
         if header_row is None:
-            # Fallback: asumir fila 6 (índice 5)
-            header_row = 5
+            header_row = 5  # fallback: fila 6
 
-        df = pd.read_excel(ruta, header=header_row)
+        df = pd.read_excel(ruta, sheet_name=hoja, header=header_row)
         df.columns = [str(c).strip() for c in df.columns]
 
         # Identificar columnas de fecha y valor
@@ -500,9 +502,10 @@ def download_external_series(params):
         series["FED_FUNDS"] = pd.Series(dtype=float, name="FED_FUNDS")
 
     # 4c. Series BCRP — leídas desde Excel descargado manualmente con Add-In BCRPData
-    # Flujo: BCRPData ribbon → Obtener Datos → guardar como ruta_bcrp_embi / ruta_bcrp_tasa_ref
-    series["EMBI_PERU"]     = _leer_bcrp_excel(params["ruta_bcrp_embi"],     "EMBI_PERU")
-    series["TASA_REF_BCRP"] = _leer_bcrp_excel(params["ruta_bcrp_tasa_ref"], "TASA_REF_BCRP")
+    # Flujo: BCRPData → Obtener Datos (EMBI en hoja "EMBI", Tasa Ref en hoja "TasaRef") → guardar
+    ruta_bcrp = params["ruta_bcrp"]
+    series["EMBI_PERU"]     = _leer_bcrp_excel(ruta_bcrp, "EMBI_PERU",     hoja=params["hoja_bcrp_embi"])
+    series["TASA_REF_BCRP"] = _leer_bcrp_excel(ruta_bcrp, "TASA_REF_BCRP", hoja=params["hoja_bcrp_tasa_ref"])
     # TC_PEN_USD ya viene de Yahoo Finance (PEN=X) — no se descarga del BCRP
 
     # Alinear al índice de fechas del rango
