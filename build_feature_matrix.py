@@ -382,14 +382,42 @@ def _descargar_yahoo(ticker, inicio, fin, proxies, nombre):
 
 
 def _descargar_fred(serie_id, inicio, fin, api_key, proxies, nombre):
-    """Descarga una serie desde FRED."""
+    """Descarga una serie desde la API REST de FRED (sin fredapi, solo requests)."""
+    import urllib3
+    urllib3.disable_warnings()
+
+    url = (
+        f"https://api.stlouisfed.org/fred/series/observations"
+        f"?series_id={serie_id}"
+        f"&api_key={api_key}"
+        f"&file_type=json"
+        f"&observation_start={pd.Timestamp(inicio).strftime('%Y-%m-%d')}"
+        f"&observation_end={pd.Timestamp(fin).strftime('%Y-%m-%d')}"
+    )
+
     def _descarga():
-        from fredapi import Fred
-        fred = Fred(api_key=api_key)
-        s = fred.get_series(serie_id, observation_start=inicio, observation_end=fin)
-        if s.empty:
-            raise ValueError(f"Sin datos para {serie_id}")
-        return s.rename(nombre)
+        import requests
+        r = requests.get(
+            url,
+            proxies=proxies if proxies else None,
+            verify=False,
+            timeout=30,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        if r.status_code != 200:
+            raise ValueError(f"FRED HTTP {r.status_code}: {r.text[:200]}")
+        obs = r.json().get("observations", [])
+        if not obs:
+            raise ValueError(f"Sin observaciones para {serie_id}")
+        registros = []
+        for o in obs:
+            try:
+                val = float(o["value"])
+                registros.append({"fecha": pd.Timestamp(o["date"]), nombre: val})
+            except (ValueError, TypeError):
+                pass  # "." = dato faltante en FRED
+        s = pd.DataFrame(registros).set_index("fecha")[nombre]
+        return s
 
     resultado = _retry_download(_descarga)
     if resultado is None:
