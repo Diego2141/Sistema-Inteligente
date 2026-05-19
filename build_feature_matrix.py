@@ -70,11 +70,16 @@ PARAMS = {
     "ruta_output": r"RUTA\matriz_features.xlsx",
     "ruta_diccionario": r"1. Data/Clean/diccionario_variables.xlsx",
 
+    # Series BCRP descargadas manualmente con Add-In BCRPData
+    # Guardar como: Archivo → BCRPData → Obtener Datos → guardar el Excel resultante
+    "ruta_bcrp_embi":     r"1. Data/Raw/bcrp_embi.xlsx",
+    "ruta_bcrp_tasa_ref": r"1. Data/Raw/bcrp_tasa_ref.xlsx",
+
     # APIs externas
     "fred_api_key": "TU_API_KEY",
     "proxy": "http://2577:fgh1103.@bcrproxy:8080",
 
-    # Códigos BCRP (verificados en portal estadísticas.bcrp.gob.pe)
+    # Códigos BCRP (solo como referencia; la lectura es desde archivo)
     "bcrp_embi": "PD04709XD",      # Spread EMBIG Perú (pbs) — diaria
     "bcrp_tasa_ref": "PD12301MD",  # Tasa de Referencia Política Monetaria — diaria
     # TC no se descarga de BCRP: se usa Yahoo Finance PEN=X
@@ -393,40 +398,74 @@ def _descargar_fred(serie_id, inicio, fin, api_key, proxies, nombre):
     return resultado
 
 
-def _descargar_bcrp(codigo, inicio, fin, proxies, nombre):
-    """Descarga una serie desde la API del BCRP."""
-    inicio_fmt = pd.to_datetime(inicio).strftime("%d%b%Y").upper()
-    fin_fmt = pd.to_datetime(fin).strftime("%d%b%Y").upper()
-    url = f"https://estadisticas.bcrp.gob.pe/estadisticas/series/api/{codigo}/json/{inicio_fmt}/{fin_fmt}"
+def _leer_bcrp_excel(ruta, nombre):
+    """
+    Lee una serie BCRP desde un Excel descargado con el Add-In BCRPData.
 
-    def _descarga():
-        import requests
-        resp = requests.get(url, proxies=proxies if proxies else None, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        periodos = data.get("periods", [])
-        if not periodos:
-            raise ValueError(f"Sin datos BCRP para {codigo}")
-        registros = []
-        for p in periodos:
-            fecha = pd.to_datetime(p["name"], format="%d.%b.%y", errors="coerce")
-            if pd.isna(fecha):
-                fecha = pd.to_datetime(p["name"], errors="coerce")
-            val = p["values"][0]
-            try:
-                val = float(str(val).replace(",", "."))
-            except (ValueError, TypeError):
-                val = np.nan
-            registros.append({"fecha": fecha, nombre: val})
-        s = pd.DataFrame(registros).set_index("fecha")[nombre].dropna()
-        return s
+    Formato esperado del Add-In:
+        Fila 1: código de serie
+        Fila 2: Descripción
+        Fila 3: Frecuencia
+        Fila 4: Periodo
+        Fila 5: vacía
+        Fila 6: encabezados  Date | Valores
+        Fila 7+: datos       fecha | valor
 
-    resultado = _retry_download(_descarga)
-    if resultado is None:
-        logger.warning(f"  No se pudo descargar {nombre} ({codigo}) desde BCRP.")
+    Si el archivo no existe devuelve Series vacía con advertencia.
+    """
+    if not ruta or not os.path.exists(ruta):
+        logger.warning(
+            f"  Archivo BCRP '{nombre}' no encontrado en: {ruta}\n"
+            f"  → Descargarlo con Add-In BCRPData y guardarlo en esa ruta."
+        )
         return pd.Series(dtype=float, name=nombre)
-    logger.info(f"  {nombre} descargado: {len(resultado)} observaciones.")
-    return resultado
+
+    try:
+        # header=None para leer desde fila 1 sin asumir encabezados
+        raw = pd.read_excel(ruta, header=None)
+
+        # Buscar la fila de encabezado "Date" / "Valores"
+        header_row = None
+        for i, row in raw.iterrows():
+            vals = [str(v).strip().lower() for v in row if pd.notna(v)]
+            if any(v in ("date", "fecha") for v in vals):
+                header_row = i
+                break
+
+        if header_row is None:
+            # Fallback: asumir fila 6 (índice 5)
+            header_row = 5
+
+        df = pd.read_excel(ruta, header=header_row)
+        df.columns = [str(c).strip() for c in df.columns]
+
+        # Identificar columnas de fecha y valor
+        col_fecha = next((c for c in df.columns if c.lower() in ("date", "fecha")), df.columns[0])
+        col_valor = next((c for c in df.columns if c.lower() in ("valores", "value", "values")), df.columns[1])
+
+        df = df[[col_fecha, col_valor]].copy()
+        df.columns = ["fecha", nombre]
+        df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce")
+        df[nombre] = pd.to_numeric(
+            df[nombre].astype(str).str.replace(",", "."), errors="coerce"
+        )
+        df = df.dropna(subset=["fecha"]).set_index("fecha").sort_index()
+
+        # Advertir si los datos tienen más de 7 días de antigüedad
+        ultima = df.index.max()
+        dias_atras = (pd.Timestamp.today() - ultima).days
+        if dias_atras > 7:
+            logger.warning(
+                f"  {nombre}: última fecha {ultima.date()} ({dias_atras} días atrás). "
+                f"Considera actualizar el archivo."
+            )
+
+        logger.info(f"  {nombre} leído desde archivo: {len(df)} obs, hasta {ultima.date()}")
+        return df[nombre]
+
+    except Exception as e:
+        logger.warning(f"  Error leyendo {nombre} desde {ruta}: {e}")
+        return pd.Series(dtype=float, name=nombre)
 
 
 def download_external_series(params):
@@ -460,9 +499,10 @@ def download_external_series(params):
         logger.warning("  FRED API key no configurada. FED_FUNDS quedará como NaN.")
         series["FED_FUNDS"] = pd.Series(dtype=float, name="FED_FUNDS")
 
-    # 4c. API BCRP
-    series["EMBI_PERU"] = _descargar_bcrp(params["bcrp_embi"], inicio, fin, proxies, "EMBI_PERU")
-    series["TASA_REF_BCRP"] = _descargar_bcrp(params["bcrp_tasa_ref"], inicio, fin, proxies, "TASA_REF_BCRP")
+    # 4c. Series BCRP — leídas desde Excel descargado manualmente con Add-In BCRPData
+    # Flujo: BCRPData ribbon → Obtener Datos → guardar como ruta_bcrp_embi / ruta_bcrp_tasa_ref
+    series["EMBI_PERU"]     = _leer_bcrp_excel(params["ruta_bcrp_embi"],     "EMBI_PERU")
+    series["TASA_REF_BCRP"] = _leer_bcrp_excel(params["ruta_bcrp_tasa_ref"], "TASA_REF_BCRP")
     # TC_PEN_USD ya viene de Yahoo Finance (PEN=X) — no se descarga del BCRP
 
     # Alinear al índice de fechas del rango
