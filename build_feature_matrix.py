@@ -74,14 +74,14 @@ PARAMS = {
     "fred_api_key": "TU_API_KEY",
     "proxy": "http://2577:fgh1103.@bcrproxy:8080",
 
-    # Códigos BCRP
-    "bcrp_embi": "PD04638DD",
-    "bcrp_tasa_ref": "PD04739DD",
-    "bcrp_tc": "PD04648DD",
+    # Códigos BCRP (verificados en portal estadísticas.bcrp.gob.pe)
+    "bcrp_embi": "PD04709XD",      # Spread EMBIG Perú (pbs) — diaria
+    "bcrp_tasa_ref": "PD12301MD",  # Tasa de Referencia Política Monetaria — diaria
+    # TC no se descarga de BCRP: se usa Yahoo Finance PEN=X
 
     # Tickers Yahoo Finance
     "ticker_vix": "^VIX",
-    "ticker_tc": "PEN=X",
+    "ticker_tc": "PEN=X",          # Tipo de cambio USD/PEN (venta)
     "ticker_t10y": "^TNX",
 
     # Código FRED
@@ -463,7 +463,7 @@ def download_external_series(params):
     # 4c. API BCRP
     series["EMBI_PERU"] = _descargar_bcrp(params["bcrp_embi"], inicio, fin, proxies, "EMBI_PERU")
     series["TASA_REF_BCRP"] = _descargar_bcrp(params["bcrp_tasa_ref"], inicio, fin, proxies, "TASA_REF_BCRP")
-    series["TC_BCRP"] = _descargar_bcrp(params["bcrp_tc"], inicio, fin, proxies, "TC_BCRP")
+    # TC_PEN_USD ya viene de Yahoo Finance (PEN=X) — no se descarga del BCRP
 
     # Alinear al índice de fechas del rango
     idx = pd.bdate_range(start=inicio, end=fin)
@@ -476,7 +476,7 @@ def download_external_series(params):
         else:
             df[nombre] = np.nan
 
-    cols_esperadas = ["VIX", "TC_PEN_USD", "T10Y", "FED_FUNDS", "EMBI_PERU", "TASA_REF_BCRP", "TC_BCRP"]
+    cols_esperadas = ["VIX", "TC_PEN_USD", "T10Y", "FED_FUNDS", "EMBI_PERU", "TASA_REF_BCRP"]
     for c in cols_esperadas:
         if c not in df.columns:
             df[c] = np.nan
@@ -1178,7 +1178,6 @@ def generate_demo_data(params):
     df_macro["FED_FUNDS"]     = np.clip(1.0 + np.cumsum(np.random.normal(0, 0.01, n)) * 0.03, 0.0, 6.0)
     df_macro["EMBI_PERU"]     = np.clip(130 + np.cumsum(np.random.normal(0, 1.0, n)), 80, 400)
     df_macro["TASA_REF_BCRP"] = np.clip(4.0 + np.cumsum(np.random.normal(0, 0.01, n)) * 0.02, 1.5, 8.0)
-    df_macro["TC_BCRP"]       = df_macro["TC_PEN_USD"] + np.random.normal(0, 0.003, n)
 
     datos_manuales = {
         "bancarios"   : df_bancarios,
