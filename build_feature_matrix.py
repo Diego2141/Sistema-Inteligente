@@ -314,21 +314,57 @@ def _retry_download(func, max_intentos=3, espera=2):
 
 
 def _descargar_yahoo(ticker, inicio, fin, proxies, nombre):
-    """Descarga una serie desde Yahoo Finance."""
+    """
+    Descarga una serie desde Yahoo Finance via requests directo con headers de navegador.
+    Funciona detrás de proxies corporativos que interceptan SSL.
+    """
+    import urllib3
+    urllib3.disable_warnings()
+
+    ticker_encoded = ticker.replace("^", "%5E")
+    inicio_ts = int(pd.Timestamp(inicio).timestamp())
+    fin_ts    = int(pd.Timestamp(fin).timestamp())
+    url = (
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker_encoded}"
+        f"?interval=1d&period1={inicio_ts}&period2={fin_ts}"
+    )
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://finance.yahoo.com",
+    }
+
     def _descarga():
-        import yfinance as yf
-        sesion = None
-        if proxies:
-            import requests
-            sesion = requests.Session()
-            sesion.proxies.update(proxies)
-        t = yf.Ticker(ticker)
-        if sesion:
-            t._session = sesion
-        df = t.history(start=inicio, end=fin, auto_adjust=True)
-        if df.empty:
-            raise ValueError(f"Sin datos para {ticker}")
-        return df["Close"].rename(nombre)
+        r = requests.get(
+            url,
+            headers=headers,
+            proxies=proxies if proxies else None,
+            verify=False,
+            timeout=30,
+        )
+        if r.status_code != 200:
+            raise ValueError(f"HTTP {r.status_code} para {ticker}")
+        data   = r.json()
+        result = data["chart"]["result"]
+        if not result:
+            raise ValueError(f"Sin datos en respuesta para {ticker}")
+        timestamps = result[0]["timestamp"]
+        closes     = result[0]["indicators"]["quote"][0]["close"]
+        s = pd.Series(
+            closes,
+            index=pd.to_datetime(timestamps, unit="s").tz_localize(None),
+            name=nombre,
+            dtype=float,
+        )
+        s.index = s.index.normalize()
+        if s.dropna().empty:
+            raise ValueError(f"Serie vacía para {ticker}")
+        return s
 
     resultado = _retry_download(_descarga)
     if resultado is None:
