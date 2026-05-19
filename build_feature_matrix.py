@@ -77,7 +77,7 @@ PARAMS = {
     "hoja_bcrp_tasa_ref": "TasaPM",     # hoja con PD12301MD (Tasa de Referencia)
 
     # APIs externas
-    "fred_api_key": "TU_API_KEY",
+    "fred_api_key": "96fa168ee9a9a4c1fcf323983db5ba64",
     "proxy": "http://2577:fgh1103.@bcrproxy:8080",
 
     # Códigos BCRP (solo como referencia; la lectura es desde archivo)
