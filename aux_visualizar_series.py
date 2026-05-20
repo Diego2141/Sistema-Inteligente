@@ -131,52 +131,43 @@ if not df_banc.empty:
     sistema["neto"] = sistema["D"] - sistema["R"]
 
     # Máximo para escalar las barras indicadoras de gap
-    max_d = (sistema["D"] / 1e6).max()
-    max_r = (sistema["R"] / 1e6).max()
-
-    # Días sin ninguna transacción en el sistema (todos los bancos en cero)
     dias_sin_data = [f for f in cal_completo if f not in fechas_con_data]
 
-    fig3, axes3 = plt.subplots(3, 1, figsize=(14, 11), sharex=True)
+    d_mm    =  sistema["D"] / 1e6          # depósitos: positivo
+    r_mm    = -sistema["R"] / 1e6          # retiros: negativo (hacia abajo)
+    neto_mm =  sistema["neto"] / 1e6
+    ma22    =  neto_mm.rolling(22, min_periods=5).mean()
 
-    # Barras grises finas en el fondo para marcar días sin transacciones
-    for ax, max_val in [(axes3[0], max_d), (axes3[1], max_r)]:
-        if dias_sin_data:
-            ax.bar(dias_sin_data, [max_val * 0.015] * len(dias_sin_data),
-                   color="lightgray", width=1, alpha=0.9, zorder=0, label="sin transacciones")
+    fig3, ax = plt.subplots(figsize=(14, 6))
 
-    ma22_d    = (sistema["D"] / 1e6).rolling(22, min_periods=5).mean()
-    ma22_r    = (sistema["R"] / 1e6).rolling(22, min_periods=5).mean()
-    ma22_neto = (sistema["neto"] / 1e6).rolling(22, min_periods=5).mean()
+    # Días sin transacciones: franja gris muy fina
+    if dias_sin_data:
+        ax.bar(dias_sin_data, [0.015 * d_mm.max()] * len(dias_sin_data),
+               color="lightgray", width=1, alpha=0.7, zorder=0)
+        ax.bar(dias_sin_data, [-0.015 * d_mm.max()] * len(dias_sin_data),
+               color="lightgray", width=1, alpha=0.7, zorder=0)
 
-    axes3[0].bar(sistema.index, sistema["D"] / 1e6, color="steelblue", width=1, alpha=0.5, zorder=1)
-    axes3[0].plot(sistema.index, ma22_d, color="navy", lw=1.2, zorder=2, label="MA 22d")
-    axes3[0].set_title("Depósitos — Sistema Total (millones USD)", fontweight="bold")
-    axes3[0].set_ylabel("Millones USD")
-    axes3[0].set_ylim(bottom=0)
-    axes3[0].legend(fontsize=7, loc="upper left")
-    axes3[0].grid(True, alpha=0.3)
+    # Depósitos arriba (azul), retiros abajo (rojo)
+    ax.bar(sistema.index, d_mm, color="steelblue", width=1, alpha=0.6,
+           zorder=1, label="Depósitos")
+    ax.bar(sistema.index, r_mm, color="tomato",    width=1, alpha=0.6,
+           zorder=1, label="Retiros")
 
-    axes3[1].bar(sistema.index, sistema["R"] / 1e6, color="tomato", width=1, alpha=0.5, zorder=1)
-    axes3[1].plot(sistema.index, ma22_r, color="darkred", lw=1.2, zorder=2, label="MA 22d")
-    axes3[1].set_title("Retiros — Sistema Total (millones USD)", fontweight="bold")
-    axes3[1].set_ylabel("Millones USD")
-    axes3[1].set_ylim(bottom=0)
-    axes3[1].legend(fontsize=7, loc="upper left")
-    axes3[1].grid(True, alpha=0.3)
+    # Neto como línea naranja + MA 22d más gruesa
+    ax.plot(sistema.index, neto_mm, lw=0.5, color="darkorange", alpha=0.4, zorder=2)
+    ax.plot(sistema.index, ma22,    lw=1.5, color="darkorange", alpha=1.0, zorder=3,
+            label="Flujo neto MA 22d")
 
-    axes3[2].plot(sistema.index, sistema["neto"] / 1e6, lw=0.6, color="darkorange", alpha=0.5)
-    axes3[2].plot(sistema.index, ma22_neto, color="darkorange", lw=1.5, alpha=1.0, label="MA 22d")
-    axes3[2].axhline(0, color="black", lw=0.8)
-    axes3[2].set_title("Flujo Neto D−R — Sistema Total (millones USD)", fontweight="bold")
-    axes3[2].set_ylabel("Millones USD")
-    axes3[2].legend(fontsize=7, loc="upper left")
-    axes3[2].xaxis.set_major_locator(mdates.YearLocator(2))
-    axes3[2].xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
-    axes3[2].tick_params(axis="x", rotation=45)
-    axes3[2].grid(True, alpha=0.3)
+    ax.axhline(0, color="black", lw=0.8, zorder=4)
+    ax.set_ylabel("Millones USD")
+    ax.set_title("Flujos Sistema Financiero — Depósitos / Retiros / Neto (millones USD)",
+                 fontweight="bold")
+    ax.xaxis.set_major_locator(mdates.YearLocator(2))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+    ax.tick_params(axis="x", rotation=45)
+    ax.legend(fontsize=8, loc="upper left")
+    ax.grid(True, alpha=0.3)
 
-    plt.suptitle("Flujos Sistema Financiero — Datos Reales", fontsize=13, fontweight="bold")
     plt.tight_layout()
     plt.savefig(
         r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Clean\flujos_sistema.png",
