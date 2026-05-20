@@ -61,7 +61,7 @@ PARAMS = {
     "años_calendario": list(range(2015, 2031)),
 
     # Rutas archivos manuales
-    "ruta_datos_bancarios": r"RUTA\datos_bancarios.xlsx",
+    "ruta_datos_bancarios": r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Raw\Transacciones_BancaLocal.xlsx",
     "ruta_confirmados": r"RUTA\confirmados.xlsx",
     "ruta_intervencion": r"RUTA\intervencion.xlsx",
     "ruta_igv": r"RUTA\fechas_igv.xlsx",

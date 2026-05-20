@@ -1,0 +1,25 @@
+# Datos sensibles — no subir al repositorio
+1. Data/Raw/*.xlsx
+1. Data/Raw/*.csv
+1. Data/Raw/*.xls
+
+# Excepciones: archivos de referencia no confidenciales
+!1. Data/Raw/series_bcrp.xlsx
+
+# Outputs generados
+1. Data/Clean/matriz_features.xlsx
+*.parquet
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+
+# Spyder
+.spyproject/
+
+# Modelos entrenados
+*.txt
+*.model
+!requirements.txt
