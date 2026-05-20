@@ -117,10 +117,49 @@ else:
     print("Sin datos bancarios cargados.")
 
 # ─────────────────────────────────────────────────────────────────
-# BLOQUE 3: Features de calendario — año 2024
+# BLOQUE 3: Flujos del sistema completo (D, R, neto)
+# ─────────────────────────────────────────────────────────────────
+if not df_banc.empty:
+    sistema = df_banc.groupby("fecha")[["R", "D"]].sum()
+    sistema["neto"] = sistema["D"] - sistema["R"]
+
+    fig3, axes3 = plt.subplots(3, 1, figsize=(14, 11), sharex=True)
+
+    axes3[0].bar(sistema.index, sistema["D"], color="steelblue", width=1, alpha=0.8)
+    axes3[0].set_title("Depósitos — Sistema Total (USD)", fontweight="bold")
+    axes3[0].set_ylabel("USD")
+    axes3[0].grid(True, alpha=0.3)
+
+    axes3[1].bar(sistema.index, sistema["R"], color="tomato", width=1, alpha=0.8)
+    axes3[1].set_title("Retiros — Sistema Total (USD)", fontweight="bold")
+    axes3[1].set_ylabel("USD")
+    axes3[1].grid(True, alpha=0.3)
+
+    axes3[2].bar(sistema.index, sistema["neto"],
+                 color=["steelblue" if v >= 0 else "tomato" for v in sistema["neto"]],
+                 width=1, alpha=0.8)
+    axes3[2].axhline(0, color="black", lw=0.8)
+    axes3[2].set_title("Flujo Neto D−R — Sistema Total (USD)", fontweight="bold")
+    axes3[2].set_ylabel("USD")
+    axes3[2].xaxis.set_major_locator(mdates.YearLocator(2))
+    axes3[2].xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+    axes3[2].tick_params(axis="x", rotation=45)
+    axes3[2].grid(True, alpha=0.3)
+
+    plt.suptitle("Flujos Sistema Financiero — Datos Reales", fontsize=13, fontweight="bold")
+    plt.tight_layout()
+    plt.savefig(
+        r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Clean\flujos_sistema.png",
+        dpi=150, bbox_inches="tight"
+    )
+    plt.show()
+
+# ─────────────────────────────────────────────────────────────────
+# BLOQUE 4: Features de calendario — año 2023
+# (2023: 28-jul es viernes hábil → is_fiestas_patrias visible)
 # ─────────────────────────────────────────────────────────────────
 peru_bday2 = CustomBusinessDay(holidays=peru_holidays)
-fechas_cal = pd.date_range("2024-01-01", "2024-12-31", freq=peru_bday2)
+fechas_cal = pd.date_range("2021-01-01", "2021-12-31", freq=peru_bday2)
 df_cal = bfm._build_seasonal_table(
     fechas_cal, peru_holidays, fechas_igv, fechas_elecciones, peru_bday2
 )
@@ -132,11 +171,11 @@ cols_cal = [
     "is_post_feriado", "is_eleccion",
 ]
 
-fig3, axes3 = plt.subplots(4, 3, figsize=(16, 12))
-axes3 = axes3.flatten()
+fig4, axes4 = plt.subplots(4, 3, figsize=(16, 12))
+axes4 = axes4.flatten()
 
 for i, col in enumerate(cols_cal):
-    ax = axes3[i]
+    ax = axes4[i]
     if col in df_cal.columns:
         ax.plot(df_cal.index, df_cal[col], lw=0.8, color="steelblue")
         ax.set_title(col, fontsize=9, fontweight="bold")
@@ -149,10 +188,10 @@ for i, col in enumerate(cols_cal):
                 transform=ax.transAxes, color="gray", fontsize=9)
         ax.set_title(col, fontsize=9)
 
-plt.suptitle("Features de Calendario — Año 2024", fontsize=13, fontweight="bold")
+plt.suptitle("Features de Calendario — Año 2021 (Elecciones + Fiestas Patrias)", fontsize=13, fontweight="bold")
 plt.tight_layout()
 plt.savefig(
-    r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Clean\features_calendario.png",
+    r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Clean\features_calendario_2021.png",
     dpi=150, bbox_inches="tight"
 )
 plt.show()
