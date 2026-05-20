@@ -120,27 +120,39 @@ else:
 # BLOQUE 3: Flujos del sistema completo (D, R, neto)
 # ─────────────────────────────────────────────────────────────────
 if not df_banc.empty:
+    fechas_con_data = set(df_banc.groupby("fecha").groups.keys())
     sistema = df_banc.groupby("fecha")[["R", "D"]].sum()
 
-    # Reindexar al calendario hábil peruano completo para que días sin
-    # transacciones aparezcan como barra en cero y no como hueco vacío
     cal_completo = pd.bdate_range(
         start=sistema.index.min(), end=sistema.index.max(), freq=peru_bday
     )
     sistema = sistema.reindex(cal_completo, fill_value=0)
     sistema.index.name = "fecha"
-
     sistema["neto"] = sistema["D"] - sistema["R"]
+
+    # Máximo para escalar las barras indicadoras de gap
+    max_d = (sistema["D"] / 1e6).max()
+    max_r = (sistema["R"] / 1e6).max()
+
+    # Días sin ninguna transacción en el sistema (todos los bancos en cero)
+    dias_sin_data = [f for f in cal_completo if f not in fechas_con_data]
 
     fig3, axes3 = plt.subplots(3, 1, figsize=(14, 11), sharex=True)
 
-    axes3[0].bar(sistema.index, sistema["D"] / 1e6, color="steelblue", width=1, alpha=0.8)
+    # Barras grises finas en el fondo para marcar días sin transacciones
+    for ax, max_val in [(axes3[0], max_d), (axes3[1], max_r)]:
+        if dias_sin_data:
+            ax.bar(dias_sin_data, [max_val * 0.015] * len(dias_sin_data),
+                   color="lightgray", width=1, alpha=0.9, zorder=0, label="sin transacciones")
+
+    axes3[0].bar(sistema.index, sistema["D"] / 1e6, color="steelblue", width=1, alpha=0.8, zorder=1)
     axes3[0].set_title("Depósitos — Sistema Total (millones USD)", fontweight="bold")
     axes3[0].set_ylabel("Millones USD")
     axes3[0].set_ylim(bottom=0)
+    axes3[0].legend(fontsize=7, loc="upper left")
     axes3[0].grid(True, alpha=0.3)
 
-    axes3[1].bar(sistema.index, sistema["R"] / 1e6, color="tomato", width=1, alpha=0.8)
+    axes3[1].bar(sistema.index, sistema["R"] / 1e6, color="tomato", width=1, alpha=0.8, zorder=1)
     axes3[1].set_title("Retiros — Sistema Total (millones USD)", fontweight="bold")
     axes3[1].set_ylabel("Millones USD")
     axes3[1].set_ylim(bottom=0)
