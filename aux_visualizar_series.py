@@ -155,8 +155,8 @@ if not df_banc.empty:
     plt.show()
 
 # ─────────────────────────────────────────────────────────────────
-# BLOQUE 4: Features de calendario — año 2023
-# (2023: 28-jul es viernes hábil → is_fiestas_patrias visible)
+# BLOQUE 4: Features de calendario — año 2021
+# (28-jul=miércoles hábil → is_fiestas_patrias; 11-abr y 6-jun → elecciones)
 # ─────────────────────────────────────────────────────────────────
 peru_bday2 = CustomBusinessDay(holidays=peru_holidays)
 fechas_cal = pd.date_range("2021-01-01", "2021-12-31", freq=peru_bday2)
@@ -164,14 +164,25 @@ df_cal = bfm._build_seasonal_table(
     fechas_cal, peru_holidays, fechas_igv, fechas_elecciones, peru_bday2
 )
 
+# Diagnóstico: verificar si las fechas electorales de 2021 son feriados
+fechas_elec_2021 = [pd.Timestamp("2021-04-11"), pd.Timestamp("2021-06-06")]
+for fe in fechas_elec_2021:
+    en_feriados = fe in peru_holidays
+    en_cal      = fe in fechas_cal
+    print(f"  {fe.date()} — en peru_holidays: {en_feriados} | en fechas_cal: {en_cal} "
+          f"| is_eleccion en df_cal: "
+          f"{int(df_cal.loc[fe, 'is_eleccion']) if fe in df_cal.index else 'NO está en índice'}")
+
 cols_cal = [
     "dia_semana", "mes", "pos_en_mes", "dias_al_cierre_mes",
     "dias_desde_cierre_mes", "is_quincena", "is_cierre_encaje",
     "is_fiestas_patrias", "is_fin_anio", "is_pre_feriado",
-    "is_post_feriado", "is_eleccion",
+    "is_post_feriado", "is_eleccion", "is_pre_eleccion", "is_post_eleccion",
 ]
 
-fig4, axes4 = plt.subplots(4, 3, figsize=(16, 12))
+n_cols_cal = len(cols_cal)
+n_rows_cal = (n_cols_cal + 2) // 3  # filas necesarias para 3 columnas
+fig4, axes4 = plt.subplots(n_rows_cal, 3, figsize=(16, 4 * n_rows_cal))
 axes4 = axes4.flatten()
 
 for i, col in enumerate(cols_cal):
@@ -183,10 +194,16 @@ for i, col in enumerate(cols_cal):
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%b"))
         ax.tick_params(axis="x", rotation=45, labelsize=7)
         ax.grid(True, alpha=0.3)
+        if df_cal[col].max() <= 1 and df_cal[col].min() >= 0:
+            ax.set_ylim(-0.1, 1.3)  # escala fija para features binarias
     else:
         ax.text(0.5, 0.5, f"{col}\n(no disponible)", ha="center", va="center",
                 transform=ax.transAxes, color="gray", fontsize=9)
         ax.set_title(col, fontsize=9)
+
+# Ocultar subplots vacíos
+for j in range(n_cols_cal, len(axes4)):
+    axes4[j].set_visible(False)
 
 plt.suptitle("Features de Calendario — Año 2021 (Elecciones + Fiestas Patrias)", fontsize=13, fontweight="bold")
 plt.tight_layout()
