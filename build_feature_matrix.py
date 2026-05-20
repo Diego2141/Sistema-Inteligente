@@ -205,17 +205,39 @@ def load_manual_data(params):
         "intervencion": pd.Series(dtype=float),
     }
 
-    # Datos bancarios
+    # Datos bancarios — formato Transacciones_BancaLocal.xlsx
+    # Columnas: Broker (banco), Fecha Valor (fecha), Delivery Principal Usd (monto)
+    # Monto < 0 → Retiro (R) | Monto > 0 → Depósito (D)
     try:
-        df = pd.read_excel(params["ruta_datos_bancarios"])
-        if df.empty:
+        df_raw = pd.read_excel(params["ruta_datos_bancarios"])
+        if df_raw.empty:
             logger.warning(f"  Archivo bancarios vacío: {params['ruta_datos_bancarios']}")
         else:
-            if "fecha" in df.columns:
-                df["fecha"] = pd.to_datetime(df["fecha"])
-                df = df.set_index("fecha").sort_index()
-            resultado["bancarios"] = df
-            logger.info(f"  Datos bancarios cargados: {df.shape}")
+            df_raw["Fecha Valor"] = pd.to_datetime(df_raw["Fecha Valor"])
+            df_raw["monto"] = pd.to_numeric(df_raw["Delivery Principal Usd"], errors="coerce")
+
+            # Separar retiros y depósitos
+            df_raw["R"] = df_raw["monto"].clip(upper=0).abs()  # negativos → positivos
+            df_raw["D"] = df_raw["monto"].clip(lower=0)        # positivos
+
+            # Agregar por banco y fecha
+            df_banco = (
+                df_raw.groupby(["Broker", "Fecha Valor"])[["R", "D"]]
+                .sum()
+                .reset_index()
+                .rename(columns={"Broker": "banco", "Fecha Valor": "fecha"})
+            )
+            df_banco["fecha"] = pd.to_datetime(df_banco["fecha"])
+            df_banco = df_banco.sort_values(["banco", "fecha"])
+
+            resultado["bancarios"] = df_banco
+            n_bancos = df_banco["banco"].nunique()
+            f_min = df_banco["fecha"].min().date()
+            f_max = df_banco["fecha"].max().date()
+            logger.info(
+                f"  Datos bancarios cargados: {len(df_banco):,} filas | "
+                f"{n_bancos} bancos | {f_min} → {f_max}"
+            )
     except Exception as e:
         logger.warning(f"  No se pudo cargar datos bancarios: {params['ruta_datos_bancarios']} | {e}")
 
