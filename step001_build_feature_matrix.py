@@ -75,6 +75,8 @@ PARAMS = {
     "ruta_bcrp": r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Raw\series_bcrp.xlsx",
     "hoja_bcrp_embi":     "EMBIG",      # hoja con PD04709XD (Spread EMBIG Perú)
     "hoja_bcrp_tasa_ref": "TasaPM",     # hoja con PD12301MD (Tasa de Referencia)
+    "hoja_bcrp_tc_compra": "TC Compra", # hoja con TC compra BCRP
+    "hoja_bcrp_tc_venta":  "TC Venta",  # hoja con TC venta BCRP
 
     # APIs externas
     "fred_api_key": "96fa168ee9a9a4c1fcf323983db5ba64",
@@ -83,7 +85,7 @@ PARAMS = {
     # Códigos BCRP (solo como referencia; la lectura es desde archivo)
     "bcrp_embi": "PD04709XD",      # Spread EMBIG Perú (pbs) — diaria
     "bcrp_tasa_ref": "PD12301MD",  # Tasa de Referencia Política Monetaria — diaria
-    # TC no se descarga de BCRP: se usa Yahoo Finance PEN=X
+    # TC se lee de BCRP (promedio compra/venta) — Yahoo Finance tenía outliers
 
     # Tickers Yahoo Finance
     "ticker_vix": "^VIX",
@@ -579,8 +581,7 @@ def download_external_series(params):
     series = {}
 
     # 4a. Yahoo Finance
-    series["VIX"] = _descargar_yahoo(params["ticker_vix"], inicio, fin, proxies, "VIX")
-    series["TC_PEN_USD"] = _descargar_yahoo(params["ticker_tc"], inicio, fin, proxies, "TC_PEN_USD")
+    series["VIX"]  = _descargar_yahoo(params["ticker_vix"],  inicio, fin, proxies, "VIX")
     series["T10Y"] = _descargar_yahoo(params["ticker_t10y"], inicio, fin, proxies, "T10Y")
 
     # 4b. FRED
@@ -594,11 +595,26 @@ def download_external_series(params):
         series["FED_FUNDS"] = pd.Series(dtype=float, name="FED_FUNDS")
 
     # 4c. Series BCRP — leídas desde Excel descargado manualmente con Add-In BCRPData
-    # Flujo: BCRPData → Obtener Datos (EMBI en hoja "EMBI", Tasa Ref en hoja "TasaRef") → guardar
     ruta_bcrp = params["ruta_bcrp"]
     series["EMBI_PERU"]     = _leer_bcrp_excel(ruta_bcrp, "EMBI_PERU",     hoja=params["hoja_bcrp_embi"])
     series["TASA_REF_BCRP"] = _leer_bcrp_excel(ruta_bcrp, "TASA_REF_BCRP", hoja=params["hoja_bcrp_tasa_ref"])
-    # TC_PEN_USD ya viene de Yahoo Finance (PEN=X) — no se descarga del BCRP
+
+    # TC_PEN_USD = promedio(TC Compra, TC Venta) del BCRP — reemplaza Yahoo Finance (tenía outliers)
+    tc_compra = _leer_bcrp_excel(ruta_bcrp, "TC_COMPRA", hoja=params["hoja_bcrp_tc_compra"])
+    tc_venta  = _leer_bcrp_excel(ruta_bcrp, "TC_VENTA",  hoja=params["hoja_bcrp_tc_venta"])
+    if not tc_compra.empty and not tc_venta.empty:
+        tc_df = pd.concat([tc_compra.rename("compra"), tc_venta.rename("venta")], axis=1)
+        series["TC_PEN_USD"] = tc_df.mean(axis=1).rename("TC_PEN_USD")
+        logger.info("  TC_PEN_USD: promedio BCRP compra/venta cargado.")
+    elif not tc_venta.empty:
+        series["TC_PEN_USD"] = tc_venta.rename("TC_PEN_USD")
+        logger.warning("  TC_PEN_USD: solo TC Venta disponible (sin TC Compra).")
+    elif not tc_compra.empty:
+        series["TC_PEN_USD"] = tc_compra.rename("TC_PEN_USD")
+        logger.warning("  TC_PEN_USD: solo TC Compra disponible (sin TC Venta).")
+    else:
+        logger.warning("  TC_PEN_USD: no se encontraron hojas TC Compra/Venta en series_bcrp.xlsx.")
+        series["TC_PEN_USD"] = pd.Series(dtype=float, name="TC_PEN_USD")
 
     # Alinear al índice de fechas del rango
     idx = pd.bdate_range(start=inicio, end=fin)
@@ -1228,10 +1244,10 @@ def build_data_dictionary(params):
     add("VIX",              "Yahoo Finance",  "Índice de volatilidad implícita S&P 500",          0, None)
     add("delta_VIX",        "Yahoo Finance",  "Variación diaria del VIX",                         1, None)
     add("VIX_ma22",         "Yahoo Finance",  "Media móvil 22d del VIX",                          None, None)
-    add("TC_PEN_USD",       "Yahoo Finance",  "Tipo de cambio PEN/USD (mercado)",                 0, None)
-    add("delta_TC",         "Yahoo Finance",  "Variación diaria del tipo de cambio",              1, None)
-    add("tc_vol_5d",        "Yahoo Finance",  "Volatilidad rolling 5d de retornos del TC",        None, None)
-    add("tc_vol_22d",       "Yahoo Finance",  "Volatilidad rolling 22d de retornos del TC",       None, None)
+    add("TC_PEN_USD",       "BCRP Add-In",    "Tipo de cambio PEN/USD (promedio compra/venta)",   0, None)
+    add("delta_TC",         "BCRP Add-In",    "Variación diaria del tipo de cambio",              1, None)
+    add("tc_vol_5d",        "BCRP Add-In",    "Volatilidad rolling 5d de retornos del TC",        None, None)
+    add("tc_vol_22d",       "BCRP Add-In",    "Volatilidad rolling 22d de retornos del TC",       None, None)
     add("EMBI_PERU",        "API BCRP",       "EMBI Perú (riesgo país)",                          0, None)
     add("delta_EMBI",       "API BCRP",       "Variación diaria del EMBI Perú",                   1, None)
     add("TASA_REF_BCRP",    "API BCRP",       "Tasa de referencia del BCRP",                      0, None)
