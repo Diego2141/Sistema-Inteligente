@@ -177,11 +177,11 @@ cols_cal = [
     "dia_semana", "mes", "pos_en_mes", "dias_al_cierre_mes",
     "dias_desde_cierre_mes", "is_quincena", "is_cierre_encaje",
     "is_fiestas_patrias", "is_fin_anio", "is_pre_feriado",
-    "is_post_feriado", "is_eleccion", "is_pre_eleccion", "is_post_eleccion",
+    "is_post_feriado", "is_pre_eleccion", "is_post_eleccion",
 ]
 
 n_cols_cal = len(cols_cal)
-n_rows_cal = (n_cols_cal + 2) // 3  # filas necesarias para 3 columnas
+n_rows_cal = (n_cols_cal + 2) // 3
 fig4, axes4 = plt.subplots(n_rows_cal, 3, figsize=(16, 4 * n_rows_cal))
 axes4 = axes4.flatten()
 
@@ -195,20 +195,83 @@ for i, col in enumerate(cols_cal):
         ax.tick_params(axis="x", rotation=45, labelsize=7)
         ax.grid(True, alpha=0.3)
         if df_cal[col].max() <= 1 and df_cal[col].min() >= 0:
-            ax.set_ylim(-0.1, 1.3)  # escala fija para features binarias
+            ax.set_ylim(-0.1, 1.3)
     else:
         ax.text(0.5, 0.5, f"{col}\n(no disponible)", ha="center", va="center",
                 transform=ax.transAxes, color="gray", fontsize=9)
         ax.set_title(col, fontsize=9)
 
-# Ocultar subplots vacíos
 for j in range(n_cols_cal, len(axes4)):
     axes4[j].set_visible(False)
 
-plt.suptitle("Features de Calendario — Año 2021 (Elecciones + Fiestas Patrias)", fontsize=13, fontweight="bold")
+plt.suptitle("Features de Calendario — Año 2021", fontsize=13, fontweight="bold")
 plt.tight_layout()
 plt.savefig(
     r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Clean\features_calendario_2021.png",
+    dpi=150, bbox_inches="tight"
+)
+plt.show()
+
+# ─────────────────────────────────────────────────────────────────
+# BLOQUE 5: Zoom en ventanas electorales 2021
+# Elecciones siempre en domingo → is_eleccion nunca activa en días hábiles
+# is_pre/post_eleccion captura los 7 días calendario alrededor
+# ─────────────────────────────────────────────────────────────────
+elecciones_2021 = [
+    ("1ra vuelta", pd.Timestamp("2021-04-11")),
+    ("2da vuelta", pd.Timestamp("2021-06-06")),
+]
+
+fig5, axes5 = plt.subplots(2, 1, figsize=(14, 8))
+
+for ax, (vuelta, elec_day) in zip(axes5, elecciones_2021):
+    ventana_ini = elec_day - pd.Timedelta(days=14)
+    ventana_fin = elec_day + pd.Timedelta(days=14)
+    mask = (df_cal.index >= ventana_ini) & (df_cal.index <= ventana_fin)
+    sub  = df_cal[mask]
+
+    dias_hab = sub.index
+    x = range(len(dias_hab))
+    etiquetas = [f"{d.strftime('%a %d-%b')}" for d in dias_hab]
+
+    # Barras pre (naranja) y post (verde)
+    pre_vals  = sub["is_pre_eleccion"].values  if "is_pre_eleccion"  in sub.columns else [0]*len(sub)
+    post_vals = sub["is_post_eleccion"].values if "is_post_eleccion" in sub.columns else [0]*len(sub)
+
+    ax.bar(x, pre_vals,  color="darkorange", alpha=0.8, label="is_pre_eleccion",  width=0.4, align="edge")
+    ax.bar([xi + 0.4 for xi in x], post_vals, color="steelblue", alpha=0.8,
+           label="is_post_eleccion", width=0.4, align="edge")
+
+    # Línea vertical en domingo de elección (no es día hábil, cae entre barras)
+    # Calcular posición interpolada del domingo dentro del eje x
+    dias_antes = sum(1 for d in dias_hab if d < elec_day)
+    ax.axvline(x=dias_antes - 0.2, color="red", lw=2, ls="--",
+               label=f"Domingo elección\n({elec_day.strftime('%d %b')})")
+
+    # Anotar el domingo
+    ax.annotate(f"ELECCIÓN\n{elec_day.strftime('%d-%b')}\n(domingo)",
+                xy=(dias_antes - 0.2, 0.5), xytext=(dias_antes + 0.5, 0.85),
+                fontsize=8, color="red", fontweight="bold",
+                arrowprops=dict(arrowstyle="->", color="red", lw=1.2))
+
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(etiquetas, rotation=45, ha="right", fontsize=8)
+    ax.set_ylim(-0.05, 1.3)
+    ax.set_yticks([0, 1])
+    ax.set_yticklabels(["0 (inactivo)", "1 (activo)"])
+    ax.set_title(f"Ventana electoral — {vuelta} ({elec_day.strftime('%d %b %Y')})",
+                 fontsize=11, fontweight="bold")
+    ax.legend(fontsize=9, loc="upper left")
+    ax.grid(True, axis="y", alpha=0.3)
+
+plt.suptitle(
+    "Features Electorales 2021 — is_pre/post_eleccion (ventana ±14 días calendario)\n"
+    "is_eleccion siempre 0: las elecciones peruanas son en domingo (día no hábil)",
+    fontsize=11, fontweight="bold"
+)
+plt.tight_layout()
+plt.savefig(
+    r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Clean\features_electorales_2021.png",
     dpi=150, bbox_inches="tight"
 )
 plt.show()
