@@ -44,7 +44,7 @@ PARAMS = {
     "quantiles": [0.01, 0.05, 0.50, 0.95, 0.99],
 
     # Modo demo (True mientras no lleguen los datos reales)
-    "usar_datos_demo": True,
+    "usar_datos_demo": False,
 
     # Agrupación de bancos
     "umbral_banco_pequeño_pct": 0.05,   # bancos con < 5% del volumen → Otros
