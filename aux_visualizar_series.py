@@ -182,10 +182,21 @@ if not df_banc.empty:
         dpi=150, bbox_inches="tight"
     )
     plt.show()
-    print(f"\nFlujo neto — estadísticas (millones USD):")
-    print(f"  Media  : {neto_mm.mean():.1f}  |  Std: {neto_mm.std():.1f}")
-    print(f"  Mín    : {neto_mm.min():.1f}  |  Máx: {neto_mm.max():.1f}")
-    print(f"  Obs    : {len(neto_mm):,}  |  Periodo: {neto_mm.index.min().date()} → {neto_mm.index.max().date()}")
+    # Exportar flujos diarios a Excel
+    ruta_flujos_clean = (
+        r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente"
+        r"\1. Data\Clean\flujos_diarios.xlsx"
+    )
+    flujos_export = pd.DataFrame({
+        "depositos_musd":  sistema["D"] / 1e6,
+        "retiros_musd":    sistema["R"] / 1e6,
+        "neto_musd":       sistema["neto"] / 1e6,
+    })
+    flujos_export.index.name = "fecha"
+    flujos_export.to_excel(ruta_flujos_clean)
+    print(f"\nFlujos diarios exportados: {ruta_flujos_clean}")
+    print(f"  Filas  : {len(flujos_export):,}")
+    print(f"  Periodo: {flujos_export.index.min().date()} → {flujos_export.index.max().date()}")
 
 # ─────────────────────────────────────────────────────────────────
 # BLOQUE 4: Features de calendario — año 2021
