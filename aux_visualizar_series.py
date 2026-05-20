@@ -131,34 +131,17 @@ if not df_banc.empty:
     sistema["neto"] = sistema["D"] - sistema["R"]
 
     # Máximo para escalar las barras indicadoras de gap
-    dias_sin_data = [f for f in cal_completo if f not in fechas_con_data]
-
-    d_mm    =  sistema["D"] / 1e6          # depósitos: positivo
-    r_mm    = -sistema["R"] / 1e6          # retiros: negativo (hacia abajo)
+    d_mm    =  sistema["D"] / 1e6
+    r_mm    = -sistema["R"] / 1e6
     neto_mm =  sistema["neto"] / 1e6
-    ma22    =  neto_mm.rolling(22, min_periods=5).mean()
 
     fig3, ax = plt.subplots(figsize=(14, 6))
 
-    # Días sin transacciones: franja gris muy fina
-    if dias_sin_data:
-        ax.bar(dias_sin_data, [0.015 * d_mm.max()] * len(dias_sin_data),
-               color="lightgray", width=1, alpha=0.7, zorder=0)
-        ax.bar(dias_sin_data, [-0.015 * d_mm.max()] * len(dias_sin_data),
-               color="lightgray", width=1, alpha=0.7, zorder=0)
+    ax.bar(sistema.index, d_mm, color="steelblue", width=1, alpha=0.7, zorder=1, label="Depósitos")
+    ax.bar(sistema.index, r_mm, color="tomato",    width=1, alpha=0.7, zorder=1, label="Retiros")
+    ax.plot(sistema.index, neto_mm, lw=0.8, color="darkorange", alpha=0.9, zorder=2, label="Flujo neto")
 
-    # Depósitos arriba (azul), retiros abajo (rojo)
-    ax.bar(sistema.index, d_mm, color="steelblue", width=1, alpha=0.6,
-           zorder=1, label="Depósitos")
-    ax.bar(sistema.index, r_mm, color="tomato",    width=1, alpha=0.6,
-           zorder=1, label="Retiros")
-
-    # Neto como línea naranja + MA 22d más gruesa
-    ax.plot(sistema.index, neto_mm, lw=0.5, color="darkorange", alpha=0.4, zorder=2)
-    ax.plot(sistema.index, ma22,    lw=1.5, color="darkorange", alpha=1.0, zorder=3,
-            label="Flujo neto MA 22d")
-
-    ax.axhline(0, color="black", lw=0.8, zorder=4)
+    ax.axhline(0, color="black", lw=0.8, zorder=3)
     ax.set_ylabel("Millones USD")
     ax.set_title("Flujos Sistema Financiero — Depósitos / Retiros / Neto (millones USD)",
                  fontweight="bold")
