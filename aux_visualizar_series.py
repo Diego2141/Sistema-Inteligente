@@ -121,6 +121,15 @@ else:
 # ─────────────────────────────────────────────────────────────────
 if not df_banc.empty:
     sistema = df_banc.groupby("fecha")[["R", "D"]].sum()
+
+    # Reindexar al calendario hábil peruano completo para que días sin
+    # transacciones aparezcan como barra en cero y no como hueco vacío
+    cal_completo = pd.bdate_range(
+        start=sistema.index.min(), end=sistema.index.max(), freq=peru_bday
+    )
+    sistema = sistema.reindex(cal_completo, fill_value=0)
+    sistema.index.name = "fecha"
+
     sistema["neto"] = sistema["D"] - sistema["R"]
 
     fig3, axes3 = plt.subplots(3, 1, figsize=(14, 11), sharex=True)
