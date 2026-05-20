@@ -125,13 +125,13 @@ if not df_banc.empty:
 
     fig3, axes3 = plt.subplots(3, 1, figsize=(14, 11), sharex=True)
 
-    axes3[0].plot(sistema.index, sistema["D"] / 1e6, lw=0.7, color="steelblue", alpha=0.9)
+    axes3[0].bar(sistema.index, sistema["D"] / 1e6, color="steelblue", width=1, alpha=0.8)
     axes3[0].set_title("Depósitos — Sistema Total (millones USD)", fontweight="bold")
     axes3[0].set_ylabel("Millones USD")
     axes3[0].set_ylim(bottom=0)
     axes3[0].grid(True, alpha=0.3)
 
-    axes3[1].plot(sistema.index, sistema["R"] / 1e6, lw=0.7, color="tomato", alpha=0.9)
+    axes3[1].bar(sistema.index, sistema["R"] / 1e6, color="tomato", width=1, alpha=0.8)
     axes3[1].set_title("Retiros — Sistema Total (millones USD)", fontweight="bold")
     axes3[1].set_ylabel("Millones USD")
     axes3[1].set_ylim(bottom=0)
