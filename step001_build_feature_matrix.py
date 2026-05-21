@@ -114,9 +114,17 @@ def build_peru_calendar(años, ruta_igv, ruta_elecciones):
         from pandas.tseries.offsets import CustomBusinessDay
 
         peru_hols = holidays.Peru(years=años)
-        peru_holidays = pd.to_datetime(list(peru_hols.keys()))
-        peru_bday = CustomBusinessDay(holidays=peru_holidays)
-        logger.info(f"  Feriados cargados: {len(peru_holidays)} días en {min(años)}-{max(años)}")
+        us_hols   = holidays.UnitedStates(years=años)
+
+        # Unión de feriados PE + US: un día no hábil si lo es en cualquiera de los dos países
+        joint_hols_keys = set(peru_hols.keys()) | set(us_hols.keys())
+        peru_holidays   = pd.to_datetime(sorted(joint_hols_keys))
+        peru_bday       = CustomBusinessDay(holidays=peru_holidays)
+
+        logger.info(
+            f"  Feriados cargados: {len(peru_hols)} PE + {len(us_hols)} US "
+            f"= {len(peru_holidays)} únicos en {min(años)}-{max(años)}"
+        )
     except ImportError:
         logger.warning("  Librería 'holidays' no instalada. Usando calendario sin feriados.")
         from pandas.tseries.offsets import BDay
@@ -1263,8 +1271,8 @@ def build_data_dictionary(params):
     add("is_cierre_encaje",      "Calendario", "1 si t+h está en los últimos 2 días hábiles del mes",      None, "t+h")
     add("is_fiestas_patrias",    "Calendario", "1 si t+h cae en semana de Fiestas Patrias (27-29 jul)",    None, "t+h")
     add("is_fin_anio",           "Calendario", "1 si t+h es 28–31 de diciembre",                           None, "t+h")
-    add("is_pre_feriado",        "Calendario / holidays.Peru", "1 si el día siguiente a t+h es feriado",  None, "t+h")
-    add("is_post_feriado",       "Calendario / holidays.Peru", "1 si el día anterior a t+h es feriado",   None, "t+h")
+    add("is_pre_feriado",        "Calendario / holidays.Peru + holidays.US", "1 si el día siguiente a t+h es feriado PE o US",  None, "t+h")
+    add("is_post_feriado",       "Calendario / holidays.Peru + holidays.US", "1 si el día anterior a t+h es feriado PE o US",   None, "t+h")
     add("is_igv",                "Archivo IGV", "1 si t+h es fecha de pago de IGV",                       None, "t+h")
     add("dias_al_igv",           "Archivo IGV", "Días hábiles hasta el próximo vencimiento de IGV (cap 30)", None, "t+h")
     add("is_pre_eleccion",       "Calendario", "1 si t+h está dentro de los 7 días previos a elecciones presidenciales",    None, "t+h")
