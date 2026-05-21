@@ -58,7 +58,7 @@ PARAMS = {
     "ventanas_vol": [5, 22],
 
     # Calendario
-    "años_calendario": list(range(2015, 2031)),
+    "años_calendario": list(range(2009, 2042)),
 
     # Rutas archivos manuales
     "ruta_datos_bancarios": r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Raw\Transacciones_BancaLocal.xlsx",
@@ -815,18 +815,13 @@ def seasonal_features(fecha, bdays_mes_cache, peru_holidays, fechas_igv, fechas_
         is_igv = 0
         dias_al_igv = 30
 
-    # Elecciones
+    # Elecciones — is_eleccion eliminado: elecciones peruanas siempre en domingo (día no hábil)
     if fechas_elecciones:
-        fechas_elec_ts = pd.DatetimeIndex(fechas_elecciones)
-        is_eleccion = int(fecha in fechas_elec_ts)
-        diffs_e = abs((fechas_elec_ts - fecha).days)
-        min_diff = diffs_e.min() if len(diffs_e) > 0 else 999
         is_pre_eleccion = int(0 < (pd.DatetimeIndex(fechas_elecciones) - fecha).days.min() <= 7
                               if any((pd.DatetimeIndex(fechas_elecciones) - fecha).days > 0) else False)
         is_post_eleccion = int(0 < (fecha - pd.DatetimeIndex(fechas_elecciones)).days.min() <= 7
                                if any((fecha - pd.DatetimeIndex(fechas_elecciones)).days > 0) else False)
     else:
-        is_eleccion = 0
         is_pre_eleccion = 0
         is_post_eleccion = 0
 
@@ -858,7 +853,6 @@ def seasonal_features(fecha, bdays_mes_cache, peru_holidays, fechas_igv, fechas_
         "is_post_feriado": is_post_feriado,
         "is_igv": is_igv,
         "dias_al_igv": dias_al_igv,
-        "is_eleccion": is_eleccion,
         "is_pre_eleccion": is_pre_eleccion,
         "is_post_eleccion": is_post_eleccion,
     }
@@ -948,13 +942,12 @@ def _build_seasonal_table(fechas_unicas, peru_holidays, fechas_igv, fechas_elecc
         if len(elec_arr) > 0:
             ts_d  = np.datetime64(ts, "D")
             diffs = (elec_arr - ts_d).astype(int)
-            is_eleccion     = int(ts in elec_set)
-            futuros_e       = diffs[diffs > 0]
-            pasados_e       = (-diffs)[diffs < 0]
+            futuros_e        = diffs[diffs > 0]
+            pasados_e        = (-diffs)[diffs < 0]
             is_pre_eleccion  = int(len(futuros_e) > 0 and futuros_e.min() <= 7)
             is_post_eleccion = int(len(pasados_e) > 0 and pasados_e.min() <= 7)
         else:
-            is_eleccion = is_pre_eleccion = is_post_eleccion = 0
+            is_pre_eleccion = is_post_eleccion = 0
 
         mes = ts.month
         registros.append({
@@ -978,7 +971,6 @@ def _build_seasonal_table(fechas_unicas, peru_holidays, fechas_igv, fechas_elecc
             "is_post_feriado"      : is_post_feriado,
             "is_igv"               : is_igv,
             "dias_al_igv"          : dias_al_igv,
-            "is_eleccion"          : is_eleccion,
             "is_pre_eleccion"      : is_pre_eleccion,
             "is_post_eleccion"     : is_post_eleccion,
         })
@@ -1248,9 +1240,9 @@ def build_data_dictionary(params):
     add("delta_TC",         "BCRP Add-In",    "Variación diaria del tipo de cambio",              1, None)
     add("tc_vol_5d",        "BCRP Add-In",    "Volatilidad rolling 5d de retornos del TC",        None, None)
     add("tc_vol_22d",       "BCRP Add-In",    "Volatilidad rolling 22d de retornos del TC",       None, None)
-    add("EMBI_PERU",        "API BCRP",       "EMBI Perú (riesgo país)",                          0, None)
-    add("delta_EMBI",       "API BCRP",       "Variación diaria del EMBI Perú",                   1, None)
-    add("TASA_REF_BCRP",    "API BCRP",       "Tasa de referencia del BCRP",                      0, None)
+    add("EMBI_PERU",        "BCRP Add-In",    "EMBI Perú (riesgo país)",                          0, None)
+    add("delta_EMBI",       "BCRP Add-In",    "Variación diaria del EMBI Perú",                   1, None)
+    add("TASA_REF_BCRP",    "BCRP Add-In",    "Tasa de referencia del BCRP",                      0, None)
     add("FED_FUNDS",        "FRED API",       "Tasa de política monetaria de la Fed",             0, None)
     add("diferencial_tasas","Calculado",      "TASA_REF_BCRP - FED_FUNDS",                        0, None)
     add("T10Y",             "Yahoo Finance",  "Rendimiento del bono del Tesoro EE.UU. a 10 años", 0, None)
@@ -1275,9 +1267,8 @@ def build_data_dictionary(params):
     add("is_post_feriado",       "Calendario / holidays.Peru", "1 si el día anterior a t+h es feriado",   None, "t+h")
     add("is_igv",                "Archivo IGV", "1 si t+h es fecha de pago de IGV",                       None, "t+h")
     add("dias_al_igv",           "Archivo IGV", "Días hábiles hasta el próximo vencimiento de IGV (cap 30)", None, "t+h")
-    add("is_eleccion",           "Archivo elecciones", "1 si t+h es día de elecciones",                   None, "t+h")
-    add("is_pre_eleccion",       "Archivo elecciones", "1 si t+h está dentro de los 7 días previos a elecciones", None, "t+h")
-    add("is_post_eleccion",      "Archivo elecciones", "1 si t+h está dentro de los 7 días posteriores a elecciones", None, "t+h")
+    add("is_pre_eleccion",       "Calendario", "1 si t+h está dentro de los 7 días previos a elecciones presidenciales",    None, "t+h")
+    add("is_post_eleccion",      "Calendario", "1 si t+h está dentro de los 7 días posteriores a elecciones presidenciales", None, "t+h")
 
     # ── Target ────────────────────────────────────────────────────────────────
     add("target", "Datos bancarios", "Flujo neto = D(b, t+h) - R(b, t+h). NaN si no hay datos.", None, "t+h")

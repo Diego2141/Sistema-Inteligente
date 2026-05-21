@@ -158,30 +158,6 @@ if not df_banc.empty:
     )
     plt.show()
 
-    # ── Verificación: misma serie como línea en millones USD
-    # (equivalente visual al panel naranja de aux_validacion_flujos.py)
-    fig3b, ax3b = plt.subplots(figsize=(14, 4))
-    neto_mm = sistema["neto"] / 1e6  # convertir a millones USD
-    ax3b.plot(neto_mm.index, neto_mm.values, lw=0.7, color="darkorange", alpha=0.9,
-              label="Flujo neto D−R (Transacciones)")
-    ax3b.axhline(0, color="black", lw=0.6)
-    ax3b.set_title(
-        "Flujo Neto D−R como línea (millones USD)\n"
-        "→ Debe coincidir visualmente con la línea naranja de aux_validacion_flujos.py",
-        fontweight="bold"
-    )
-    ax3b.set_ylabel("Millones USD")
-    ax3b.xaxis.set_major_locator(mdates.YearLocator(2))
-    ax3b.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
-    ax3b.tick_params(axis="x", rotation=45)
-    ax3b.grid(True, alpha=0.3)
-    ax3b.legend(fontsize=9)
-    plt.tight_layout()
-    plt.savefig(
-        r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Clean\flujo_neto_linea.png",
-        dpi=150, bbox_inches="tight"
-    )
-    plt.show()
     # Exportar flujos diarios a Excel
     ruta_flujos_clean = (
         r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente"
@@ -219,9 +195,14 @@ for fe in fechas_elec_2021:
 
 cols_cal = [
     "dia_semana", "mes", "pos_en_mes", "dias_al_cierre_mes",
-    "dias_desde_cierre_mes", "is_quincena", "is_cierre_encaje",
-    "is_fiestas_patrias", "is_fin_anio", "is_pre_feriado",
-    "is_post_feriado", "is_pre_eleccion", "is_post_eleccion",
+    "dias_desde_cierre_mes", "total_bdays_mes",
+    "is_quincena", "is_cierre_encaje",
+    "is_penult_bday_trim", "is_ultimo_bday_trim",
+    "is_1er_bday_trim", "is_2do_bday_trim", "is_3er_bday_trim",
+    "is_fiestas_patrias", "is_fin_anio",
+    "is_pre_feriado", "is_post_feriado",
+    "is_igv", "dias_al_igv",
+    "is_pre_eleccion", "is_post_eleccion",
 ]
 
 n_cols_cal = len(cols_cal)
