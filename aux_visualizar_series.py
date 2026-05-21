@@ -95,22 +95,84 @@ if not df_banc.empty:
     print(f"\n  Grandes ({len(grandes)}): {', '.join(grandes)}")
     print(f"  Pequeños → Otros_bancos ({len(pequeños)}): {', '.join(pequeños)}")
 
+    # Exportar tabla a Excel para revisión manual
+    tabla_export = pd.DataFrame({
+        "retiros_musd"   : vol["R"]     / 1e6,
+        "depositos_musd" : vol["D"]     / 1e6,
+        "total_musd"     : vol["total"] / 1e6,
+        "participacion"  : vol["pct"],
+        "grupo_auto"     : ["GRANDE" if p >= UMBRAL_PCT else "Otros_bancos" for p in vol["pct"]],
+        "incluir_en_otros": ["" if p >= UMBRAL_PCT else "X" for p in vol["pct"]],
+    })
+    tabla_export.index.name = "banco"
+
+    ruta_tabla = DIR_OUTPUT / "tabla_clasificacion_bancos.xlsx"
+    with pd.ExcelWriter(ruta_tabla, engine="openpyxl") as writer:
+        tabla_export.to_excel(writer, sheet_name="Clasificacion", float_format="%.4f")
+        ws = writer.sheets["Clasificacion"]
+
+        from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+
+        azul   = PatternFill("solid", fgColor="BDD7EE")
+        rojo   = PatternFill("solid", fgColor="FFCCCC")
+        header = PatternFill("solid", fgColor="2F5496")
+        thin   = Border(
+            left=Side(style="thin"), right=Side(style="thin"),
+            top=Side(style="thin"),  bottom=Side(style="thin"),
+        )
+
+        # Encabezado
+        for cell in ws[1]:
+            cell.fill      = header
+            cell.font      = Font(bold=True, color="FFFFFF")
+            cell.alignment = Alignment(horizontal="center")
+            cell.border    = thin
+
+        # Filas de datos
+        for i, (banco, row) in enumerate(tabla_export.iterrows(), start=2):
+            fill = azul if row["grupo_auto"] == "GRANDE" else rojo
+            for cell in ws[i]:
+                cell.fill   = fill
+                cell.border = thin
+            # Porcentaje en columna participacion (col 5 = E)
+            ws[f"E{i}"].number_format = "0.00%"
+            ws[f"E{i}"].alignment = Alignment(horizontal="center")
+            ws[f"F{i}"].alignment = Alignment(horizontal="center")
+            ws[f"G{i}"].alignment = Alignment(horizontal="center")
+
+        # Ancho de columnas
+        anchos = [28, 16, 16, 14, 14, 18, 20]
+        for col_idx, ancho in enumerate(anchos, start=1):
+            ws.column_dimensions[get_column_letter(col_idx)].width = ancho
+
+        # Nota instructiva
+        fila_nota = len(tabla_export) + 3
+        ws.cell(row=fila_nota, column=1,
+                value="INSTRUCCIONES: Revise la columna 'incluir_en_otros'. "
+                      "Marque con 'X' los bancos que quiera agrupar manualmente, "
+                      "independientemente del umbral automático. "
+                      f"Umbral automático actual: {UMBRAL_PCT:.0%} del volumen total.")
+        ws.cell(row=fila_nota, column=1).font = Font(italic=True, color="666666")
+
+    print(f"\nTabla de clasificación exportada: {ruta_tabla}")
+
+    # Gráfico de barras horizontales
     colores = ["steelblue" if p >= UMBRAL_PCT else "tomato" for p in vol["pct"]]
     fig2a, ax2a = plt.subplots(figsize=(14, max(5, len(vol) * 0.45)))
     bars = ax2a.barh(vol.index, vol["pct"] * 100, color=colores, alpha=0.8, edgecolor="white")
-    ax2a.axvline(UMBRAL_PCT * 100, color="black", lw=1.2, ls="--", label=f"Umbral {UMBRAL_PCT:.0%}")
+    ax2a.axvline(UMBRAL_PCT * 100, color="black", lw=1.2, ls="--")
     for bar, (_, row) in zip(bars, vol.iterrows()):
         ax2a.text(bar.get_width() + 0.3, bar.get_y() + bar.get_height() / 2,
                   f"{row['pct']:.1%}", va="center", fontsize=8)
     ax2a.set_xlabel("Participación en volumen total (%)")
     ax2a.set_title("Participación por Banco — Volumen Total (R + D)", fontweight="bold")
-    ax2a.legend(fontsize=9)
     ax2a.invert_yaxis()
     ax2a.grid(True, axis="x", alpha=0.3)
     from matplotlib.patches import Patch
     ax2a.legend(handles=[
-        Patch(fc="steelblue", alpha=0.8, label=f"Grande (≥ {UMBRAL_PCT:.0%}) — se modela individualmente"),
-        Patch(fc="tomato",    alpha=0.8, label=f"Pequeño (< {UMBRAL_PCT:.0%}) → agrupa en Otros_bancos"),
+        Patch(fc="steelblue", alpha=0.8, label=f"Grande (≥ {UMBRAL_PCT:.0%}) — modelo individual"),
+        Patch(fc="tomato",    alpha=0.8, label=f"Pequeño (< {UMBRAL_PCT:.0%}) → Otros_bancos"),
         plt.Line2D([0], [0], color="black", lw=1.2, ls="--", label=f"Umbral {UMBRAL_PCT:.0%}"),
     ], fontsize=8, loc="lower right")
     plt.tight_layout()
