@@ -1102,6 +1102,11 @@ def build_feature_matrix(
     )
     df = df.merge(df_seasonal, left_on="fecha_th", right_index=True, how="left")
 
+    # ── Reducir a float32 antes de reordenar ────────────────────────────────
+    # Mitad de memoria y evita el OOM en la consolidación interna de pandas
+    float_cols = df.select_dtypes(include="float64").columns
+    df[float_cols] = df[float_cols].astype("float32")
+
     # ── Reordenar columnas ───────────────────────────────────────────────────
     cols_id = ["fecha_t", "banco", "h", "log_h"]
     cols_resto = [c for c in df.columns if c not in cols_id + ["fecha_th"]]
@@ -1125,14 +1130,25 @@ def build_full_matrix(
     fechas_elecciones,
 ):
     """
-    Llama a build_feature_matrix para cada banco en lista_bancos y concatena resultados.
-    Exporta a Excel en ruta_output de PARAMS.
+    Construye la matriz banco por banco y la escribe directamente al Parquet
+    de salida usando PyArrow streaming. Nunca acumula más de un banco en RAM.
+    Retorna el path del archivo generado (no el DataFrame completo).
     """
+    import gc
+    try:
+        import pyarrow as pa
+        import pyarrow.parquet as pq_writer_lib
+    except ImportError:
+        logger.error("pyarrow no disponible. Instalar con: pip install pyarrow")
+        return pd.DataFrame()
+
     logger.info("PARTE 6: Construyendo matriz completa de features...")
 
     df_bancarios = datos_manuales.get("bancarios", pd.DataFrame())
+    ruta_output  = Path(params.get("ruta_output", "matriz_features.parquet"))
+    ruta_output.parent.mkdir(parents=True, exist_ok=True)
 
-    # Pre-calcular features bancarias por banco
+    # Pre-calcular features bancarias (una serie por banco, bajo consumo de RAM)
     bank_features_dict = {}
     for banco in lista_bancos:
         if not df_bancarios.empty and f"{banco}_R" in df_bancarios.columns:
@@ -1149,7 +1165,11 @@ def build_full_matrix(
         else:
             bank_features_dict[banco] = pd.DataFrame()
 
-    matrices = []
+    # Escribir banco por banco al Parquet de salida — peak RAM = 1 banco a la vez
+    pq_writer   = None
+    total_filas = 0
+    schema_ref  = None
+
     for banco in lista_bancos:
         df_banco_mat = build_feature_matrix(
             banco=banco,
@@ -1162,48 +1182,45 @@ def build_full_matrix(
             h_min=params["h_min"],
             h_max=params["h_max"],
         )
-        if not df_banco_mat.empty:
-            matrices.append(df_banco_mat)
+        if df_banco_mat.empty:
+            continue
 
-    if not matrices:
+        table = pa.Table.from_pandas(df_banco_mat, preserve_index=False)
+
+        if pq_writer is None:
+            schema_ref = table.schema
+            pq_writer  = pq_writer_lib.ParquetWriter(
+                ruta_output, schema_ref, compression="snappy"
+            )
+
+        # Alinear schema por si hay columnas con tipo diferente en algún banco
+        table = table.cast(schema_ref)
+        pq_writer.write_table(table)
+        total_filas += len(df_banco_mat)
+
+        del df_banco_mat, table
+        gc.collect()
+        logger.info(f"  {banco}: escrito al Parquet ({total_filas:,} filas acumuladas)")
+
+    if pq_writer is not None:
+        pq_writer.close()
+    else:
         logger.warning("No se generaron matrices para ningún banco.")
         return pd.DataFrame()
 
-    matriz = pd.concat(matrices, ignore_index=True)
-
-    # Exportar a Parquet (binario comprimido, tipado — equivalente a .mat)
-    ruta_output = Path(params.get("ruta_output", "matriz_features.parquet"))
-    try:
-        ruta_output.parent.mkdir(parents=True, exist_ok=True)
-        matriz.to_parquet(ruta_output, index=False, compression="snappy")
-        size_mb = ruta_output.stat().st_size / 1e6
-        logger.info(f"  Matriz exportada: {ruta_output}  ({size_mb:.1f} MB)")
-        logger.info(f"  Para cargar: pd.read_parquet(r'{ruta_output}')")
-    except Exception as e:
-        logger.warning(f"  No se pudo exportar a Parquet: {e}")
-
-    # Resumen final
+    size_mb = ruta_output.stat().st_size / 1e6
     logger.info(f"\n{'='*60}")
     logger.info("  RESUMEN FINAL DE LA MATRIZ")
     logger.info(f"{'='*60}")
-    logger.info(f"  Bancos modelados: {lista_bancos}")
-    logger.info(f"  Total filas   : {len(matriz):,}")
-    logger.info(f"  Total columnas: {len(matriz.columns)}")
-
-    nan_resumen = {
-        col: f"{matriz[col].isna().sum() / len(matriz):.1%}"
-        for col in matriz.columns
-        if matriz[col].isna().any()
-    }
-    if nan_resumen:
-        logger.info("  Columnas con NaN (% del total):")
-        for col, pct in nan_resumen.items():
-            logger.info(f"    {col:40s}: {pct}")
-    else:
-        logger.info("  Sin columnas con NaN.")
+    logger.info(f"  Bancos modelados : {lista_bancos}")
+    logger.info(f"  Total filas      : {total_filas:,}")
+    logger.info(f"  Columnas         : {len(schema_ref.names)}")
+    logger.info(f"  Archivo Parquet  : {ruta_output}  ({size_mb:.1f} MB)")
+    logger.info(f"  Para cargar      : pd.read_parquet(r'{ruta_output}')")
     logger.info(f"{'='*60}\n")
 
-    return matriz
+    # Retornar DataFrame vacío con el schema correcto como señal de éxito
+    return pd.DataFrame(columns=schema_ref.names)
 
 
 ###############################################################################
@@ -1419,10 +1436,8 @@ if __name__ == "__main__":
     )
 
     if not matriz.empty:
-        print(
-            f"\nMatriz generada: {matriz.shape[0]:,} filas x "
-            f"{matriz.shape[1]} columnas"
-        )
+        ruta_out = Path(PARAMS.get("ruta_output", "matriz_features.parquet"))
+        print(f"\nMatriz generada correctamente → {ruta_out}")
     else:
         print("\nMatriz vacía. Verifique la configuración de PARAMS y los archivos de datos.")
 
