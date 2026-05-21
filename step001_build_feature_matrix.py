@@ -272,10 +272,18 @@ def load_manual_data(params):
             df_wide.columns = [f"{col[1]}_{col[0]}" for col in df_wide.columns]
             df_wide = df_wide.sort_index()
             df_wide.index.name = "fecha"
+
+            # Rellenar calendario completo con 0: días sin transacción = flujo cero,
+            # no dato desconocido. Evita NaN masivos en lags, sigmas y medias móviles.
+            idx_completo = pd.bdate_range(start=df_wide.index.min(), end=df_wide.index.max())
+            df_wide = df_wide.reindex(idx_completo, fill_value=0.0)
+            df_wide.index.name = "fecha"
+
             resultado["bancarios"] = df_wide
             logger.info(
                 f"  Matriz bancaria pivotada: {df_wide.shape[0]:,} fechas × "
-                f"{df_wide.shape[1]} columnas ({n_bancos} bancos × 2)"
+                f"{df_wide.shape[1]} columnas ({n_bancos} bancos × 2) "
+                f"[calendario completo, ceros en días sin transacción]"
             )
     except Exception as e:
         logger.warning(f"  No se pudo cargar datos bancarios: {params['ruta_datos_bancarios']} | {e}")

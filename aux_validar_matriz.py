@@ -263,3 +263,28 @@ plt.savefig(DIR_OUTPUT / "05_correlacion_features_target.png", dpi=150, bbox_inc
 plt.show()
 
 print(f"\nGráficos guardados en: {DIR_OUTPUT}")
+
+# ─────────────────────────────────────────────────────────────────
+# 6. Exportar muestra a Excel para inspección visual
+#    Lee las primeras N filas del Parquet sin cargar el archivo completo
+# ─────────────────────────────────────────────────────────────────
+N_MUESTRA = 2_000
+print(f"\nExportando muestra de {N_MUESTRA:,} filas a Excel...")
+
+batch_muestra = next(pf.iter_batches(batch_size=N_MUESTRA))
+df_muestra = batch_muestra.to_pandas()
+
+ruta_muestra = DIR_OUTPUT / "muestra_matriz_features.xlsx"
+with pd.ExcelWriter(ruta_muestra, engine="openpyxl") as writer:
+    df_muestra.to_excel(writer, sheet_name="Muestra", index=False)
+
+    # Hoja de resumen: NaN por feature
+    resumen_nan = (
+        nan_pct.rename("pct_nan")
+        .reset_index()
+        .rename(columns={"index": "feature"})
+    )
+    resumen_nan["pct_nan"] = (resumen_nan["pct_nan"] * 100).round(1)
+    resumen_nan.to_excel(writer, sheet_name="NaN_por_feature", index=False)
+
+print(f"  Muestra guardada en: {ruta_muestra}")
