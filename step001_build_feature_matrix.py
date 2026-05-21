@@ -255,13 +255,27 @@ def load_manual_data(params):
                 )
 
             df_banco = df_banco.sort_values(["banco", "fecha"])
-            resultado["bancarios"] = df_banco
             n_bancos = df_banco["banco"].nunique()
             f_min = df_banco["fecha"].min().date()
             f_max = df_banco["fecha"].max().date()
             logger.info(
                 f"  Datos bancarios cargados: {len(df_banco):,} filas | "
                 f"{n_bancos} bancos | {f_min} → {f_max}"
+            )
+
+            # Convertir formato LARGO → ANCHO: índice=fecha, columnas={banco}_R / {banco}_D
+            # Necesario para compatibilidad con agrupar_bancos y build_feature_matrix
+            df_wide = df_banco.pivot_table(
+                index="fecha", columns="banco", values=["R", "D"], aggfunc="sum"
+            )
+            # MultiIndex ('R', 'BBVA') → 'BBVA_R'
+            df_wide.columns = [f"{col[1]}_{col[0]}" for col in df_wide.columns]
+            df_wide = df_wide.sort_index()
+            df_wide.index.name = "fecha"
+            resultado["bancarios"] = df_wide
+            logger.info(
+                f"  Matriz bancaria pivotada: {df_wide.shape[0]:,} fechas × "
+                f"{df_wide.shape[1]} columnas ({n_bancos} bancos × 2)"
             )
     except Exception as e:
         logger.warning(f"  No se pudo cargar datos bancarios: {params['ruta_datos_bancarios']} | {e}")
