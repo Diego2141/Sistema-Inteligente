@@ -72,6 +72,52 @@ plt.savefig(DIR_OUTPUT / "01_series_base_macro.png", dpi=150, bbox_inches="tight
 plt.show()
 
 # ─────────────────────────────────────────────────────────────────
+# BLOQUE 2a: Participación de volumen por banco
+# ─────────────────────────────────────────────────────────────────
+UMBRAL_PCT = PARAMS.get("umbral_banco_pequeño_pct", 0.05)
+
+if not df_banc.empty:
+    vol = df_banc.groupby("banco")[["R", "D"]].sum()
+    vol["total"] = vol["R"] + vol["D"]
+    vol["pct"]   = vol["total"] / vol["total"].sum()
+    vol = vol.sort_values("pct", ascending=False)
+
+    grandes  = vol[vol["pct"] >= UMBRAL_PCT].index.tolist()
+    pequeños = vol[vol["pct"] <  UMBRAL_PCT].index.tolist()
+
+    print(f"\nParticipación de volumen por banco (umbral = {UMBRAL_PCT:.0%}):")
+    print(f"{'Banco':<25} {'Retiros (MM)':>14} {'Depósitos (MM)':>16} {'Total (MM)':>12} {'Part.':>7} {'Grupo':>10}")
+    print("-" * 90)
+    for banco, row in vol.iterrows():
+        grupo = "GRANDE" if row["pct"] >= UMBRAL_PCT else "pequeño"
+        print(f"{banco:<25} {row['R']/1e6:>14,.1f} {row['D']/1e6:>16,.1f} "
+              f"{row['total']/1e6:>12,.1f} {row['pct']:>7.1%} {grupo:>10}")
+    print(f"\n  Grandes ({len(grandes)}): {', '.join(grandes)}")
+    print(f"  Pequeños → Otros_bancos ({len(pequeños)}): {', '.join(pequeños)}")
+
+    colores = ["steelblue" if p >= UMBRAL_PCT else "tomato" for p in vol["pct"]]
+    fig2a, ax2a = plt.subplots(figsize=(14, max(5, len(vol) * 0.45)))
+    bars = ax2a.barh(vol.index, vol["pct"] * 100, color=colores, alpha=0.8, edgecolor="white")
+    ax2a.axvline(UMBRAL_PCT * 100, color="black", lw=1.2, ls="--", label=f"Umbral {UMBRAL_PCT:.0%}")
+    for bar, (_, row) in zip(bars, vol.iterrows()):
+        ax2a.text(bar.get_width() + 0.3, bar.get_y() + bar.get_height() / 2,
+                  f"{row['pct']:.1%}", va="center", fontsize=8)
+    ax2a.set_xlabel("Participación en volumen total (%)")
+    ax2a.set_title("Participación por Banco — Volumen Total (R + D)", fontweight="bold")
+    ax2a.legend(fontsize=9)
+    ax2a.invert_yaxis()
+    ax2a.grid(True, axis="x", alpha=0.3)
+    from matplotlib.patches import Patch
+    ax2a.legend(handles=[
+        Patch(fc="steelblue", alpha=0.8, label=f"Grande (≥ {UMBRAL_PCT:.0%}) — se modela individualmente"),
+        Patch(fc="tomato",    alpha=0.8, label=f"Pequeño (< {UMBRAL_PCT:.0%}) → agrupa en Otros_bancos"),
+        plt.Line2D([0], [0], color="black", lw=1.2, ls="--", label=f"Umbral {UMBRAL_PCT:.0%}"),
+    ], fontsize=8, loc="lower right")
+    plt.tight_layout()
+    plt.savefig(DIR_OUTPUT / "02a_participacion_bancos.png", dpi=150, bbox_inches="tight")
+    plt.show()
+
+# ─────────────────────────────────────────────────────────────────
 # BLOQUE 2: Series bancarias por banco
 # ─────────────────────────────────────────────────────────────────
 if not df_banc.empty:
