@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 ###############################################################################
 PARAMS = {
     # Fechas
-    "fecha_inicio_historico": "2015-01-01",
+    "fecha_inicio_historico": "2010-01-01",
     "fecha_fin_historico": "2025-12-31",
 
     # Modelo
