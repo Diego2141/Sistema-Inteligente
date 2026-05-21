@@ -164,28 +164,6 @@ plt.tight_layout()
 plt.savefig(DIR_OUTPUT / "01_nan_por_feature.png", dpi=150, bbox_inches="tight")
 plt.show()
 
-# ── FIGURA 2: Target por horizonte (mediana ± IQR) ────────────────
-tgt_h   = df_key.dropna(subset=["target"]).groupby("h")["target"]
-mediana = tgt_h.median() / 1e6
-p25     = tgt_h.quantile(0.25) / 1e6
-p75     = tgt_h.quantile(0.75) / 1e6
-p05     = tgt_h.quantile(0.05) / 1e6
-p95     = tgt_h.quantile(0.95) / 1e6
-
-fig2, ax = plt.subplots(figsize=(14, 5))
-ax.fill_between(p05.index, p05, p95, alpha=0.15, color="steelblue", label="P5–P95")
-ax.fill_between(p25.index, p25, p75, alpha=0.35, color="steelblue", label="P25–P75")
-ax.plot(mediana.index, mediana, color="steelblue", lw=1.8, label="Mediana")
-ax.axhline(0, color="black", lw=0.8, ls="--")
-ax.set_xlabel("Horizonte h (días hábiles)")
-ax.set_ylabel("Neto (MM USD)")
-ax.set_title("Distribución del Target por Horizonte h", fontweight="bold")
-ax.legend(fontsize=9)
-ax.grid(True, alpha=0.3)
-plt.tight_layout()
-plt.savefig(DIR_OUTPUT / "02_target_por_horizonte.png", dpi=150, bbox_inches="tight")
-plt.show()
-
 # ── FIGURA 3: Target por banco (boxplot) ──────────────────────────
 tgt_banco = [
     df_key.loc[(df_key["banco"] == b) & df_key["target"].notna(), "target"].values / 1e6
@@ -290,3 +268,52 @@ with pd.ExcelWriter(ruta_muestra, engine="openpyxl") as writer:
     resumen_nan.to_excel(writer, sheet_name="NaN_por_feature", index=False)
 
 print(f"  Muestra guardada en: {ruta_muestra}")
+
+# ─────────────────────────────────────────────────────────────────
+# 7. Resumen de archivos del proyecto
+# ─────────────────────────────────────────────────────────────────
+sep = "=" * 65
+print(f"\n{sep}")
+print("  ARCHIVOS PRINCIPALES DEL PROYECTO")
+print(sep)
+print("""
+  SCRIPTS  (raíz del repositorio)
+  ├── step001_build_feature_matrix.py   → construye la matriz de features
+  │     Ejecutar primero. Genera matriz_features.parquet.
+  │
+  ├── aux_visualizar_series.py          → gráficos exploratorios de las
+  │     series de transacciones bancarias (retiros, depósitos, bancos).
+  │
+  ├── aux_validar_matriz.py             → validación de la matriz de features
+  │     (este script). Gráficos de NaN, cobertura y correlaciones.
+  │
+  ├── aux_fanchart_ejemplo.py           → fan chart para una fecha calendario
+  │     fija a través de todos los años (ej. 6 de julio).
+  │
+  └── aux_validacion_flujos.py          → validación cruzada entre
+        Transacciones_BancaLocal.xlsx y DepositosSF.xlsx del BCRP.
+
+  DATOS  (no versionados en git — solo en disco local)
+  ├── 1. Data/Raw/
+  │   ├── Transacciones_BancaLocal.xlsx → transacciones diarias por banco
+  │   └── series_bcrp.xlsx              → EMBI, Tasa Ref, TC compra/venta
+  │
+  └── 1. Data/Clean/
+      ├── matriz_features.parquet       → matriz de entrenamiento (~5M filas)
+      └── diccionario_variables.xlsx    → descripción de cada feature
+
+  OUTPUTS  (generados automáticamente)
+  ├── 2. Output/aux_validar_matriz/
+  │   ├── 01_nan_por_feature.png
+  │   ├── 03_target_por_banco.png
+  │   ├── 04_cobertura_temporal.png
+  │   ├── 05_correlacion_features_target.png
+  │   └── muestra_matriz_features.xlsx  → muestra de 2,000 filas + NaN
+  │
+  ├── 2. Output/aux_fanchart_ejemplo/
+  │   └── fanchart_<BANCO>_julio06_todos_anios.png
+  │
+  ├── 2. Output/aux_visualizar_series/  → gráficos de series bancarias
+  └── 2. Output/aux_validacion_flujos/  → validación DepositosSF vs Tx
+""")
+print(sep)
