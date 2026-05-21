@@ -679,6 +679,7 @@ def build_bank_features(df_banco, lags_cortos, lag_semana, lag_mes, ventanas_vol
             + [f"ma_R_{v}d" for v in ventanas_vol]
             + [f"ma_D_{v}d" for v in ventanas_vol]
             + ["delta_R", "delta_D"]
+            + ["R_conf_t1", "R_conf_t2", "D_conf_t1"]
         )
         return pd.DataFrame(columns=cols)
 
@@ -704,6 +705,12 @@ def build_bank_features(df_banco, lags_cortos, lag_semana, lag_mes, ventanas_vol
 
     resultado["delta_R"] = df["R"].diff(1)
     resultado["delta_D"] = df["D"].diff(1)
+
+    # Confirmados históricos: proxy de los avisos anticipados usando valores realizados
+    # En producción estos se reemplazarán por los valores reales de los correos
+    resultado["R_conf_t1"] = df["R"].shift(-1)   # R(t+1) — avisado ayer, 2d anticipación
+    resultado["R_conf_t2"] = df["R"].shift(-2)   # R(t+2) — avisado hoy,  2d anticipación
+    resultado["D_conf_t1"] = df["D"].shift(-1)   # D(t+1) — avisado hoy,  1d anticipación
 
     return resultado
 
@@ -1046,14 +1053,15 @@ def build_feature_matrix(
     else:
         df["target"] = np.nan
 
-    # ── 4. Confirmados (merge por fecha_t) ───────────────────────────────────
-    for col in ["R_conf_t1", "R_conf_t2", "D_conf_t1"]:
-        df[col] = np.nan
+    # ── 4. Confirmados ───────────────────────────────────────────────────────
+    # Base: valores calculados en build_bank_features (shift -1/-2 sobre realizados)
+    # Override: si existen confirmados operativos reales (correos), reemplazan la fila exacta
     if not df_confirmados.empty and "banco" in df_confirmados.columns and "fecha" in df_confirmados.columns:
         conf = df_confirmados[df_confirmados["banco"] == banco].set_index("fecha")
         for col in ["R_conf_t1", "R_conf_t2", "D_conf_t1"]:
             if col in conf.columns:
-                df[col] = df["fecha_t"].map(conf[col])
+                override = df["fecha_t"].map(conf[col])
+                df[col] = override.combine_first(df[col])
 
     # ── 5. Macro (merge por fecha_t) ─────────────────────────────────────────
     if not macro_features.empty:
@@ -1235,10 +1243,12 @@ def build_data_dictionary(params):
     add("delta_R", "Datos bancarios", "Variación diaria de retiros: R_t0 - R(t-1)",   0, None)
     add("delta_D", "Datos bancarios", "Variación diaria de depósitos: D_t0 - D(t-1)", 0, None)
 
-    # ── Confirmados futuros (notificados formalmente por los bancos) ──────────
-    add("R_conf_t1", "Confirmados operativos", "Retiro confirmado para t+1 (notificado en t-1, aviso 2d)", -1, "t+1")
-    add("R_conf_t2", "Confirmados operativos", "Retiro confirmado para t+2 (notificado hoy, aviso 2d)",     0, "t+2")
-    add("D_conf_t1", "Confirmados operativos", "Depósito confirmado para t+1 (notificado hoy, aviso 1d)",   0, "t+1")
+    # ── Confirmados futuros ───────────────────────────────────────────────────
+    # Entrenamiento: proxy histórico = valor realizado en t+1/t+2 (shift negativo)
+    # Producción:    valor real del correo de aviso (override desde confirmados.xlsx)
+    add("R_conf_t1", "Datos bancarios / Confirmados operativos", "R(t+1) — proxy histórico o aviso real (2d anticipación)", -1, "t+1")
+    add("R_conf_t2", "Datos bancarios / Confirmados operativos", "R(t+2) — proxy histórico o aviso real (2d anticipación)",  0, "t+2")
+    add("D_conf_t1", "Datos bancarios / Confirmados operativos", "D(t+1) — proxy histórico o aviso real (1d anticipación)",  0, "t+1")
 
     # ── Features macroeconómicas (observadas en t) ───────────────────────────
     add("VIX",              "Yahoo Finance",  "Índice de volatilidad implícita S&P 500",          0, None)
