@@ -22,6 +22,44 @@ DIR_OUTPUT.mkdir(parents=True, exist_ok=True)
 BATCH_SIZE = 100_000   # filas por bloque en el pase de NaN/rangos
 
 # ─────────────────────────────────────────────────────────────────
+# Resumen de avance
+# ─────────────────────────────────────────────────────────────────
+sep = "=" * 65
+print(f"\n{sep}")
+print("  SISTEMA DE PREDICCIÓN DE LIQUIDEZ — ESTADO DEL PROYECTO")
+print(sep)
+print("""
+  LO QUE ESTÁ LISTO
+  ─────────────────
+  ✓ Calendario hábil conjunto Perú + EE.UU. (feriados PE y US)
+  ✓ Carga y limpieza de transacciones bancarias (2010–2026)
+      · Alias histórico CONTINEN → BBVA unificado
+      · 12 bancos pequeños agrupados en Otros_bancos (umbral 1%)
+  ✓ Features bancarias por entidad
+      · Valores de hoy: R_t0, D_t0 (aviso anticipado)
+      · Rezagos: t-1, t-2, t-3, t-5, t-22
+      · Volatilidades y medias móviles: 5d y 22d
+      · Confirmados próximos: R_conf_t1, R_conf_t2, D_conf_t1
+  ✓ Features macroeconómicas (2010–2026)
+      · VIX, T10Y (Yahoo Finance)
+      · FED_FUNDS diario (FRED)
+      · EMBI Perú, Tasa Ref, TC compra/venta (BCRP Add-In)
+  ✓ Features estacionales para fecha futura t+h
+      · Posición en mes/trimestre, feriados PE+US, elecciones
+  ✓ Matriz de features exportada a Parquet (~5M filas, float32)
+      · 12 entidades × 4,271 fechas × 89 horizontes
+      · Lectura eficiente banco por banco (peak RAM < 200 MB)
+
+  PRÓXIMO PASO
+  ────────────
+  → step002_train_model.py
+     Entrenar LightGBM con quantile regression para los quantiles
+     [0.01, 0.05, 0.50, 0.95, 0.99]. Un solo modelo por banco con h
+     como feature numérico. Validación walk-forward (expanding window).
+""")
+print(sep + "\n")
+
+# ─────────────────────────────────────────────────────────────────
 # 1. Metadata sin cargar datos
 # ─────────────────────────────────────────────────────────────────
 print(f"Leyendo metadata: {RUTA_MATRIZ}")
