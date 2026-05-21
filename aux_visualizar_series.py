@@ -6,6 +6,7 @@ del pipeline de predicción de liquidez en ME.
 """
 
 import sys
+from pathlib import Path
 sys.path.insert(0, r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente")
 
 import importlib
@@ -18,6 +19,10 @@ import matplotlib.dates as mdates
 from pandas.tseries.offsets import CustomBusinessDay
 
 PARAMS = bfm.PARAMS.copy()
+
+BASE_SISTEMA = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente")
+DIR_OUTPUT   = BASE_SISTEMA / "2. Output" / "aux_visualizar_series"
+DIR_OUTPUT.mkdir(parents=True, exist_ok=True)
 
 # ─────────────────────────────────────────────────────────────────
 # Cargar datos reales
@@ -63,10 +68,7 @@ for i, (col, titulo) in enumerate(series_macro.items()):
 
 plt.suptitle("Series Externas Base — Datos Reales", fontsize=13, fontweight="bold")
 plt.tight_layout()
-plt.savefig(
-    r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Clean\series_base_macro.png",
-    dpi=150, bbox_inches="tight"
-)
+plt.savefig(DIR_OUTPUT / "01_series_base_macro.png", dpi=150, bbox_inches="tight")
 plt.show()
 
 # ─────────────────────────────────────────────────────────────────
@@ -100,10 +102,7 @@ if not df_banc.empty:
 
     plt.suptitle("Retiros y Depósitos por Banco — Datos Reales", fontsize=13, fontweight="bold")
     plt.tight_layout()
-    plt.savefig(
-        r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Clean\series_bancarias.png",
-        dpi=150, bbox_inches="tight"
-    )
+    plt.savefig(DIR_OUTPUT / "02_series_bancarias.png", dpi=150, bbox_inches="tight")
     plt.show()
 
     print("\nResumen por banco (USD):")
@@ -156,17 +155,11 @@ if not df_banc.empty:
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(
-        r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Clean\flujos_sistema.png",
-        dpi=150, bbox_inches="tight"
-    )
+    plt.savefig(DIR_OUTPUT / "03_flujos_sistema.png", dpi=150, bbox_inches="tight")
     plt.show()
 
     # Exportar flujos diarios a Excel
-    ruta_flujos_clean = (
-        r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente"
-        r"\1. Data\Clean\flujos_diarios.xlsx"
-    )
+    ruta_flujos_clean = DIR_OUTPUT / "flujos_diarios.xlsx"
     flujos_export = pd.DataFrame({
         "depositos_musd":  sistema["D"] / 1e6,
         "retiros_musd":    sistema["R"] / 1e6,
@@ -218,10 +211,7 @@ if not df_banc.empty:
     ax3b.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(
-        r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Clean\flujos_sistema_2y.png",
-        dpi=150, bbox_inches="tight"
-    )
+    plt.savefig(DIR_OUTPUT / "03b_flujos_sistema_2y.png", dpi=150, bbox_inches="tight")
     plt.show()
 
 # ─────────────────────────────────────────────────────────────────
@@ -280,10 +270,7 @@ for j in range(n_cols_cal, len(axes4)):
 
 plt.suptitle("Features de Calendario — Año 2021", fontsize=13, fontweight="bold")
 plt.tight_layout()
-plt.savefig(
-    r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Clean\features_calendario_2021.png",
-    dpi=150, bbox_inches="tight"
-)
+plt.savefig(DIR_OUTPUT / "04_features_calendario_2021.png", dpi=150, bbox_inches="tight")
 plt.show()
 
 # ─────────────────────────────────────────────────────────────────
@@ -328,8 +315,5 @@ if not df_banc.empty:
     ax5.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(
-        r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Clean\flujos_2021_electoral.png",
-        dpi=150, bbox_inches="tight"
-    )
+    plt.savefig(DIR_OUTPUT / "05_flujos_2021_electoral.png", dpi=150, bbox_inches="tight")
     plt.show()

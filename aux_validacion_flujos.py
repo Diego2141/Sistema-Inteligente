@@ -9,6 +9,7 @@ debe correlacionar con el flujo neto D-R de las transacciones de banca local.
 Resultado esperado: correlación > 0.85
 """
 
+from pathlib import Path
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -17,18 +18,13 @@ import matplotlib.dates as mdates
 # ─────────────────────────────────────────────────────────────────────────────
 # RUTAS
 # ─────────────────────────────────────────────────────────────────────────────
-RUTA_TRANSACCIONES = (
-    r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente"
-    r"\1. Data\Raw\Transacciones_BancaLocal.xlsx"
-)
-RUTA_DEPOSITOS_SF = (
-    r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente"
-    r"\1. Data\Raw\DepositosSF.xlsx"
-)
-RUTA_OUTPUT_PNG = (
-    r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente"
-    r"\1. Data\Clean\validacion_flujos.png"
-)
+BASE_SISTEMA = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente")
+DIR_OUTPUT   = BASE_SISTEMA / "2. Output" / "aux_validacion_flujos"
+DIR_OUTPUT.mkdir(parents=True, exist_ok=True)
+
+RUTA_TRANSACCIONES = BASE_SISTEMA / "1. Data" / "Raw" / "Transacciones_BancaLocal.xlsx"
+RUTA_DEPOSITOS_SF  = BASE_SISTEMA / "1. Data" / "Raw" / "DepositosSF.xlsx"
+RUTA_OUTPUT_PNG    = DIR_OUTPUT / "validacion_flujos.png"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. Cargar DepositosSF (hoja "Diarias", formato fecha: 03Ene00)
