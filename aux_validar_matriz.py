@@ -233,12 +233,14 @@ plt.tight_layout()
 plt.savefig(DIR_OUTPUT / "04_cobertura_temporal.png", dpi=150, bbox_inches="tight")
 plt.show()
 
-# ── FIGURA 5: Correlación con target (h=1) ────────────────────────
-# Con h=1: solo ~(n_bancos × n_fechas) filas ≈ 56k → carga completa OK
-print("Cargando filas h=1 para correlaciones...")
+# ── FIGURA 5: Correlación con target (h mínimo disponible) ───────────────────
+# Usa el menor horizonte de la matriz — los features de t son más predictivos
+# cuando la fecha objetivo está más cercana
+h_min_disp = int(df_key["h"].min())
+print(f"Cargando filas h={h_min_disp} para correlaciones...")
 df_h1 = pd.read_parquet(
     RUTA_MATRIZ,
-    filters=[("h", "==", 1)],
+    filters=[("h", "==", h_min_disp)],
     columns=cols_feat + ["target"],
 )
 df_h1 = df_h1.dropna(subset=["target"])
@@ -256,7 +258,7 @@ fig5, ax = plt.subplots(figsize=(10, max(6, len(corrs) * 0.28)))
 ax.barh(corrs.index, corrs.values, color=colores_corr, edgecolor="white", height=0.7)
 ax.axvline(0, color="black", lw=0.8)
 ax.set_xlabel("Correlación de Pearson con target")
-ax.set_title("Correlación de Features con Target (h = 1)", fontweight="bold")
+ax.set_title(f"Correlación de Features con Target (h = {h_min_disp})", fontweight="bold")
 ax.grid(True, axis="x", alpha=0.3)
 plt.tight_layout()
 plt.savefig(DIR_OUTPUT / "05_correlacion_features_target.png", dpi=150, bbox_inches="tight")
