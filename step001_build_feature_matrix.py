@@ -49,7 +49,7 @@ PARAMS = {
     # Alias de bancos: cambios de nombre históricos que deben unificarse
     # clave = nombre en los datos, valor = nombre canónico
     "alias_bancos": {
-        "Continen": "BBVA",   # Banco Continental → BBVA desde 2020
+        "CONTINEN": "BBVA",   # Banco Continental → BBVA desde 2020
     },
 
     # Agrupación de bancos
@@ -232,19 +232,26 @@ def load_manual_data(params):
             )
             df_banco["fecha"] = pd.to_datetime(df_banco["fecha"])
 
-            # Unificar alias históricos (ej. Continen → BBVA)
+            # Unificar alias históricos (ej. CONTINEN → BBVA)
+            # Comparación case-insensitive para tolerar variaciones de capitalización
             alias = params.get("alias_bancos", {})
             if alias:
-                df_banco["banco"] = df_banco["banco"].replace(alias)
+                alias_lower = {k.lower(): v for k, v in alias.items()}
+                def _aplicar_alias(nombre):
+                    return alias_lower.get(nombre.lower(), nombre)
+                antes = set(df_banco["banco"].unique())
+                df_banco["banco"] = df_banco["banco"].apply(_aplicar_alias)
+                despues = set(df_banco["banco"].unique())
+                aplicados = antes - despues
+                for viejo in aplicados:
+                    nuevo = _aplicar_alias(viejo)
+                    logger.info(f"  Alias aplicado: '{viejo}' → '{nuevo}'")
                 # Re-agregar por si el mismo banco tiene filas con ambos nombres en la misma fecha
                 df_banco = (
                     df_banco.groupby(["banco", "fecha"])[["R", "D"]]
                     .sum()
                     .reset_index()
                 )
-                for viejo, nuevo in alias.items():
-                    if viejo in df_banco["banco"].values or nuevo in df_banco["banco"].values:
-                        logger.info(f"  Alias aplicado: '{viejo}' → '{nuevo}'")
 
             df_banco = df_banco.sort_values(["banco", "fecha"])
             resultado["bancarios"] = df_banco
