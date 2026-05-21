@@ -130,19 +130,23 @@ if not df_banc.empty:
     sistema.index.name = "fecha"
     sistema["neto"] = sistema["D"] - sistema["R"]
 
-    # Máximo para escalar las barras indicadoras de gap
-    d_mm    =  sistema["D"] / 1e6
-    r_mm    = -sistema["R"] / 1e6
-    neto_mm =  sistema["neto"] / 1e6
+    d_mm    = sistema["D"] / 1e6
+    r_mm    = sistema["R"] / 1e6
+    neto_mm = sistema["neto"] / 1e6
 
     fig3, ax = plt.subplots(figsize=(14, 6))
 
-    ax.bar(sistema.index, d_mm, color="steelblue", width=1, alpha=0.7, zorder=1, label="Depósitos")
-    ax.bar(sistema.index, r_mm, color="tomato",    width=1, alpha=0.7, zorder=1, label="Retiros")
-    ax.plot(sistema.index, neto_mm, lw=0.8, color="darkorange", alpha=0.9, zorder=2, label="Flujo neto")
+    # Barras apiladas: depósitos abajo, retiros encima
+    ax.bar(sistema.index, d_mm, color="steelblue", width=1, alpha=0.8, zorder=1, label="Depósitos")
+    ax.bar(sistema.index, r_mm, color="tomato",    width=1, alpha=0.8, zorder=1,
+           bottom=d_mm, label="Retiros")
 
-    ax.axhline(0, color="black", lw=0.8, zorder=3)
+    # Flujo neto como línea
+    ax.plot(sistema.index, neto_mm, lw=1.0, color="black", alpha=0.85, zorder=2, label="Flujo neto")
+    ax.axhline(0, color="gray", lw=0.5, zorder=0)
+
     ax.set_ylabel("Millones USD")
+    ax.set_ylim(bottom=0)
     ax.set_title("Flujos Sistema Financiero — Depósitos / Retiros / Neto (millones USD)",
                  fontweight="bold")
     ax.xaxis.set_major_locator(mdates.YearLocator(2))
