@@ -15,6 +15,7 @@ import logging
 import warnings
 import numpy as np
 import pandas as pd
+from pathlib import Path
 from datetime import datetime
 
 warnings.filterwarnings("ignore")
@@ -73,8 +74,8 @@ PARAMS = {
     # "ruta_igv" eliminado: pagos IGV en soles, no relevante para liquidez ME
     # ruta_elecciones: eliminado — fechas presidenciales hardcodeadas en build_peru_calendar()
     "ruta_aux_xgboost": r"RUTA\Aux_XGBoost.py",
-    "ruta_output": r"RUTA\matriz_features.xlsx",
-    "ruta_diccionario": r"1. Data/Clean/diccionario_variables.xlsx",
+    "ruta_output":      r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Clean\matriz_features.parquet",
+    "ruta_diccionario": r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Clean\diccionario_variables.xlsx",
 
     # Series BCRP descargadas manualmente con Add-In BCRPData
     # Un solo archivo Excel, cada serie en su propia hoja
@@ -1140,16 +1141,16 @@ def build_full_matrix(
 
     matriz = pd.concat(matrices, ignore_index=True)
 
-    # Exportar a Excel
-    ruta_output = params.get("ruta_output", "matriz_features.xlsx")
+    # Exportar a Parquet (equivalente binario a .mat — comprimido, tipado, rápido)
+    ruta_output = Path(params.get("ruta_output", "matriz_features.parquet"))
     try:
-        if ruta_output and "RUTA" not in ruta_output:
-            matriz.to_excel(ruta_output, index=False)
-            logger.info(f"  Matriz exportada a: {ruta_output}")
-        else:
-            logger.warning(f"  Ruta de output no configurada. No se exportó a Excel.")
+        ruta_output.parent.mkdir(parents=True, exist_ok=True)
+        matriz.to_parquet(ruta_output, index=False, compression="snappy")
+        size_mb = ruta_output.stat().st_size / 1e6
+        logger.info(f"  Matriz exportada: {ruta_output}  ({size_mb:.1f} MB)")
+        logger.info(f"  Para cargar: pd.read_parquet(r'{ruta_output}')")
     except Exception as e:
-        logger.warning(f"  No se pudo exportar a Excel: {e}")
+        logger.warning(f"  No se pudo exportar a Parquet: {e}")
 
     # Resumen final
     logger.info(f"\n{'='*60}")
@@ -1402,9 +1403,9 @@ if __name__ == "__main__":
     print(f"\nTotal variables: {len(data_dict)}")
 
     # Exportar diccionario a Excel en 1. Data/Clean/
-    ruta_dict = PARAMS.get("ruta_diccionario", r"1. Data/Clean/diccionario_variables.xlsx")
+    ruta_dict = Path(PARAMS.get("ruta_diccionario", r"1. Data\Clean\diccionario_variables.xlsx"))
     try:
-        os.makedirs(os.path.dirname(ruta_dict), exist_ok=True)
+        ruta_dict.parent.mkdir(parents=True, exist_ok=True)
         data_dict.to_excel(ruta_dict, index=False, sheet_name="Diccionario")
         logger.info(f"  Diccionario exportado a: {ruta_dict}")
     except Exception as e:
