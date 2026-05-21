@@ -136,9 +136,9 @@ if not df_banc.empty:
 
     fig3, ax = plt.subplots(figsize=(14, 6))
 
-    ax.bar(sistema.index, d_mm, color="steelblue", width=1, alpha=0.8, zorder=1, label="Depósitos")
-    ax.bar(sistema.index, r_mm, color="tomato",    width=1, alpha=0.8, zorder=1, label="Retiros")
-    ax.plot(sistema.index, neto_mm, lw=0.8, color="black", alpha=0.85, zorder=2, label="Neto")
+    ax.bar(sistema.index, d_mm,    color="steelblue", width=1, alpha=0.8, zorder=1, label="Depósitos")
+    ax.bar(sistema.index, r_mm,    color="tomato",    width=1, alpha=0.8, zorder=1, label="Retiros")
+    ax.plot(sistema.index, neto_mm, color="black",    lw=0.8, alpha=0.9,  zorder=2, label="Neto")
     ax.axhline(0, color="black", lw=0.6, zorder=3)
 
     ax.set_ylabel("MM USD (neto diario)")
@@ -146,8 +146,13 @@ if not df_banc.empty:
                  fontweight="bold")
     ax.xaxis.set_major_locator(mdates.YearLocator(2))
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
-    ax.tick_params(axis="x", rotation=45)
-    ax.legend(fontsize=8, loc="upper left")
+    ax.tick_params(axis="x", rotation=0)
+    ax.legend(fontsize=8, loc="upper left",
+              handles=[
+                  plt.Line2D([0],[0], color="black", lw=1.5, label="Neto"),
+                  plt.Rectangle((0,0),1,1, fc="steelblue", alpha=0.8, label="Depósitos"),
+                  plt.Rectangle((0,0),1,1, fc="tomato",    alpha=0.8, label="Retiros"),
+              ])
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
