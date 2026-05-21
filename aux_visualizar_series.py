@@ -130,23 +130,18 @@ if not df_banc.empty:
     sistema.index.name = "fecha"
     sistema["neto"] = sistema["D"] - sistema["R"]
 
-    d_mm    = sistema["D"] / 1e6
-    r_mm    = sistema["R"] / 1e6
-    neto_mm = sistema["neto"] / 1e6
+    d_mm    =  sistema["D"] / 1e6
+    r_mm    = -sistema["R"] / 1e6
+    neto_mm =  sistema["neto"] / 1e6
 
     fig3, ax = plt.subplots(figsize=(14, 6))
 
-    # Barras apiladas: depósitos abajo, retiros encima
     ax.bar(sistema.index, d_mm, color="steelblue", width=1, alpha=0.8, zorder=1, label="Depósitos")
-    ax.bar(sistema.index, r_mm, color="tomato",    width=1, alpha=0.8, zorder=1,
-           bottom=d_mm, label="Retiros")
+    ax.bar(sistema.index, r_mm, color="tomato",    width=1, alpha=0.8, zorder=1, label="Retiros")
+    ax.plot(sistema.index, neto_mm, lw=0.8, color="black", alpha=0.85, zorder=2, label="Neto")
+    ax.axhline(0, color="black", lw=0.6, zorder=3)
 
-    # Flujo neto como línea
-    ax.plot(sistema.index, neto_mm, lw=1.0, color="black", alpha=0.85, zorder=2, label="Flujo neto")
-    ax.axhline(0, color="gray", lw=0.5, zorder=0)
-
-    ax.set_ylabel("Millones USD")
-    ax.set_ylim(bottom=0)
+    ax.set_ylabel("MM USD (neto diario)")
     ax.set_title("Flujos Sistema Financiero — Depósitos / Retiros / Neto (millones USD)",
                  fontweight="bold")
     ax.xaxis.set_major_locator(mdates.YearLocator(2))
@@ -242,65 +237,49 @@ plt.savefig(
 plt.show()
 
 # ─────────────────────────────────────────────────────────────────
-# BLOQUE 5: Zoom en ventanas electorales 2021
-# Elecciones siempre en domingo → is_eleccion nunca activa en días hábiles
-# is_pre/post_eleccion captura los 7 días calendario alrededor
+# BLOQUE 5: Flujos sistema 2021 con marcadores electorales
 # ─────────────────────────────────────────────────────────────────
-elecciones_2021 = [
-    ("1ra vuelta", pd.Timestamp("2021-04-11")),
-    ("2da vuelta", pd.Timestamp("2021-06-06")),
-]
+if not df_banc.empty:
+    elec_1ra = pd.Timestamp("2021-04-11")
+    elec_2da = pd.Timestamp("2021-06-06")
 
-fig5, axes5 = plt.subplots(2, 1, figsize=(14, 8))
+    mask21 = (sistema.index >= "2021-01-01") & (sistema.index <= "2021-12-31")
+    sis21  = sistema[mask21]
 
-for ax, (vuelta, elec_day) in zip(axes5, elecciones_2021):
-    ventana_ini = elec_day - pd.Timedelta(days=14)
-    ventana_fin = elec_day + pd.Timedelta(days=14)
-    mask = (df_cal.index >= ventana_ini) & (df_cal.index <= ventana_fin)
-    sub  = df_cal[mask]
+    d21    =  sis21["D"] / 1e6
+    r21    = -sis21["R"] / 1e6
+    neto21 =  sis21["neto"] / 1e6
 
-    dias_hab = sub.index
-    x = range(len(dias_hab))
-    etiquetas = [f"{d.strftime('%a %d-%b')}" for d in dias_hab]
+    fig5, ax5 = plt.subplots(figsize=(14, 6))
 
-    # Barras pre (naranja) y post (verde)
-    pre_vals  = sub["is_pre_eleccion"].values  if "is_pre_eleccion"  in sub.columns else [0]*len(sub)
-    post_vals = sub["is_post_eleccion"].values if "is_post_eleccion" in sub.columns else [0]*len(sub)
+    ax5.bar(sis21.index, d21,    color="steelblue", width=1, alpha=0.8, label="Depositos")
+    ax5.bar(sis21.index, r21,    color="tomato",    width=1, alpha=0.8, label="Retiros")
+    ax5.plot(sis21.index, neto21, color="black",    lw=1.0, alpha=0.9,  label="Neto")
+    ax5.axhline(0, color="black", lw=0.6)
 
-    ax.bar(x, pre_vals,  color="darkorange", alpha=0.8, label="is_pre_eleccion",  width=0.4, align="edge")
-    ax.bar([xi + 0.4 for xi in x], post_vals, color="steelblue", alpha=0.8,
-           label="is_post_eleccion", width=0.4, align="edge")
+    ax5.axvspan(elec_1ra, elec_2da, color="crimson", alpha=0.07)
+    ax5.axvline(elec_1ra, color="crimson", lw=1.8, ls="--",
+                label="1ra Vuelta (11-abr)")
+    ax5.axvline(elec_2da, color="purple",  lw=1.8, ls="--",
+                label="2da Vuelta (6-jun)")
 
-    # Línea vertical en domingo de elección (no es día hábil, cae entre barras)
-    # Calcular posición interpolada del domingo dentro del eje x
-    dias_antes = sum(1 for d in dias_hab if d < elec_day)
-    ax.axvline(x=dias_antes - 0.2, color="red", lw=2, ls="--",
-               label=f"Domingo elección\n({elec_day.strftime('%d %b')})")
+    ymin = min(r21.min(), neto21.min()) * 1.15
+    ax5.text(elec_1ra, ymin, "1ra Vuelta\n(11-abr)",
+             rotation=90, va="bottom", ha="right", fontsize=8, color="crimson")
+    ax5.text(elec_2da, ymin, "2da Vuelta\n(6-jun)",
+             rotation=90, va="bottom", ha="right", fontsize=8, color="purple")
 
-    # Anotar el domingo
-    ax.annotate(f"ELECCIÓN\n{elec_day.strftime('%d-%b')}\n(domingo)",
-                xy=(dias_antes - 0.2, 0.5), xytext=(dias_antes + 0.5, 0.85),
-                fontsize=8, color="red", fontweight="bold",
-                arrowprops=dict(arrowstyle="->", color="red", lw=1.2))
+    ax5.set_ylabel("MM USD (neto diario)")
+    ax5.set_title("Transferencias Exterior - 2021", fontweight="bold", fontsize=12)
+    ax5.xaxis.set_major_locator(mdates.MonthLocator())
+    ax5.xaxis.set_major_formatter(mdates.DateFormatter("%b"))
+    ax5.tick_params(axis="x", rotation=0)
+    ax5.legend(fontsize=8, loc="upper right")
+    ax5.grid(True, alpha=0.3)
 
-    ax.set_xticks(list(x))
-    ax.set_xticklabels(etiquetas, rotation=45, ha="right", fontsize=8)
-    ax.set_ylim(-0.05, 1.3)
-    ax.set_yticks([0, 1])
-    ax.set_yticklabels(["0 (inactivo)", "1 (activo)"])
-    ax.set_title(f"Ventana electoral — {vuelta} ({elec_day.strftime('%d %b %Y')})",
-                 fontsize=11, fontweight="bold")
-    ax.legend(fontsize=9, loc="upper left")
-    ax.grid(True, axis="y", alpha=0.3)
-
-plt.suptitle(
-    "Features Electorales 2021 — is_pre/post_eleccion (ventana ±14 días calendario)\n"
-    "is_eleccion siempre 0: las elecciones peruanas son en domingo (día no hábil)",
-    fontsize=11, fontweight="bold"
-)
-plt.tight_layout()
-plt.savefig(
-    r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Clean\features_electorales_2021.png",
-    dpi=150, bbox_inches="tight"
-)
-plt.show()
+    plt.tight_layout()
+    plt.savefig(
+        r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Clean\flujos_2021_electoral.png",
+        dpi=150, bbox_inches="tight"
+    )
+    plt.show()
