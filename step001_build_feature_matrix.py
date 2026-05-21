@@ -53,7 +53,7 @@ PARAMS = {
     },
 
     # Agrupación de bancos
-    "umbral_banco_pequeño_pct": 0.05,   # bancos con < 5% del volumen → Otros
+    "umbral_banco_pequeño_pct": 0.01,   # bancos con < 1% del volumen → Otros
     "bancos_otros": [],                  # lista fija (tiene prioridad si no está vacía)
     "nombre_otros": "Otros_bancos",
 

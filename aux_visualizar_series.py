@@ -74,7 +74,7 @@ plt.show()
 # ─────────────────────────────────────────────────────────────────
 # BLOQUE 2a: Participación de volumen por banco
 # ─────────────────────────────────────────────────────────────────
-UMBRAL_PCT = PARAMS.get("umbral_banco_pequeño_pct", 0.05)
+UMBRAL_PCT = 0.01
 
 if not df_banc.empty:
     vol = df_banc.groupby("banco")[["R", "D"]].sum()
@@ -180,38 +180,36 @@ if not df_banc.empty:
     plt.show()
 
 # ─────────────────────────────────────────────────────────────────
-# BLOQUE 2: Series bancarias por banco
+# BLOQUE 2: Series por banco — ANTES del filtro (todos los bancos)
 # ─────────────────────────────────────────────────────────────────
-if not df_banc.empty:
-    bancos = df_banc["banco"].unique()
+def _plot_bancos(df_banc, bancos, titulo, fname):
     n = len(bancos)
-    fig2, axes2 = plt.subplots(n, 2, figsize=(14, 4 * n))
+    fig, axes = plt.subplots(n, 2, figsize=(14, 4 * n))
     if n == 1:
-        axes2 = axes2.reshape(1, -1)
-
+        axes = axes.reshape(1, -1)
     for i, banco in enumerate(bancos):
         sub = df_banc[df_banc["banco"] == banco].set_index("fecha")
-        ax_r = axes2[i, 0]
-        ax_d = axes2[i, 1]
-
-        ax_r.bar(sub.index, sub["R"], color="tomato", width=1, alpha=0.7)
-        ax_r.set_title(f"{banco} — Retiros (USD)", fontsize=9, fontweight="bold")
-        ax_r.xaxis.set_major_locator(mdates.YearLocator(2))
-        ax_r.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
-        ax_r.tick_params(axis="x", rotation=45, labelsize=7)
-        ax_r.grid(True, alpha=0.3)
-
+        ax_r, ax_d = axes[i, 0], axes[i, 1]
+        ax_r.bar(sub.index, sub["R"], color="tomato",    width=1, alpha=0.7)
         ax_d.bar(sub.index, sub["D"], color="steelblue", width=1, alpha=0.7)
-        ax_d.set_title(f"{banco} — Depósitos (USD)", fontsize=9, fontweight="bold")
-        ax_d.xaxis.set_major_locator(mdates.YearLocator(2))
-        ax_d.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
-        ax_d.tick_params(axis="x", rotation=45, labelsize=7)
-        ax_d.grid(True, alpha=0.3)
-
-    plt.suptitle("Retiros y Depósitos por Banco — Datos Reales", fontsize=13, fontweight="bold")
-    plt.tight_layout()
-    plt.savefig(DIR_OUTPUT / "02_series_bancarias.png", dpi=150, bbox_inches="tight")
+        for ax, etiqueta in [(ax_r, "Retiros (USD)"), (ax_d, "Depósitos (USD)")]:
+            ax.set_title(f"{banco} — {etiqueta}", fontsize=9, fontweight="bold")
+            ax.xaxis.set_major_locator(mdates.YearLocator(2))
+            ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+            ax.tick_params(axis="x", rotation=45, labelsize=7)
+            ax.grid(True, alpha=0.3)
+    fig.suptitle(titulo, fontsize=13, fontweight="bold", y=1.0)
+    fig.tight_layout(rect=[0, 0, 1, 0.99])
+    fig.savefig(DIR_OUTPUT / fname, dpi=150, bbox_inches="tight")
     plt.show()
+
+if not df_banc.empty:
+    todos_bancos = sorted(df_banc["banco"].unique())
+    _plot_bancos(
+        df_banc, todos_bancos,
+        f"Retiros y Depósitos por Banco — Antes del filtro ({UMBRAL_PCT:.0%})",
+        "02_series_bancarias_todos.png",
+    )
 
     print("\nResumen por banco (USD):")
     resumen = (
@@ -222,6 +220,43 @@ if not df_banc.empty:
     print(resumen.to_string())
 else:
     print("Sin datos bancarios cargados.")
+
+# ─────────────────────────────────────────────────────────────────
+# BLOQUE 2b: Series por banco — DESPUÉS del filtro (grandes + Otros)
+# ─────────────────────────────────────────────────────────────────
+if not df_banc.empty:
+    # Construir Otros_bancos agregado
+    nombre_otros = PARAMS.get("nombre_otros", "Otros_bancos")
+    bancos_fijos = PARAMS.get("bancos_otros", [])
+
+    if bancos_fijos:
+        pequeños_2b = [b for b in bancos_fijos if b in df_banc["banco"].unique()]
+    else:
+        pequeños_2b = vol[vol["pct"] < UMBRAL_PCT].index.tolist()
+
+    grandes_2b = [b for b in df_banc["banco"].unique() if b not in pequeños_2b]
+
+    if pequeños_2b:
+        df_otros = (
+            df_banc[df_banc["banco"].isin(pequeños_2b)]
+            .groupby("fecha")[["R", "D"]]
+            .sum()
+            .reset_index()
+            .assign(banco=nombre_otros)
+        )
+        df_filtrado = pd.concat(
+            [df_banc[df_banc["banco"].isin(grandes_2b)], df_otros],
+            ignore_index=True,
+        )
+    else:
+        df_filtrado = df_banc[df_banc["banco"].isin(grandes_2b)].copy()
+
+    bancos_filtrados = sorted(grandes_2b) + ([nombre_otros] if pequeños_2b else [])
+    _plot_bancos(
+        df_filtrado, bancos_filtrados,
+        f"Retiros y Depósitos por Banco — Después del filtro ({UMBRAL_PCT:.0%})",
+        "02b_series_bancarias_filtrado.png",
+    )
 
 # ─────────────────────────────────────────────────────────────────
 # BLOQUE 3: Flujos del sistema completo (D, R, neto)
