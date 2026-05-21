@@ -179,6 +179,52 @@ if not df_banc.empty:
     print(f"  Periodo: {flujos_export.index.min().date()} → {flujos_export.index.max().date()}")
 
 # ─────────────────────────────────────────────────────────────────
+# BLOQUE 3b: Flujos sistema — zoom últimos 2 años
+# ─────────────────────────────────────────────────────────────────
+if not df_banc.empty:
+    fecha_fin_3b   = sistema.index.max()
+    fecha_ini_3b   = fecha_fin_3b - pd.DateOffset(years=2)
+    mask_2y        = (sistema.index >= fecha_ini_3b) & (sistema.index <= fecha_fin_3b)
+    sis_2y         = sistema[mask_2y]
+
+    d_2y    =  sis_2y["D"] / 1e6
+    r_2y    = -sis_2y["R"] / 1e6
+    neto_2y =  sis_2y["neto"] / 1e6
+
+    fig3b, ax3b = plt.subplots(figsize=(14, 6))
+
+    ax3b.bar(sis_2y.index, d_2y,    color="steelblue", width=1, alpha=0.8, zorder=1)
+    ax3b.bar(sis_2y.index, r_2y,    color="tomato",    width=1, alpha=0.8, zorder=1)
+    ax3b.plot(sis_2y.index, neto_2y, color="black",    lw=0.9, alpha=0.9, zorder=2)
+    ax3b.axhline(0, color="black", lw=0.6, zorder=3)
+
+    ax3b.set_ylabel("MM USD (neto diario)")
+    ax3b.set_title(
+        f"Flujos Sistema Financiero — Zoom Últimos 2 Años "
+        f"({fecha_ini_3b.strftime('%b %Y')} – {fecha_fin_3b.strftime('%b %Y')})",
+        fontweight="bold"
+    )
+    ax3b.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
+    ax3b.xaxis.set_major_formatter(mdates.DateFormatter("%b\n%Y"))
+    ax3b.tick_params(axis="x", rotation=0)
+    ax3b.legend(
+        fontsize=8, loc="upper left",
+        handles=[
+            plt.Line2D([0], [0], color="black", lw=1.5, label="Neto"),
+            plt.Rectangle((0, 0), 1, 1, fc="steelblue", alpha=0.8, label="Depositos"),
+            plt.Rectangle((0, 0), 1, 1, fc="tomato",    alpha=0.8, label="Retiros"),
+        ]
+    )
+    ax3b.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(
+        r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Clean\flujos_sistema_2y.png",
+        dpi=150, bbox_inches="tight"
+    )
+    plt.show()
+
+# ─────────────────────────────────────────────────────────────────
 # BLOQUE 4: Features de calendario — año 2021
 # (28-jul=miércoles hábil → is_fiestas_patrias; 11-abr y 6-jun → elecciones)
 # ─────────────────────────────────────────────────────────────────
