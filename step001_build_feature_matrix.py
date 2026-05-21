@@ -46,6 +46,12 @@ PARAMS = {
     # Modo demo (True mientras no lleguen los datos reales)
     "usar_datos_demo": False,
 
+    # Alias de bancos: cambios de nombre históricos que deben unificarse
+    # clave = nombre en los datos, valor = nombre canónico
+    "alias_bancos": {
+        "Continen": "BBVA",   # Banco Continental → BBVA desde 2020
+    },
+
     # Agrupación de bancos
     "umbral_banco_pequeño_pct": 0.05,   # bancos con < 5% del volumen → Otros
     "bancos_otros": [],                  # lista fija (tiene prioridad si no está vacía)
@@ -225,8 +231,22 @@ def load_manual_data(params):
                 .rename(columns={"Broker": "banco", "Fecha Valor": "fecha"})
             )
             df_banco["fecha"] = pd.to_datetime(df_banco["fecha"])
-            df_banco = df_banco.sort_values(["banco", "fecha"])
 
+            # Unificar alias históricos (ej. Continen → BBVA)
+            alias = params.get("alias_bancos", {})
+            if alias:
+                df_banco["banco"] = df_banco["banco"].replace(alias)
+                # Re-agregar por si el mismo banco tiene filas con ambos nombres en la misma fecha
+                df_banco = (
+                    df_banco.groupby(["banco", "fecha"])[["R", "D"]]
+                    .sum()
+                    .reset_index()
+                )
+                for viejo, nuevo in alias.items():
+                    if viejo in df_banco["banco"].values or nuevo in df_banco["banco"].values:
+                        logger.info(f"  Alias aplicado: '{viejo}' → '{nuevo}'")
+
+            df_banco = df_banco.sort_values(["banco", "fecha"])
             resultado["bancarios"] = df_banco
             n_bancos = df_banco["banco"].nunique()
             f_min = df_banco["fecha"].min().date()
