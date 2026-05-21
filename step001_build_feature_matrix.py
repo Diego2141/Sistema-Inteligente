@@ -819,7 +819,6 @@ def seasonal_features(fecha, bdays_mes_cache, peru_holidays, fechas_elecciones):
     mes = fecha.month
     is_quincena = int(pos_en_mes == 15 or dias_al_cierre_mes == 0)
     is_cierre_encaje = int(dias_al_cierre_mes <= 1)  # Últimos 2 días hábiles del mes
-    is_fiestas_patrias = int(mes == 7 and fecha.day in [27, 28, 29])
     is_fin_anio = int(mes == 12 and fecha.day >= 28)
 
     return {
@@ -836,7 +835,6 @@ def seasonal_features(fecha, bdays_mes_cache, peru_holidays, fechas_elecciones):
         "mes": mes,
         "is_quincena": is_quincena,
         "is_cierre_encaje": is_cierre_encaje,
-        "is_fiestas_patrias": is_fiestas_patrias,
         "is_fin_anio": is_fin_anio,
         "is_pre_feriado": is_pre_feriado,
         "is_post_feriado": is_post_feriado,
@@ -939,7 +937,6 @@ def _build_seasonal_table(fechas_unicas, peru_holidays, fechas_elecciones, peru_
             "mes"                  : mes,
             "is_quincena"          : int(pos_en_mes == 15 or dias_al_cierre_mes == 0),
             "is_cierre_encaje"     : int(dias_al_cierre_mes <= 1),
-            "is_fiestas_patrias"   : int(mes == 7 and ts.day in [27, 28, 29]),
             "is_fin_anio"          : int(mes == 12 and ts.day >= 28),
             "is_pre_feriado"       : is_pre_feriado,
             "is_post_feriado"      : is_post_feriado,
@@ -1244,7 +1241,6 @@ def build_data_dictionary(params):
     add("mes",                   "Calendario", "Mes del año (1–12)",                                       None, "t+h")
     add("is_quincena",           "Calendario", "1 si t+h es día 15 o último hábil del mes",                None, "t+h")
     add("is_cierre_encaje",      "Calendario", "1 si t+h está en los últimos 2 días hábiles del mes",      None, "t+h")
-    add("is_fiestas_patrias",    "Calendario", "1 si t+h cae en semana de Fiestas Patrias (27-29 jul)",    None, "t+h")
     add("is_fin_anio",           "Calendario", "1 si t+h es 28–31 de diciembre",                           None, "t+h")
     add("is_pre_feriado",        "Calendario / holidays.Peru + holidays.US", "1 si el día siguiente a t+h es feriado PE o US",  None, "t+h")
     add("is_post_feriado",       "Calendario / holidays.Peru + holidays.US", "1 si el día anterior a t+h es feriado PE o US",   None, "t+h")

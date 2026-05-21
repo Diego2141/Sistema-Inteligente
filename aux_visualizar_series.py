@@ -216,7 +216,6 @@ if not df_banc.empty:
 
 # ─────────────────────────────────────────────────────────────────
 # BLOQUE 4: Features de calendario — año 2021
-# (28-jul=miércoles hábil → is_fiestas_patrias; 11-abr y 6-jun → elecciones)
 # ─────────────────────────────────────────────────────────────────
 peru_bday2 = CustomBusinessDay(holidays=peru_holidays)
 fechas_cal = pd.date_range("2021-01-01", "2021-12-31", freq=peru_bday2)
@@ -239,7 +238,7 @@ cols_cal = [
     "is_quincena", "is_cierre_encaje",
     "is_penult_bday_trim", "is_ultimo_bday_trim",
     "is_1er_bday_trim", "is_2do_bday_trim", "is_3er_bday_trim",
-    "is_fiestas_patrias", "is_fin_anio",
+    "is_fin_anio",
     "is_pre_feriado", "is_post_feriado",
     "is_pre_eleccion", "is_post_eleccion",
 ]
