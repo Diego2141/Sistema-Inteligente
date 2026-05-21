@@ -22,8 +22,8 @@ PARAMS = bfm.PARAMS.copy()
 # ─────────────────────────────────────────────────────────────────
 # Cargar datos reales
 # ─────────────────────────────────────────────────────────────────
-peru_bday, peru_holidays, fechas_igv, fechas_elecciones = bfm.build_peru_calendar(
-    años=PARAMS["años_calendario"], ruta_igv=PARAMS["ruta_igv"], ruta_elecciones=None
+peru_bday, peru_holidays, fechas_elecciones = bfm.build_peru_calendar(
+    años=PARAMS["años_calendario"],
 )
 datos    = bfm.load_manual_data(PARAMS)
 df_macro = bfm.download_external_series(PARAMS)
@@ -231,7 +231,7 @@ if not df_banc.empty:
 peru_bday2 = CustomBusinessDay(holidays=peru_holidays)
 fechas_cal = pd.date_range("2021-01-01", "2021-12-31", freq=peru_bday2)
 df_cal = bfm._build_seasonal_table(
-    fechas_cal, peru_holidays, fechas_igv, fechas_elecciones, peru_bday2
+    fechas_cal, peru_holidays, fechas_elecciones, peru_bday2
 )
 
 # Diagnóstico: verificar si las fechas electorales de 2021 son feriados
@@ -251,7 +251,6 @@ cols_cal = [
     "is_1er_bday_trim", "is_2do_bday_trim", "is_3er_bday_trim",
     "is_fiestas_patrias", "is_fin_anio",
     "is_pre_feriado", "is_post_feriado",
-    "is_igv", "dias_al_igv",
     "is_pre_eleccion", "is_post_eleccion",
 ]
 

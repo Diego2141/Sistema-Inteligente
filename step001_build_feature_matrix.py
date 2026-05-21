@@ -64,7 +64,7 @@ PARAMS = {
     "ruta_datos_bancarios": r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Raw\Transacciones_BancaLocal.xlsx",
     "ruta_confirmados": r"RUTA\confirmados.xlsx",
     "ruta_intervencion": r"RUTA\intervencion.xlsx",
-    "ruta_igv": r"RUTA\fechas_igv.xlsx",
+    # "ruta_igv" eliminado: pagos IGV en soles, no relevante para liquidez ME
     # ruta_elecciones: eliminado — fechas presidenciales hardcodeadas en build_peru_calendar()
     "ruta_aux_xgboost": r"RUTA\Aux_XGBoost.py",
     "ruta_output": r"RUTA\matriz_features.xlsx",
@@ -100,12 +100,12 @@ PARAMS = {
 ###############################################################################
 # PARTE 1 — Calendario hábil peruano
 ###############################################################################
-def build_peru_calendar(años, ruta_igv, ruta_elecciones):
+def build_peru_calendar(años, ruta_elecciones=None):
     """
-    Retorna (peru_bday, peru_holidays, fechas_igv, fechas_elecciones).
+    Retorna (peru_bday, peru_holidays, fechas_elecciones).
 
+    Calendario hábil conjunto PE + US: excluye feriados de ambos países.
     Elecciones presidenciales hardcodeadas 2000-2041 (no requieren archivo externo).
-    Si los archivos de IGV no existen, retorna lista vacía sin lanzar error.
     """
     logger.info("PARTE 1: Construyendo calendario hábil peruano...")
 
@@ -130,19 +130,6 @@ def build_peru_calendar(años, ruta_igv, ruta_elecciones):
         from pandas.tseries.offsets import BDay
         peru_bday = BDay()
         peru_holidays = pd.DatetimeIndex([])
-
-    # Cargar fechas IGV
-    fechas_igv = []
-    try:
-        df_igv = pd.read_excel(ruta_igv)
-        if not df_igv.empty:
-            col = df_igv.columns[0]
-            fechas_igv = pd.to_datetime(df_igv[col].dropna()).tolist()
-            logger.info(f"  Fechas IGV cargadas: {len(fechas_igv)}")
-        else:
-            logger.warning(f"  Archivo IGV vacío: {ruta_igv}")
-    except Exception:
-        logger.warning(f"  No se pudo cargar fechas IGV desde: {ruta_igv}")
 
     # Elecciones presidenciales peruanas hardcodeadas 2000-2041
     # Fechas desde 2031 son estimadas (2do domingo de abril / 1er domingo de junio)
@@ -188,7 +175,7 @@ def build_peru_calendar(años, ruta_igv, ruta_elecciones):
         )
 
     logger.info("  Calendario construido correctamente.")
-    return peru_bday, peru_holidays, fechas_igv, fechas_elecciones
+    return peru_bday, peru_holidays, fechas_elecciones
 
 
 def get_future_business_dates(t, h_max, peru_bday):
@@ -755,7 +742,7 @@ def _get_bdays_en_trim(fecha, peru_bday):
     return pd.bdate_range(start=inicio_trim, end=fin_trim, freq=peru_bday)
 
 
-def seasonal_features(fecha, bdays_mes_cache, peru_holidays, fechas_igv, fechas_elecciones):
+def seasonal_features(fecha, bdays_mes_cache, peru_holidays, fechas_elecciones):
     """
     Calcula features del CALENDARIO para la fecha futura t+h.
     Estas variables son siempre conocidas porque son determinísticas.
@@ -811,18 +798,6 @@ def seasonal_features(fecha, bdays_mes_cache, peru_holidays, fechas_igv, fechas_
     is_post_feriado = int((fecha - pd.Timedelta(days=1)) in peru_holidays or
                           (fecha - pd.Timedelta(days=2)) in peru_holidays)
 
-    # IGV — primer día hábil del mes suele ser pago de IGV
-    if fechas_igv:
-        fechas_igv_ts = pd.DatetimeIndex(fechas_igv)
-        diffs = (fechas_igv_ts - fecha).days
-        diffs_pos = diffs[diffs >= 0]
-        dias_al_igv = int(diffs_pos.min()) if len(diffs_pos) > 0 else 30
-        dias_al_igv = min(dias_al_igv, 30)
-        is_igv = int(fecha in fechas_igv_ts)
-    else:
-        is_igv = 0
-        dias_al_igv = 30
-
     # Elecciones — is_eleccion eliminado: elecciones peruanas siempre en domingo (día no hábil)
     if fechas_elecciones:
         is_pre_eleccion = int(0 < (pd.DatetimeIndex(fechas_elecciones) - fecha).days.min() <= 7
@@ -859,8 +834,6 @@ def seasonal_features(fecha, bdays_mes_cache, peru_holidays, fechas_igv, fechas_
         "is_fin_anio": is_fin_anio,
         "is_pre_feriado": is_pre_feriado,
         "is_post_feriado": is_post_feriado,
-        "is_igv": is_igv,
-        "dias_al_igv": dias_al_igv,
         "is_pre_eleccion": is_pre_eleccion,
         "is_post_eleccion": is_post_eleccion,
     }
@@ -869,7 +842,7 @@ def seasonal_features(fecha, bdays_mes_cache, peru_holidays, fechas_igv, fechas_
 ###############################################################################
 # PARTE 6 — Construcción de la matriz de features completa
 ###############################################################################
-def _build_seasonal_table(fechas_unicas, peru_holidays, fechas_igv, fechas_elecciones, peru_bday):
+def _build_seasonal_table(fechas_unicas, peru_holidays, fechas_elecciones, peru_bday):
     """
     Calcula features estacionales para un conjunto de fechas únicas (t+h).
     Retorna DataFrame indexado por fecha.
@@ -894,9 +867,7 @@ def _build_seasonal_table(fechas_unicas, peru_holidays, fechas_igv, fechas_elecc
 
     # Sets para lookups rápidos
     hols_set  = set(peru_holidays)
-    igv_set   = set(pd.DatetimeIndex(fechas_igv))   if fechas_igv   else set()
     elec_set  = set(pd.DatetimeIndex(fechas_elecciones)) if fechas_elecciones else set()
-    igv_arr   = np.array(sorted(igv_set),  dtype="datetime64[D]") if igv_set  else np.array([], dtype="datetime64[D]")
     elec_arr  = np.array(sorted(elec_set), dtype="datetime64[D]") if elec_set else np.array([], dtype="datetime64[D]")
 
     registros = []
@@ -935,17 +906,6 @@ def _build_seasonal_table(fechas_unicas, peru_holidays, fechas_igv, fechas_elecc
         is_pre_feriado  = int(any((ts + pd.Timedelta(days=d)) in hols_set for d in [1, 2]))
         is_post_feriado = int(any((ts - pd.Timedelta(days=d)) in hols_set for d in [1, 2]))
 
-        # IGV
-        if len(igv_arr) > 0:
-            ts_d = np.datetime64(ts, "D")
-            diffs = (igv_arr - ts_d).astype(int)
-            futuros = diffs[diffs >= 0]
-            dias_al_igv = int(futuros.min()) if len(futuros) > 0 else 30
-            dias_al_igv = min(dias_al_igv, 30)
-            is_igv = int(ts in igv_set)
-        else:
-            is_igv, dias_al_igv = 0, 30
-
         # Elecciones
         if len(elec_arr) > 0:
             ts_d  = np.datetime64(ts, "D")
@@ -977,8 +937,6 @@ def _build_seasonal_table(fechas_unicas, peru_holidays, fechas_igv, fechas_elecc
             "is_fin_anio"          : int(mes == 12 and ts.day >= 28),
             "is_pre_feriado"       : is_pre_feriado,
             "is_post_feriado"      : is_post_feriado,
-            "is_igv"               : is_igv,
-            "dias_al_igv"          : dias_al_igv,
             "is_pre_eleccion"      : is_pre_eleccion,
             "is_post_eleccion"     : is_post_eleccion,
         })
@@ -993,7 +951,6 @@ def build_feature_matrix(
     bank_features,
     peru_bday,
     peru_holidays,
-    fechas_igv,
     fechas_elecciones,
     h_min,
     h_max,
@@ -1080,7 +1037,7 @@ def build_feature_matrix(
     fechas_th_unicas = pd.DatetimeIndex(df["fecha_th"].unique())
     logger.info(f"    Calculando estacionales para {len(fechas_th_unicas):,} fechas únicas...")
     df_seasonal = _build_seasonal_table(
-        fechas_th_unicas, peru_holidays, fechas_igv, fechas_elecciones, peru_bday
+        fechas_th_unicas, peru_holidays, fechas_elecciones, peru_bday
     )
     df = df.merge(df_seasonal, left_on="fecha_th", right_index=True, how="left")
 
@@ -1104,7 +1061,6 @@ def build_full_matrix(
     macro_features,
     peru_bday,
     peru_holidays,
-    fechas_igv,
     fechas_elecciones,
 ):
     """
@@ -1141,7 +1097,6 @@ def build_full_matrix(
             bank_features=bank_features_dict,
             peru_bday=peru_bday,
             peru_holidays=peru_holidays,
-            fechas_igv=fechas_igv,
             fechas_elecciones=fechas_elecciones,
             h_min=params["h_min"],
             h_max=params["h_max"],
@@ -1273,8 +1228,6 @@ def build_data_dictionary(params):
     add("is_fin_anio",           "Calendario", "1 si t+h es 28–31 de diciembre",                           None, "t+h")
     add("is_pre_feriado",        "Calendario / holidays.Peru + holidays.US", "1 si el día siguiente a t+h es feriado PE o US",  None, "t+h")
     add("is_post_feriado",       "Calendario / holidays.Peru + holidays.US", "1 si el día anterior a t+h es feriado PE o US",   None, "t+h")
-    add("is_igv",                "Archivo IGV", "1 si t+h es fecha de pago de IGV",                       None, "t+h")
-    add("dias_al_igv",           "Archivo IGV", "Días hábiles hasta el próximo vencimiento de IGV (cap 30)", None, "t+h")
     add("is_pre_eleccion",       "Calendario", "1 si t+h está dentro de los 7 días previos a elecciones presidenciales",    None, "t+h")
     add("is_post_eleccion",      "Calendario", "1 si t+h está dentro de los 7 días posteriores a elecciones presidenciales", None, "t+h")
 
@@ -1348,10 +1301,8 @@ if __name__ == "__main__":
     logger.info("=" * 60)
 
     # 1. Calendario
-    peru_bday, peru_holidays, fechas_igv, fechas_elecciones = build_peru_calendar(
+    peru_bday, peru_holidays, fechas_elecciones = build_peru_calendar(
         años=PARAMS["años_calendario"],
-        ruta_igv=PARAMS["ruta_igv"],
-        ruta_elecciones=None,  # eliminado: fechas hardcodeadas en build_peru_calendar()
     )
 
     # 2. Datos manuales + macro
@@ -1388,7 +1339,6 @@ if __name__ == "__main__":
         macro_features=macro_features,
         peru_bday=peru_bday,
         peru_holidays=peru_holidays,
-        fechas_igv=fechas_igv,
         fechas_elecciones=fechas_elecciones,
     )
 
