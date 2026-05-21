@@ -643,7 +643,8 @@ def build_bank_features(df_banco, lags_cortos, lag_semana, lag_mes, ventanas_vol
     """
     if df_banco.empty or "R" not in df_banco.columns or "D" not in df_banco.columns:
         cols = (
-            [f"R_t-{l}" for l in lags_cortos + [lag_semana, lag_mes]]
+            ["R_t0", "D_t0"]
+            + [f"R_t-{l}" for l in lags_cortos + [lag_semana, lag_mes]]
             + [f"D_t-{l}" for l in lags_cortos + [lag_semana, lag_mes]]
             + [f"sigma_R_{v}d" for v in ventanas_vol]
             + [f"sigma_D_{v}d" for v in ventanas_vol]
@@ -655,6 +656,11 @@ def build_bank_features(df_banco, lags_cortos, lag_semana, lag_mes, ventanas_vol
 
     df = df_banco[["R", "D"]].copy()
     resultado = pd.DataFrame(index=df.index)
+
+    # Valores de hoy: disponibles en t por aviso anticipado
+    # R avisado 2 días antes → R(t) conocido en t; D avisado 1 día antes → D(t) conocido en t
+    resultado["R_t0"] = df["R"]
+    resultado["D_t0"] = df["D"]
 
     todos_lags = lags_cortos + [lag_semana, lag_mes]
 
@@ -1175,25 +1181,39 @@ def build_data_dictionary(params):
     add("h",        "Sistema", "Horizonte de predicción en días hábiles", None, "t+h")
     add("log_h",    "Sistema", "Logaritmo natural del horizonte h",       None, "t+h")
 
-    # ── Features bancarias (observadas en t) ─────────────────────────────────
+    # ── Features bancarias ────────────────────────────────────────────────────
+    # Estructura de información disponible en t:
+    #   R (retiros, aviso 2 días hábiles antes):
+    #     t-2 → R(t) disponible como R_t0
+    #     t-1 → R(t+1) disponible como R_conf_t1
+    #     t   → R(t+2) disponible como R_conf_t2
+    #   D (depósitos, aviso 1 día hábil antes):
+    #     t-1 → D(t) disponible como D_t0
+    #     t   → D(t+1) disponible como D_conf_t1
+
+    # Valores de hoy: conocidos por aviso anticipado
+    add("R_t0", "Datos bancarios", "Retiro realizado en t — conocido hoy (avisado en t-2)", 0, None)
+    add("D_t0", "Datos bancarios", "Depósito realizado en t — conocido hoy (avisado en t-1)", 0, None)
+
+    # Rezagos históricos
     todos_lags = lags_cortos + [lag_semana, lag_mes]
     for l in todos_lags:
         add(f"R_t-{l}", "Datos bancarios", f"Retiro del banco en t-{l}", l, None)
         add(f"D_t-{l}", "Datos bancarios", f"Depósito del banco en t-{l}", l, None)
 
     for v in ventanas_vol:
-        add(f"sigma_R_{v}d", "Datos bancarios", f"Desv. estándar rolling {v}d de retiros",    None, None)
-        add(f"sigma_D_{v}d", "Datos bancarios", f"Desv. estándar rolling {v}d de depósitos",  None, None)
-        add(f"ma_R_{v}d",    "Datos bancarios", f"Media móvil {v}d de retiros",                None, None)
-        add(f"ma_D_{v}d",    "Datos bancarios", f"Media móvil {v}d de depósitos",              None, None)
+        add(f"sigma_R_{v}d", "Datos bancarios", f"Desv. estándar rolling {v}d de retiros (incluye R_t0)",    None, None)
+        add(f"sigma_D_{v}d", "Datos bancarios", f"Desv. estándar rolling {v}d de depósitos (incluye D_t0)",  None, None)
+        add(f"ma_R_{v}d",    "Datos bancarios", f"Media móvil {v}d de retiros (incluye R_t0)",                None, None)
+        add(f"ma_D_{v}d",    "Datos bancarios", f"Media móvil {v}d de depósitos (incluye D_t0)",              None, None)
 
-    add("delta_R", "Datos bancarios", "Variación diaria de retiros R(t) - R(t-1)",   1, None)
-    add("delta_D", "Datos bancarios", "Variación diaria de depósitos D(t) - D(t-1)", 1, None)
+    add("delta_R", "Datos bancarios", "Variación diaria de retiros: R_t0 - R(t-1)",   0, None)
+    add("delta_D", "Datos bancarios", "Variación diaria de depósitos: D_t0 - D(t-1)", 0, None)
 
-    # ── Features operativas confirmadas (conocidas en t) ─────────────────────
-    add("R_conf_t1", "Confirmados operativos", "Retiro confirmado para t+1 (informado ayer)", -1, "t+1")
-    add("R_conf_t2", "Confirmados operativos", "Retiro confirmado para t+2 (informado hoy)",   0, "t+2")
-    add("D_conf_t1", "Confirmados operativos", "Depósito confirmado para t+1 (informado hoy)", 0, "t+1")
+    # ── Confirmados futuros (notificados formalmente por los bancos) ──────────
+    add("R_conf_t1", "Confirmados operativos", "Retiro confirmado para t+1 (notificado en t-1, aviso 2d)", -1, "t+1")
+    add("R_conf_t2", "Confirmados operativos", "Retiro confirmado para t+2 (notificado hoy, aviso 2d)",     0, "t+2")
+    add("D_conf_t1", "Confirmados operativos", "Depósito confirmado para t+1 (notificado hoy, aviso 1d)",   0, "t+1")
 
     # ── Features macroeconómicas (observadas en t) ───────────────────────────
     add("VIX",              "Yahoo Finance",  "Índice de volatilidad implícita S&P 500",          0, None)
