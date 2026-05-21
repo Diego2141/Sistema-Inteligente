@@ -8,7 +8,9 @@
 
 # Outputs generados
 1. Data/Clean/matriz_features.xlsx
+1. Data/Clean/matriz_features.pkl
 *.parquet
+*.pkl
 
 # Python
 __pycache__/

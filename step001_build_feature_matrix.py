@@ -74,7 +74,7 @@ PARAMS = {
     # "ruta_igv" eliminado: pagos IGV en soles, no relevante para liquidez ME
     # ruta_elecciones: eliminado — fechas presidenciales hardcodeadas en build_peru_calendar()
     "ruta_aux_xgboost": r"RUTA\Aux_XGBoost.py",
-    "ruta_output":      r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Clean\matriz_features.parquet",
+    "ruta_output":      r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Clean\matriz_features.pkl",
     "ruta_diccionario": r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Clean\diccionario_variables.xlsx",
 
     # Series BCRP descargadas manualmente con Add-In BCRPData
@@ -1141,16 +1141,17 @@ def build_full_matrix(
 
     matriz = pd.concat(matrices, ignore_index=True)
 
-    # Exportar a Parquet (equivalente binario a .mat — comprimido, tipado, rápido)
-    ruta_output = Path(params.get("ruta_output", "matriz_features.parquet"))
+    # Exportar a Pickle (binario nativo Python — sin dependencias externas)
+    # Migrar a Parquet cuando pyarrow esté instalado: matriz.to_parquet(..., compression="snappy")
+    ruta_output = Path(params.get("ruta_output", "matriz_features.pkl"))
     try:
         ruta_output.parent.mkdir(parents=True, exist_ok=True)
-        matriz.to_parquet(ruta_output, index=False, compression="snappy")
+        matriz.to_pickle(ruta_output)
         size_mb = ruta_output.stat().st_size / 1e6
         logger.info(f"  Matriz exportada: {ruta_output}  ({size_mb:.1f} MB)")
-        logger.info(f"  Para cargar: pd.read_parquet(r'{ruta_output}')")
+        logger.info(f"  Para cargar: pd.read_pickle(r'{ruta_output}')")
     except Exception as e:
-        logger.warning(f"  No se pudo exportar a Parquet: {e}")
+        logger.warning(f"  No se pudo exportar: {e}")
 
     # Resumen final
     logger.info(f"\n{'='*60}")
