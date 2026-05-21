@@ -275,8 +275,11 @@ def load_manual_data(params):
 
             # Rellenar calendario completo con 0: días sin transacción = flujo cero,
             # no dato desconocido. Evita NaN masivos en lags, sigmas y medias móviles.
+            # reindex() añade fechas faltantes (fill_value=0).
+            # fillna(0.0) cubre además los NaN internos del pivot (banco sin transacción
+            # en una fecha donde otro banco sí la tuvo — pivot_table los deja como NaN).
             idx_completo = pd.bdate_range(start=df_wide.index.min(), end=df_wide.index.max())
-            df_wide = df_wide.reindex(idx_completo, fill_value=0.0)
+            df_wide = df_wide.reindex(idx_completo, fill_value=0.0).fillna(0.0)
             df_wide.index.name = "fecha"
 
             resultado["bancarios"] = df_wide
