@@ -645,7 +645,7 @@ def download_external_series(params):
     for nombre, s in series.items():
         if not s.empty:
             s_alineada = s.reindex(idx)
-            s_alineada = s_alineada.ffill(limit=3)
+            s_alineada = s_alineada.ffill()   # sin límite: series mensuales/trimestrales se propagan correctamente
             df[nombre] = s_alineada
         else:
             df[nombre] = np.nan
