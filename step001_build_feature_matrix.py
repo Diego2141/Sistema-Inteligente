@@ -100,7 +100,7 @@ PARAMS = {
     "ticker_t10y": "^TNX",
 
     # Código FRED
-    "fred_fedfunds": "FEDFUNDS",
+    "fred_fedfunds": "DFF",            # Daily Federal Funds Effective Rate (diaria)
 }
 
 
