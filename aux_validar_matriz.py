@@ -27,7 +27,7 @@ BATCH_SIZE = 100_000   # filas por bloque en el pase de NaN/rangos
 print(f"Leyendo metadata: {RUTA_MATRIZ}")
 pf      = pq.ParquetFile(RUTA_MATRIZ)
 n_total = pf.metadata.num_rows
-all_cols = [pf.schema_arrow.field(i).name for i in range(pf.schema_arrow.num_fields)]
+all_cols = pf.schema_arrow.names
 
 cols_id     = ["fecha_t", "banco", "h", "log_h"]
 cols_target = ["target"]
