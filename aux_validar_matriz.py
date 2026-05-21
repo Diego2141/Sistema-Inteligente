@@ -13,7 +13,7 @@ import matplotlib.gridspec as gridspec
 import matplotlib.colors as mcolors
 
 BASE_SISTEMA = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente")
-RUTA_MATRIZ  = BASE_SISTEMA / "1. Data" / "Clean" / "matriz_features.pkl"
+RUTA_MATRIZ  = BASE_SISTEMA / "1. Data" / "Clean" / "matriz_features.parquet"
 DIR_OUTPUT   = BASE_SISTEMA / "2. Output" / "aux_validar_matriz"
 DIR_OUTPUT.mkdir(parents=True, exist_ok=True)
 
@@ -21,7 +21,7 @@ DIR_OUTPUT.mkdir(parents=True, exist_ok=True)
 # 1. Cargar matriz
 # ─────────────────────────────────────────────────────────────────
 print(f"Cargando: {RUTA_MATRIZ}")
-df = pd.read_pickle(RUTA_MATRIZ)
+df = pd.read_parquet(RUTA_MATRIZ)
 print(f"  Shape: {df.shape[0]:,} filas × {df.shape[1]} columnas")
 
 cols_id     = ["fecha_t", "banco", "h", "log_h"]
