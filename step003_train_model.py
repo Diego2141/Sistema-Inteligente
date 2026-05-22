@@ -581,9 +581,11 @@ def entrenar_banco(banco: str) -> dict | None:
 
     # ── 8. Gráficos ─────────────────────────────────────────────
     graficar_importancia(modelos_prod, cols_feat, banco, DIR_PLOTS)
-    # Fan chart sobre TEST (evaluación final) y también sobre VAL (diagnóstico)
-    graficar_fanchart_split(df_test, preds_test, y_test, banco, DIR_PLOTS, split_name="test")
-    graficar_fanchart_split(df_val,  preds_val_diag, y_val, banco, DIR_PLOTS, split_name="val")
+    # Alinear df con y y preds: filtrar solo filas con target (igual que preparar_Xy)
+    df_test_plot = df_test[df_test["target"].notna()].reset_index(drop=True)
+    df_val_plot  = df_val[df_val["target"].notna()].reset_index(drop=True)
+    graficar_fanchart_split(df_test_plot, preds_test,     y_test, banco, DIR_PLOTS, split_name="test")
+    graficar_fanchart_split(df_val_plot,  preds_val_diag, y_val,  banco, DIR_PLOTS, split_name="val")
 
     # Liberar memoria
     del df, df_train, df_val, df_test
