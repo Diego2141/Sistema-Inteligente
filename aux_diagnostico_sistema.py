@@ -129,7 +129,7 @@ def diag_nan(df, df_tr):
                   if c in df.columns]
     if cols_banco:
         nan_mes = (df.set_index("fecha_t")[cols_banco]
-                     .resample("ME").apply(lambda x: x.isna().mean())
+                     .resample("M").apply(lambda x: x.isna().mean())
                      .rename_axis("fecha"))
         for c in cols_banco:
             ax2.plot(nan_mes.index, nan_mes[c]*100, label=c, alpha=0.8)
