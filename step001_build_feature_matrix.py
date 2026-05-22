@@ -702,6 +702,14 @@ def _garch_vol(flujo: pd.Series) -> pd.Series:
     """
     try:
         from arch import arch_model
+        # scipy 1.9+ removió spmatrix — parchamos antes de que arch lo use
+        try:
+            import scipy.sparse
+            if not hasattr(scipy.sparse, "spmatrix"):
+                from scipy.sparse._base import spmatrix
+                scipy.sparse.spmatrix = spmatrix
+        except Exception:
+            pass
     except ImportError:
         logger.warning("  'arch' no instalado — usando rolling std como proxy GARCH. "
                        "Instalar con: pip install arch")
