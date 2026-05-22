@@ -691,46 +691,69 @@ def download_external_series(params):
 # 5a. Features bancarias
 def _garch_vol(flujo: pd.Series) -> pd.Series:
     """
-    Ajusta GARCH(1,1) sobre la serie del flujo neto y retorna la volatilidad
-    condicional σ_t en las mismas unidades que la serie original.
+    GARCH(1,1) implementado en NumPy + scipy.optimize — sin dependencia del
+    paquete 'arch' ni de statsmodels, evitando incompatibilidades con scipy 1.9+.
+
+    Modelo:
+        σ²_t = ω + α·ε²_{t-1} + β·σ²_{t-1}
+
+    donde ε_t = x_t (flujo neto centrado). Los parámetros ω, α, β se estiman
+    por Máxima Verosimilitud Gaussiana usando L-BFGS-B.
 
     σ_t usa solo información hasta t-1 → sin look-ahead bias.
-    Fallback a rolling std de 20 días si arch no está instalado o el ajuste falla.
-
-    Escalamos la serie a media 0 y std 1 antes de ajustar para estabilidad
-    numérica (GARCH es sensible a la magnitud de los datos).
+    Fallback a rolling std 20d si la serie es constante o muy corta.
     """
-    try:
-        from arch import arch_model
-        # scipy 1.9+ removió spmatrix — parchamos antes de que arch lo use
-        try:
-            import scipy.sparse
-            if not hasattr(scipy.sparse, "spmatrix"):
-                from scipy.sparse._base import spmatrix
-                scipy.sparse.spmatrix = spmatrix
-        except Exception:
-            pass
-    except ImportError:
-        logger.warning("  'arch' no instalado — usando rolling std como proxy GARCH. "
-                       "Instalar con: pip install arch")
-        return flujo.rolling(20).std()
-
     if flujo.dropna().std() < 1e-9 or len(flujo.dropna()) < 60:
         return flujo.rolling(20).std()
 
-    escala = flujo.std()
-    flujo_norm = (flujo / escala).fillna(0.0)
+    from scipy.optimize import minimize
+
+    # Escalar a varianza unitaria para estabilidad numérica del optimizador
+    escala  = flujo.std()
+    x       = (flujo / escala).fillna(0.0).values.astype(float)
+    n       = len(x)
+    var_unc = float(np.var(x))   # varianza incondicional → σ²_0 inicial
+
+    def _sigma2(params):
+        """Calcula la varianza condicional para un vector de parámetros."""
+        omega, alpha, beta = params
+        s2 = np.empty(n)
+        s2[0] = var_unc
+        for t in range(1, n):
+            s2[t] = omega + alpha * x[t-1]**2 + beta * s2[t-1]
+        return s2
+
+    def _neg_loglik(params):
+        """Log-verosimilitud gaussiana negativa (a minimizar)."""
+        omega, alpha, beta = params
+        # Restricciones de estacionariedad: ω>0, α>0, β>0, α+β<1
+        if omega <= 0 or alpha <= 0 or beta <= 0 or alpha + beta >= 0.9999:
+            return 1e10
+        s2 = _sigma2(params)
+        if np.any(s2 <= 0):
+            return 1e10
+        return 0.5 * float(np.sum(np.log(s2) + x**2 / s2))
+
+    # Punto de partida: parámetros típicos de series financieras diarias
+    p0     = [0.01, 0.08, 0.88]
+    bounds = [(1e-7, 0.5), (1e-7, 0.5), (1e-7, 0.9999)]
 
     try:
-        modelo = arch_model(flujo_norm, vol="Garch", p=1, q=1,
-                            dist="normal", rescale=False)
-        res = modelo.fit(disp="off", show_warning=False,
-                         options={"maxiter": 500, "ftol": 1e-9})
-        # conditional_volatility está en unidades de flujo_norm → reescalar
-        vol_cond = pd.Series(res.conditional_volatility,
-                             index=flujo_norm.index) * escala
-        # Los primeros valores son NaN por calentamiento del modelo
-        return vol_cond
+        res = minimize(_neg_loglik, p0, method="L-BFGS-B", bounds=bounds,
+                       options={"maxiter": 500, "ftol": 1e-10, "gtol": 1e-7})
+        if not res.success and res.fun > 1e9:
+            raise ValueError(res.message)
+
+        sigma2     = _sigma2(res.x)
+        sigma_cond = pd.Series(np.sqrt(np.maximum(sigma2, 0)) * escala,
+                               index=flujo.index)
+        logger.info(
+            f"    GARCH(1,1) ajustado: ω={res.x[0]:.5f}  "
+            f"α={res.x[1]:.4f}  β={res.x[2]:.4f}  "
+            f"persistencia={res.x[1]+res.x[2]:.4f}"
+        )
+        return sigma_cond
+
     except Exception as e:
         logger.warning(f"  GARCH no convergió ({e}) — usando rolling std 20d")
         return flujo.rolling(20).std()
