@@ -833,8 +833,8 @@ def build_macro_features(macro_df):
     if macro_df.empty:
         cols = [
             "VIX", "delta_VIX", "VIX_ma22",
-            "TC_PEN_USD", "delta_TC", "tc_vol_5d", "tc_vol_22d",
-            "EMBI_PERU", "delta_EMBI",
+            "TC_PEN_USD", "delta_TC", "tc_vol_5d", "tc_vol_22d", "garch_vol_tc",
+            "EMBI_PERU", "delta_EMBI", "garch_vol_embi",
             "TASA_REF_BCRP", "FED_FUNDS", "diferencial_tasas", "T10Y",
         ]
         return pd.DataFrame(columns=cols)
@@ -852,9 +852,13 @@ def build_macro_features(macro_df):
     retornos_tc = tc.pct_change()
     resultado["tc_vol_5d"] = retornos_tc.rolling(5).std()
     resultado["tc_vol_22d"] = retornos_tc.rolling(22).std()
+    retornos_log_tc = np.log(tc / tc.shift(1))
+    resultado["garch_vol_tc"] = _garch_vol(retornos_log_tc)
 
     resultado["EMBI_PERU"] = df.get("EMBI_PERU", np.nan)
-    resultado["delta_EMBI"] = df.get("EMBI_PERU", pd.Series(dtype=float)).diff(1)
+    delta_embi = df.get("EMBI_PERU", pd.Series(dtype=float)).diff(1)
+    resultado["delta_EMBI"] = delta_embi
+    resultado["garch_vol_embi"] = _garch_vol(delta_embi)
 
     resultado["TASA_REF_BCRP"] = df.get("TASA_REF_BCRP", np.nan)
     resultado["FED_FUNDS"] = df.get("FED_FUNDS", np.nan)
@@ -1178,7 +1182,8 @@ def build_feature_matrix(
         df = df.merge(macro_features, left_on="fecha_t", right_index=True, how="left")
     else:
         for col in ["VIX","delta_VIX","VIX_ma22","TC_PEN_USD","delta_TC",
-                    "tc_vol_5d","tc_vol_22d","EMBI_PERU","delta_EMBI",
+                    "tc_vol_5d","tc_vol_22d","garch_vol_tc",
+                    "EMBI_PERU","delta_EMBI","garch_vol_embi",
                     "TASA_REF_BCRP","FED_FUNDS","diferencial_tasas","T10Y"]:
             df[col] = np.nan
 
@@ -1414,8 +1419,10 @@ def build_data_dictionary(params):
     add("delta_TC",         "BCRP Add-In",    "Variación diaria del tipo de cambio",              1, None)
     add("tc_vol_5d",        "BCRP Add-In",    "Volatilidad rolling 5d de retornos del TC",        None, None)
     add("tc_vol_22d",       "BCRP Add-In",    "Volatilidad rolling 22d de retornos del TC",       None, None)
+    add("garch_vol_tc",     "BCRP Add-In",    "Volatilidad condicional GARCH(1,1) de retornos log del TC PEN/USD — detecta estrés cambiario", None, None)
     add("EMBI_PERU",        "BCRP Add-In",    "EMBI Perú (riesgo país)",                          0, None)
     add("delta_EMBI",       "BCRP Add-In",    "Variación diaria del EMBI Perú",                   1, None)
+    add("garch_vol_embi",   "BCRP Add-In",    "Volatilidad condicional GARCH(1,1) de cambios diarios del EMBI Perú — detecta estrés político", None, None)
     add("TASA_REF_BCRP",    "BCRP Add-In",    "Tasa de referencia del BCRP",                      0, None)
     add("FED_FUNDS",        "FRED API",       "Tasa de política monetaria de la Fed",             0, None)
     add("diferencial_tasas","Calculado",      "TASA_REF_BCRP - FED_FUNDS",                        0, None)
