@@ -1151,9 +1151,29 @@ def build_full_matrix(
     ruta_output  = Path(params.get("ruta_output", "matriz_features.parquet"))
     ruta_output.parent.mkdir(parents=True, exist_ok=True)
 
+    # ── Agregar SISTEMA: suma del sistema bancario completo ──────────────────
+    # Las features de SISTEMA se calculan sobre la serie agregada (no suma de
+    # features individuales) para que volatilidades y medias móviles sean correctas.
+    NOMBRE_SISTEMA = "SISTEMA"
+    if not df_bancarios.empty:
+        r_cols = [c for c in df_bancarios.columns if c.endswith("_R")]
+        d_cols = [c for c in df_bancarios.columns if c.endswith("_D")]
+        if r_cols and d_cols:
+            df_bancarios = df_bancarios.copy()
+            df_bancarios[f"{NOMBRE_SISTEMA}_R"] = df_bancarios[r_cols].sum(axis=1)
+            df_bancarios[f"{NOMBRE_SISTEMA}_D"] = df_bancarios[d_cols].sum(axis=1)
+            datos_manuales["bancarios"] = df_bancarios
+            logger.info(
+                f"  SISTEMA agregado: suma de {len(r_cols)} series "
+                f"({', '.join(c.replace('_R','') for c in r_cols)})"
+            )
+
+    # SISTEMA va primero en la lista para poder validarlo de forma aislada
+    lista_bancos_full = [NOMBRE_SISTEMA] + list(lista_bancos)
+
     # Pre-calcular features bancarias (una serie por banco, bajo consumo de RAM)
     bank_features_dict = {}
-    for banco in lista_bancos:
+    for banco in lista_bancos_full:
         if not df_bancarios.empty and f"{banco}_R" in df_bancarios.columns:
             df_banco = df_bancarios[[f"{banco}_R", f"{banco}_D"]].rename(
                 columns={f"{banco}_R": "R", f"{banco}_D": "D"}
@@ -1173,7 +1193,7 @@ def build_full_matrix(
     total_filas = 0
     schema_ref  = None
 
-    for banco in lista_bancos:
+    for banco in lista_bancos_full:
         df_banco_mat = build_feature_matrix(
             banco=banco,
             datos_manuales=datos_manuales,

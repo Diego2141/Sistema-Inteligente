@@ -76,6 +76,12 @@ SEMANAS_TEST = 13   # ~3 meses como holdout final de evaluación
 # Trials Optuna por banco
 N_TRIALS_OPTUNA = 60
 
+# Filtro de bancos a entrenar.
+# None  → entrena todos los bancos presentes en la matriz.
+# Lista → entrena solo los bancos especificados.
+# Ejemplo para validar solo el agregado: BANCOS_A_ENTRENAR = ["SISTEMA"]
+BANCOS_A_ENTRENAR = ["SISTEMA"]   # cambiar a None para entrenar todos
+
 # Features a excluir del entrenamiento (identificadores, no predictores)
 COLS_EXCLUIR = {"fecha_t", "banco", "target"}
 
@@ -612,14 +618,27 @@ def main():
         logger.error("Ejecutar step001_build_feature_matrix.py primero.")
         return
 
-    # ── Leer lista de bancos desde metadata del Parquet ──────────
-    pf = pq.ParquetFile(RUTA_MATRIZ)
-    # Lectura rápida solo de la columna banco para obtener la lista única
+    # ── Leer lista de bancos desde el Parquet ────────────────────
     df_bancos = pd.read_parquet(RUTA_MATRIZ, columns=["banco"])
-    lista_bancos = sorted(df_bancos["banco"].unique())
+    bancos_disponibles = sorted(df_bancos["banco"].unique())
     del df_bancos
     gc.collect()
 
+    # Aplicar filtro BANCOS_A_ENTRENAR
+    if BANCOS_A_ENTRENAR is not None:
+        no_encontrados = [b for b in BANCOS_A_ENTRENAR if b not in bancos_disponibles]
+        if no_encontrados:
+            logger.error(
+                f"Bancos solicitados no encontrados en la matriz: {no_encontrados}\n"
+                f"Disponibles: {bancos_disponibles}\n"
+                "¿Se ejecutó step001 con la versión que incluye SISTEMA?"
+            )
+            return
+        lista_bancos = [b for b in BANCOS_A_ENTRENAR if b in bancos_disponibles]
+    else:
+        lista_bancos = bancos_disponibles
+
+    logger.info(f"  Bancos disponibles : {bancos_disponibles}")
     logger.info(f"  Bancos a entrenar  : {lista_bancos}")
     logger.info("")
 
