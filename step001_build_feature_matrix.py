@@ -34,10 +34,18 @@ logger = logging.getLogger(__name__)
 ###############################################################################
 # PARTE 0 — Parámetros globales
 ###############################################################################
+
+# Fecha de corte dinámica: ayer (último día hábil confirmado).
+# Lógica: D(t) se conoce con 1 día hábil de anticipación y R(t) con 2.
+# Usando t-1 día hábil garantizamos que tanto R como D del último día
+# estén completamente confirmados en Transacciones_BancaLocal.xlsx.
+_hoy = pd.Timestamp.today().normalize()
+_fin_historico = (_hoy - pd.offsets.BDay(1)).strftime("%Y-%m-%d")
+
 PARAMS = {
     # Fechas
     "fecha_inicio_historico": "2010-01-01",
-    "fecha_fin_historico": "2025-12-31",
+    "fecha_fin_historico": _fin_historico,   # dinámico: ayer (1 día hábil de rezago)
 
     # Modelo
     "h_min": 2,
