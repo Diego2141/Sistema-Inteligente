@@ -1390,6 +1390,15 @@ def build_data_dictionary(params):
     add("delta_R", "Datos bancarios", "Variación diaria de retiros: R_t0 - R(t-1)",   0, None)
     add("delta_D", "Datos bancarios", "Variación diaria de depósitos: D_t0 - D(t-1)", 0, None)
 
+    # Volatilidad y nivel del flujo neto (D - R)
+    for v in [5, 20]:
+        add(f"sigma_flujo_{v}d", "Datos bancarios",
+            f"Desv. estándar rolling {v}d del flujo neto D−R (régimen de volatilidad)", None, None)
+        add(f"ma_flujo_{v}d",    "Datos bancarios",
+            f"Media móvil {v}d del flujo neto D−R (nivel reciente del flujo)", None, None)
+    add("garch_vol", "Datos bancarios",
+        "Volatilidad condicional GARCH(1,1) del flujo neto D−R (puro NumPy, sin arch)", None, None)
+
     # ── Confirmados futuros ───────────────────────────────────────────────────
     # Entrenamiento: proxy histórico = valor realizado en t+1/t+2 (shift negativo)
     # Producción:    valor real del correo de aviso (override desde confirmados.xlsx)
