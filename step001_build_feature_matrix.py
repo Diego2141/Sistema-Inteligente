@@ -693,7 +693,15 @@ def build_bank_features(df_banco, lags_cortos, lag_semana, lag_mes, ventanas_vol
     """
     Recibe serie temporal de un banco con columnas R y D.
     Genera features de rezagos, volatilidades, medias móviles y cambios diarios.
+
+    Incluye features de régimen de volatilidad del flujo neto (D−R):
+      sigma_flujo_5d / 20d : std rolling del flujo neto realizado.
+      ma_flujo_20d         : media rolling del flujo neto (nivel reciente).
+    Estas features permiten al modelo abrir/cerrar las bandas de predicción
+    según si el entorno actual es tranquilo o volátil.
     """
+    VENTANAS_FLUJO = [5, 20]   # días hábiles para régimen de volatilidad
+
     if df_banco.empty or "R" not in df_banco.columns or "D" not in df_banco.columns:
         cols = (
             ["R_t0", "D_t0"]
@@ -705,6 +713,8 @@ def build_bank_features(df_banco, lags_cortos, lag_semana, lag_mes, ventanas_vol
             + [f"ma_D_{v}d" for v in ventanas_vol]
             + ["delta_R", "delta_D"]
             + ["R_conf_t1", "R_conf_t2", "D_conf_t1"]
+            + [f"sigma_flujo_{v}d" for v in VENTANAS_FLUJO]
+            + [f"ma_flujo_{v}d"    for v in VENTANAS_FLUJO]
         )
         return pd.DataFrame(columns=cols)
 
@@ -736,6 +746,13 @@ def build_bank_features(df_banco, lags_cortos, lag_semana, lag_mes, ventanas_vol
     resultado["R_conf_t1"] = df["R"].shift(-1)   # R(t+1) — avisado ayer, 2d anticipación
     resultado["R_conf_t2"] = df["R"].shift(-2)   # R(t+2) — avisado hoy,  2d anticipación
     resultado["D_conf_t1"] = df["D"].shift(-1)   # D(t+1) — avisado hoy,  1d anticipación
+
+    # Features de régimen: volatilidad y nivel reciente del flujo neto D−R
+    # Permiten al modelo detectar si está en un entorno tranquilo o volátil
+    flujo = df["D"] - df["R"]
+    for v in VENTANAS_FLUJO:
+        resultado[f"sigma_flujo_{v}d"] = flujo.rolling(v).std()
+        resultado[f"ma_flujo_{v}d"]    = flujo.rolling(v).mean()
 
     return resultado
 
