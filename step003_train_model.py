@@ -64,8 +64,13 @@ DIR_PLOTS.mkdir(parents=True, exist_ok=True)
 # Quantiles a producir
 QUANTILES = [0.01, 0.05, 0.50, 0.95, 0.99]
 
-# Semanas hábiles reservadas para validación (walk-forward: últimas N semanas)
-SEMANAS_VAL = 26   # ~6 meses de datos más recientes
+# Semanas hábiles reservadas para cada split (walk-forward, orden temporal):
+#   |─── TRAIN ──────────────|─── VAL ───|─── TEST ───|
+#   TRAIN: entrena modelos + usa early stopping interno
+#   VAL:   Optuna ajusta hiperparámetros aquí — el modelo NUNCA ve TEST
+#   TEST:  evaluación final honesta, nunca tocada durante entrenamiento/optimización
+SEMANAS_VAL  = 26   # ~6 meses para ajuste de hiperparámetros (Optuna)
+SEMANAS_TEST = 13   # ~3 meses como holdout final de evaluación
 
 # Trials Optuna por banco
 N_TRIALS_OPTUNA = 60
@@ -122,23 +127,40 @@ def preparar_Xy(df: pd.DataFrame, cols_feat: list[str]) -> tuple[pd.DataFrame, p
 
 
 def split_walk_forward(
-    df: pd.DataFrame, semanas_val: int
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+    df: pd.DataFrame, semanas_val: int, semanas_test: int
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
-    Divide por fecha_t: train = todo menos las últimas semanas_val semanas hábiles,
-    val = las últimas semanas_val semanas hábiles.
-    Usa fechas únicas de fecha_t para definir el corte.
+    Divide temporalmente en tres particiones sin solapamiento:
+      TRAIN | VAL | TEST  (orden cronológico estricto)
+
+    - TEST  : últimas semanas_test semanas hábiles → evaluación final honesta.
+    - VAL   : semanas_val semanas hábiles anteriores al TEST → Optuna.
+    - TRAIN : todo lo anterior → ajuste del modelo.
+
+    Garantías:
+      · Ningún dato del futuro contamina el entrenamiento ni la optimización.
+      · VAL y TEST son completamente disjuntos.
+      · El mínimo de datos de TRAIN es 50% del total para evitar splits degenerados.
     """
     fechas_unicas = np.sort(df["fecha_t"].unique())
-    n_fechas      = len(fechas_unicas)
-    n_val_fechas  = semanas_val * 5  # ~5 días hábiles por semana
-    n_val_fechas  = min(n_val_fechas, n_fechas // 4)  # máximo 25% del total
+    n_fechas = len(fechas_unicas)
 
-    corte = fechas_unicas[n_fechas - n_val_fechas]
+    # Convertir semanas a días hábiles (~5 por semana), con techo conservador
+    n_test = min(semanas_test * 5, n_fechas // 6)
+    n_val  = min(semanas_val  * 5, n_fechas // 4)
 
-    df_train = df[df["fecha_t"] < corte].copy()
-    df_val   = df[df["fecha_t"] >= corte].copy()
-    return df_train, df_val
+    # Garantizar que TRAIN tenga al menos 50% de las fechas
+    if n_fechas - n_test - n_val < n_fechas // 2:
+        n_val = max(10, n_fechas // 6)
+        n_test = max(5, n_fechas // 8)
+
+    corte_val  = fechas_unicas[n_fechas - n_test - n_val]
+    corte_test = fechas_unicas[n_fechas - n_test]
+
+    df_train = df[df["fecha_t"] <  corte_val ].copy()
+    df_val   = df[(df["fecha_t"] >= corte_val) & (df["fecha_t"] < corte_test)].copy()
+    df_test  = df[df["fecha_t"] >= corte_test].copy()
+    return df_train, df_val, df_test
 
 
 ###############################################################################
@@ -277,27 +299,29 @@ def entrenar_quantiles(
 
 def evaluar_modelos(
     modelos: dict[float, lgb.LGBMRegressor],
-    X_val: pd.DataFrame,
-    y_val: pd.Series,
+    X_eval: pd.DataFrame,
+    y_eval: pd.Series,
     banco: str,
-) -> dict:
+    split_name: str = "val",
+) -> tuple[dict, dict]:
     """
-    Calcula pinball loss por quantil y RMSE de la mediana en validación.
+    Calcula pinball loss por quantil y RMSE de la mediana en el split indicado.
     Aplica corrección de cruce de cuantiles antes de evaluar.
+    split_name: "val" o "test" — solo afecta los mensajes del log.
     """
-    preds_raw = {tau: model.predict(X_val) for tau, model in modelos.items()}
+    preds_raw = {tau: model.predict(X_eval) for tau, model in modelos.items()}
     preds     = corregir_cruce_cuantiles(preds_raw)
 
     metricas = {}
     for tau in sorted(modelos.keys()):
-        pb = pinball_loss(y_val.values, preds[tau], tau)
-        metricas[f"pinball_q{int(tau*100):02d}"] = round(pb, 4)
-        logger.info(f"  [{banco}] pinball(τ={tau:.2f}) en val = {pb:,.2f}")
+        pb = pinball_loss(y_eval.values, preds[tau], tau)
+        metricas[f"pinball_{split_name}_q{int(tau*100):02d}"] = round(pb, 4)
+        logger.info(f"  [{banco}] pinball(τ={tau:.2f}) [{split_name}] = {pb:,.2f}")
 
     if 0.50 in modelos:
-        rmse = float(np.sqrt(np.mean((y_val.values - preds[0.50]) ** 2)))
-        metricas["rmse_mediana"] = round(rmse, 2)
-        logger.info(f"  [{banco}] RMSE mediana val = {rmse:,.2f}")
+        rmse = float(np.sqrt(np.mean((y_eval.values - preds[0.50]) ** 2)))
+        metricas[f"rmse_{split_name}_mediana"] = round(rmse, 2)
+        logger.info(f"  [{banco}] RMSE mediana [{split_name}] = {rmse:,.2f}")
 
     return metricas, preds
 
@@ -381,50 +405,52 @@ def graficar_importancia(
     logger.info(f"  [{banco}] Gráfico importancia guardado: {dir_plots / nombre}")
 
 
-def graficar_fanchart_val(
-    df_val: pd.DataFrame,
+def graficar_fanchart_split(
+    df_split: pd.DataFrame,
     preds: dict[float, np.ndarray],
-    y_val: pd.Series,
+    y_split: pd.Series,
     banco: str,
     dir_plots: Path,
+    split_name: str = "test",
     h_ejemplo: int = 10,
 ):
     """
-    Para un horizonte h fijo, grafica la banda de predicción (Q05–Q95, Q25–Q75)
-    vs el valor realizado a lo largo del tiempo de validación.
+    Para un horizonte h fijo, grafica la banda de predicción (Q01–Q99, Q05–Q95)
+    vs el valor realizado a lo largo del período indicado (val o test).
     """
-    mask_h = df_val["h"] == h_ejemplo
+    mask_h = df_split["h"] == h_ejemplo
     if mask_h.sum() < 5:
-        # Buscar el horizonte más cercano con suficientes observaciones
-        conteos = df_val.groupby("h").size()
+        conteos = df_split.groupby("h").size()
         candidatos = conteos[conteos >= 5]
         if candidatos.empty:
             return
         h_ejemplo = int(candidatos.index[np.argmin(np.abs(candidatos.index - h_ejemplo))])
-        mask_h = df_val["h"] == h_ejemplo
+        mask_h = df_split["h"] == h_ejemplo
 
-    idx_val = np.where(mask_h.values)[0]
-    fechas  = df_val.loc[mask_h, "fecha_t"].values
-    y_real  = y_val.values[idx_val] / 1e6
+    idx_split = np.where(mask_h.values)[0]
+    fechas    = df_split.loc[mask_h, "fecha_t"].values
+    y_real    = y_split.values[idx_split] / 1e6
+
+    label_titulo = "Test (holdout)" if split_name == "test" else "Validación"
 
     fig, ax = plt.subplots(figsize=(14, 6))
 
-    if 0.05 in preds and 0.95 in preds:
-        ax.fill_between(
-            fechas,
-            preds[0.05][idx_val] / 1e6,
-            preds[0.95][idx_val] / 1e6,
-            alpha=0.20, color="steelblue", label="P05–P95",
-        )
     if 0.01 in preds and 0.99 in preds:
         ax.fill_between(
             fechas,
-            preds[0.01][idx_val] / 1e6,
-            preds[0.99][idx_val] / 1e6,
+            preds[0.01][idx_split] / 1e6,
+            preds[0.99][idx_split] / 1e6,
             alpha=0.10, color="steelblue", label="P01–P99",
         )
+    if 0.05 in preds and 0.95 in preds:
+        ax.fill_between(
+            fechas,
+            preds[0.05][idx_split] / 1e6,
+            preds[0.95][idx_split] / 1e6,
+            alpha=0.20, color="steelblue", label="P05–P95",
+        )
     if 0.50 in preds:
-        ax.plot(fechas, preds[0.50][idx_val] / 1e6,
+        ax.plot(fechas, preds[0.50][idx_split] / 1e6,
                 color="steelblue", lw=1.8, label="Mediana pred.", zorder=4)
 
     ax.plot(fechas, y_real, color="black", lw=1.2, alpha=0.85,
@@ -434,7 +460,7 @@ def graficar_fanchart_val(
     ax.set_xlabel("Fecha de predicción (t)", fontsize=10)
     ax.set_ylabel("Flujo neto D−R (MM USD)", fontsize=10)
     ax.set_title(
-        f"Fan Chart de Validación — {banco}  |  h = {h_ejemplo} días hábiles\n"
+        f"Fan Chart [{label_titulo}] — {banco}  |  h = {h_ejemplo} días hábiles\n"
         f"Bandas: Q01–Q99 y Q05–Q95  vs  realizado",
         fontweight="bold", fontsize=11,
     )
@@ -443,10 +469,10 @@ def graficar_fanchart_val(
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:,.1f}"))
     plt.tight_layout()
 
-    nombre = f"fanchart_val_{banco}_h{h_ejemplo:02d}.png"
+    nombre = f"fanchart_{split_name}_{banco}_h{h_ejemplo:02d}.png"
     plt.savefig(dir_plots / nombre, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    logger.info(f"  [{banco}] Fan chart validación guardado: {dir_plots / nombre}")
+    logger.info(f"  [{banco}] Fan chart [{split_name}] guardado: {dir_plots / nombre}")
 
 
 ###############################################################################
@@ -455,17 +481,21 @@ def graficar_fanchart_val(
 
 def entrenar_banco(banco: str) -> dict | None:
     """
-    Pipeline completo para un banco:
-      1. Leer datos desde Parquet.
-      2. Split walk-forward.
-      3. Optuna → mejores hiperparámetros.
-      4. Re-entrenar sobre train completo (train+val juntos para producción).
-         Para evaluación se usan los modelos entrenados solo sobre train.
-      5. Evaluar en validación.
-      6. Re-entrenar final sobre train+val para producción.
-      7. Guardar + graficar.
+    Pipeline completo para un banco con split TRAIN / VAL / TEST:
 
-    Retorna diccionario con métricas del banco, o None si no hay datos.
+      TRAIN : ajuste de pesos del modelo (early stopping interno de LightGBM)
+      VAL   : Optuna usa este período para elegir hiperparámetros
+      TEST  : evaluación final completamente honesta — NUNCA vista durante
+              el entrenamiento ni durante la optimización de hiperparámetros
+
+    Fases:
+      1. Leer Parquet (solo el banco).
+      2. Imputar NaN de calentamiento con mediana de TRAIN (sin leak).
+      3. Split walk-forward: TRAIN | VAL | TEST.
+      4. Optuna sobre TRAIN→VAL para hiperparámetros óptimos.
+      5. Entrenamiento sobre TRAIN con mejores params → evaluación en TEST.
+      6. Re-entrenamiento final sobre TRAIN+VAL+TEST → modelo de producción.
+      7. Guardar modelos + metadata + gráficos.
     """
     logger.info(f"\n{'='*60}")
     logger.info(f"BANCO: {banco}")
@@ -484,56 +514,79 @@ def entrenar_banco(banco: str) -> dict | None:
 
     logger.info(f"  [{banco}] Filas totales: {len(df):,} | con target: {df['target'].notna().sum():,}")
 
-    # ── 2. Features ─────────────────────────────────────────────
+    # ── 2. Features y split ─────────────────────────────────────
     cols_feat = get_feature_cols(df)
     logger.info(f"  [{banco}] Features: {len(cols_feat)}")
 
-    # Imputar NaN residuales con mediana del train (conservador)
-    # Los NaN de calentamiento (primeros lags) se imputan por columna
-    medianas = df[cols_feat].median()
-    df[cols_feat] = df[cols_feat].fillna(medianas)
+    # ── 3. Split walk-forward en tres particiones ────────────────
+    df_train, df_val, df_test = split_walk_forward(df, SEMANAS_VAL, SEMANAS_TEST)
 
-    # ── 3. Split walk-forward ───────────────────────────────────
-    df_train, df_val = split_walk_forward(df, SEMANAS_VAL)
     logger.info(
-        f"  [{banco}] Train: {df_train['fecha_t'].min().date()} → "
-        f"{df_train['fecha_t'].max().date()} | "
-        f"Val: {df_val['fecha_t'].min().date()} → {df_val['fecha_t'].max().date()}"
+        f"  [{banco}] TRAIN: {df_train['fecha_t'].min().date()} → "
+        f"{df_train['fecha_t'].max().date()} ({df_train['fecha_t'].nunique()} fechas)"
     )
+    logger.info(
+        f"  [{banco}] VAL  : {df_val['fecha_t'].min().date()} → "
+        f"{df_val['fecha_t'].max().date()} ({df_val['fecha_t'].nunique()} fechas)"
+    )
+    logger.info(
+        f"  [{banco}] TEST : {df_test['fecha_t'].min().date()} → "
+        f"{df_test['fecha_t'].max().date()} ({df_test['fecha_t'].nunique()} fechas)"
+    )
+
+    # Imputar NaN con mediana de TRAIN (sin filtración de información futura)
+    medianas_train = df_train[cols_feat].median()
+    for _df in (df_train, df_val, df_test):
+        _df[cols_feat] = _df[cols_feat].fillna(medianas_train)
 
     X_train, y_train = preparar_Xy(df_train, cols_feat)
     X_val,   y_val   = preparar_Xy(df_val,   cols_feat)
+    X_test,  y_test  = preparar_Xy(df_test,  cols_feat)
 
-    if len(X_train) < 200 or len(X_val) < 50:
+    if len(X_train) < 200 or len(X_val) < 50 or len(X_test) < 20:
         logger.warning(f"  [{banco}] Split demasiado pequeño — omitiendo")
         return None
 
-    # ── 4. Optimización Bayesiana ────────────────────────────────
+    # ── 4. Optuna: TRAIN → VAL ───────────────────────────────────
+    # TEST nunca se toca en este paso
     best_params = optimizar_hiperparametros(
         X_train, y_train, X_val, y_val, N_TRIALS_OPTUNA, banco
     )
 
-    # ── 5. Entrenamiento para evaluación (solo sobre train) ─────
+    # ── 5. Evaluación honesta en TEST ────────────────────────────
+    # Entrenamos sobre TRAIN (no sobre TRAIN+VAL) para que TEST sea limpio
+    logger.info(f"  [{banco}] Entrenando sobre TRAIN para evaluación en TEST...")
     modelos_eval = entrenar_quantiles(X_train, y_train, best_params, QUANTILES, banco)
+    metricas_test, preds_test = evaluar_modelos(
+        modelos_eval, X_test, y_test, banco, split_name="test"
+    )
 
-    # ── 6. Evaluación en validación ─────────────────────────────
-    metricas, preds_val = evaluar_modelos(modelos_eval, X_val, y_val, banco)
+    # También reportamos VAL para comparar con TEST (diagnosticar sobreajuste)
+    _, preds_val_diag = evaluar_modelos(
+        modelos_eval, X_val, y_val, banco, split_name="val"
+    )
 
-    # ── 7. Re-entrenamiento final sobre train+val (producción) ──
-    logger.info(f"  [{banco}] Re-entrenamiento final sobre datos completos...")
-    X_full = pd.concat([X_train, X_val], ignore_index=True)
-    y_full = pd.concat([y_train, y_val], ignore_index=True)
+    metricas = {**metricas_test}
+
+    # ── 6. Re-entrenamiento final sobre todos los datos ──────────
+    # Este es el modelo que va a producción
+    logger.info(f"  [{banco}] Re-entrenamiento final (TRAIN+VAL+TEST)...")
+    X_full = pd.concat([X_train, X_val, X_test], ignore_index=True)
+    y_full = pd.concat([y_train, y_val, y_test], ignore_index=True)
     modelos_prod = entrenar_quantiles(X_full, y_full, best_params, QUANTILES, banco)
 
-    # ── 8. Guardar ───────────────────────────────────────────────
+    # ── 7. Guardar ───────────────────────────────────────────────
     guardar_modelos(modelos_prod, metricas, best_params, cols_feat, banco, DIR_MODELOS)
 
-    # ── 9. Gráficos ─────────────────────────────────────────────
+    # ── 8. Gráficos ─────────────────────────────────────────────
     graficar_importancia(modelos_prod, cols_feat, banco, DIR_PLOTS)
-    graficar_fanchart_val(df_val, preds_val, y_val, banco, DIR_PLOTS)
+    # Fan chart sobre TEST (evaluación final) y también sobre VAL (diagnóstico)
+    graficar_fanchart_split(df_test, preds_test, y_test, banco, DIR_PLOTS, split_name="test")
+    graficar_fanchart_split(df_val,  preds_val_diag, y_val, banco, DIR_PLOTS, split_name="val")
 
     # Liberar memoria
-    del df, df_train, df_val, X_train, y_train, X_val, y_val
+    del df, df_train, df_val, df_test
+    del X_train, y_train, X_val, y_val, X_test, y_test
     del X_full, y_full, modelos_eval, modelos_prod
     gc.collect()
 
@@ -547,7 +600,8 @@ def main():
     logger.info(f"  Matriz de features : {RUTA_MATRIZ}")
     logger.info(f"  Directorio modelos : {DIR_MODELOS}")
     logger.info(f"  Quantiles          : {QUANTILES}")
-    logger.info(f"  Semanas validación : {SEMANAS_VAL}")
+    logger.info(f"  Semanas VAL        : {SEMANAS_VAL}  (~{SEMANAS_VAL//4} meses, Optuna)")
+    logger.info(f"  Semanas TEST       : {SEMANAS_TEST} (~{SEMANAS_TEST//4} meses, holdout final)")
     logger.info(f"  Trials Optuna      : {N_TRIALS_OPTUNA}")
 
     if not RUTA_MATRIZ.exists():
@@ -577,7 +631,7 @@ def main():
     if resumen:
         df_resumen = pd.DataFrame(resumen).set_index("banco")
         logger.info("\n" + "=" * 70)
-        logger.info("RESUMEN DE MÉTRICAS DE VALIDACIÓN")
+        logger.info("RESUMEN DE MÉTRICAS — TEST (holdout final, nunca visto en entrenamiento)")
         logger.info("=" * 70)
         with pd.option_context("display.float_format", "{:,.2f}".format, "display.max_columns", 20):
             logger.info("\n" + df_resumen.to_string())
