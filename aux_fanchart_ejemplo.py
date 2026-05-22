@@ -68,9 +68,11 @@ for banco in BANCOS:
     for año in años_disponibles:
         f = nearest_bday(año, mes_fijo, dia_fijo, fechas_disponibles)
         if f is not None:
-            # Solo incluir si tiene todos los horizontes con target
-            n_h = sub[sub["fecha_t"] == f]["h"].count()
-            if n_h >= 80:   # al menos 80 horizontes realizados
+            # Incluir si tiene al menos 20% de los horizontes disponibles con target
+            # (umbral relativo: funciona aunque la muestra no llegue al futuro lejano)
+            h_max_global = sub["h"].max()
+            n_h = sub[(sub["fecha_t"] == f) & sub["target"].notna()]["h"].count()
+            if n_h >= max(10, int(h_max_global * 0.20)):
                 fechas_julio[año] = f
 
     if not fechas_julio:

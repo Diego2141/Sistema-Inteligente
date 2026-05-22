@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from __future__ import annotations  # permite dict | None y list[str] en Python < 3.10
 """
 step003_train_model.py
 Entrenamiento de modelos LightGBM de quantile regression para predicción de
