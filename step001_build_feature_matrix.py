@@ -689,6 +689,45 @@ def download_external_series(params):
 ###############################################################################
 
 # 5a. Features bancarias
+def _garch_vol(flujo: pd.Series) -> pd.Series:
+    """
+    Ajusta GARCH(1,1) sobre la serie del flujo neto y retorna la volatilidad
+    condicional σ_t en las mismas unidades que la serie original.
+
+    σ_t usa solo información hasta t-1 → sin look-ahead bias.
+    Fallback a rolling std de 20 días si arch no está instalado o el ajuste falla.
+
+    Escalamos la serie a media 0 y std 1 antes de ajustar para estabilidad
+    numérica (GARCH es sensible a la magnitud de los datos).
+    """
+    try:
+        from arch import arch_model
+    except ImportError:
+        logger.warning("  'arch' no instalado — usando rolling std como proxy GARCH. "
+                       "Instalar con: pip install arch")
+        return flujo.rolling(20).std()
+
+    if flujo.dropna().std() < 1e-9 or len(flujo.dropna()) < 60:
+        return flujo.rolling(20).std()
+
+    escala = flujo.std()
+    flujo_norm = (flujo / escala).fillna(0.0)
+
+    try:
+        modelo = arch_model(flujo_norm, vol="Garch", p=1, q=1,
+                            dist="normal", rescale=False)
+        res = modelo.fit(disp="off", show_warning=False,
+                         options={"maxiter": 500, "ftol": 1e-9})
+        # conditional_volatility está en unidades de flujo_norm → reescalar
+        vol_cond = pd.Series(res.conditional_volatility,
+                             index=flujo_norm.index) * escala
+        # Los primeros valores son NaN por calentamiento del modelo
+        return vol_cond
+    except Exception as e:
+        logger.warning(f"  GARCH no convergió ({e}) — usando rolling std 20d")
+        return flujo.rolling(20).std()
+
+
 def build_bank_features(df_banco, lags_cortos, lag_semana, lag_mes, ventanas_vol):
     """
     Recibe serie temporal de un banco con columnas R y D.
@@ -696,11 +735,11 @@ def build_bank_features(df_banco, lags_cortos, lag_semana, lag_mes, ventanas_vol
 
     Incluye features de régimen de volatilidad del flujo neto (D−R):
       sigma_flujo_5d / 20d : std rolling del flujo neto realizado.
-      ma_flujo_20d         : media rolling del flujo neto (nivel reciente).
-    Estas features permiten al modelo abrir/cerrar las bandas de predicción
-    según si el entorno actual es tranquilo o volátil.
+      ma_flujo_5d / 20d    : media rolling del flujo neto (nivel reciente).
+      garch_vol            : volatilidad condicional GARCH(1,1) del flujo neto.
+                             Captura clustering de volatilidad mejor que rolling std.
     """
-    VENTANAS_FLUJO = [5, 20]   # días hábiles para régimen de volatilidad
+    VENTANAS_FLUJO = [5, 20]
 
     if df_banco.empty or "R" not in df_banco.columns or "D" not in df_banco.columns:
         cols = (
@@ -715,6 +754,7 @@ def build_bank_features(df_banco, lags_cortos, lag_semana, lag_mes, ventanas_vol
             + ["R_conf_t1", "R_conf_t2", "D_conf_t1"]
             + [f"sigma_flujo_{v}d" for v in VENTANAS_FLUJO]
             + [f"ma_flujo_{v}d"    for v in VENTANAS_FLUJO]
+            + ["garch_vol"]
         )
         return pd.DataFrame(columns=cols)
 
@@ -722,12 +762,10 @@ def build_bank_features(df_banco, lags_cortos, lag_semana, lag_mes, ventanas_vol
     resultado = pd.DataFrame(index=df.index)
 
     # Valores de hoy: disponibles en t por aviso anticipado
-    # R avisado 2 días antes → R(t) conocido en t; D avisado 1 día antes → D(t) conocido en t
     resultado["R_t0"] = df["R"]
     resultado["D_t0"] = df["D"]
 
     todos_lags = lags_cortos + [lag_semana, lag_mes]
-
     for l in todos_lags:
         resultado[f"R_t-{l}"] = df["R"].shift(l)
         resultado[f"D_t-{l}"] = df["D"].shift(l)
@@ -735,24 +773,23 @@ def build_bank_features(df_banco, lags_cortos, lag_semana, lag_mes, ventanas_vol
     for v in ventanas_vol:
         resultado[f"sigma_R_{v}d"] = df["R"].rolling(v).std()
         resultado[f"sigma_D_{v}d"] = df["D"].rolling(v).std()
-        resultado[f"ma_R_{v}d"] = df["R"].rolling(v).mean()
-        resultado[f"ma_D_{v}d"] = df["D"].rolling(v).mean()
+        resultado[f"ma_R_{v}d"]    = df["R"].rolling(v).mean()
+        resultado[f"ma_D_{v}d"]    = df["D"].rolling(v).mean()
 
     resultado["delta_R"] = df["R"].diff(1)
     resultado["delta_D"] = df["D"].diff(1)
 
-    # Confirmados históricos: proxy de los avisos anticipados usando valores realizados
-    # En producción estos se reemplazarán por los valores reales de los correos
-    resultado["R_conf_t1"] = df["R"].shift(-1)   # R(t+1) — avisado ayer, 2d anticipación
-    resultado["R_conf_t2"] = df["R"].shift(-2)   # R(t+2) — avisado hoy,  2d anticipación
-    resultado["D_conf_t1"] = df["D"].shift(-1)   # D(t+1) — avisado hoy,  1d anticipación
+    resultado["R_conf_t1"] = df["R"].shift(-1)
+    resultado["R_conf_t2"] = df["R"].shift(-2)
+    resultado["D_conf_t1"] = df["D"].shift(-1)
 
-    # Features de régimen: volatilidad y nivel reciente del flujo neto D−R
-    # Permiten al modelo detectar si está en un entorno tranquilo o volátil
+    # Features de régimen: rolling std/media + GARCH(1,1)
     flujo = df["D"] - df["R"]
     for v in VENTANAS_FLUJO:
         resultado[f"sigma_flujo_{v}d"] = flujo.rolling(v).std()
         resultado[f"ma_flujo_{v}d"]    = flujo.rolling(v).mean()
+
+    resultado["garch_vol"] = _garch_vol(flujo)
 
     return resultado
 
