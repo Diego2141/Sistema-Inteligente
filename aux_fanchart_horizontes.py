@@ -37,7 +37,7 @@ SEMANAS_VAL  = 26
 SEMANAS_TEST = 20   # = h_max/5 + 2 semanas buffer
 
 # ── Parámetros del loop ───────────────────────────────────────────────────────
-PASO_FECHAS  = 5    # cada 5 días hábiles (≈ semanal); usar 1 para todas las fechas
+PASO_FECHAS  = 2    # cada 2 días hábiles; usar 1 para todas las fechas
 N_FECHAS_MAX = None # None = generar todos; ej: 6 para las 6 primeras fechas válidas
 
 
