@@ -126,12 +126,17 @@ def _dibujar_bandas(ax, hs, resultado):
     """Dibuja bandas Q01-Q99, Q05-Q95 y mediana Q50. Reutilizable en ambos subplots."""
     ax.fill_between(hs,
                     resultado["q01"] / 1e6, resultado["q99"] / 1e6,
-                    alpha=0.15, color="steelblue", label="Q01–Q99 (90% + cola)")
+                    alpha=0.12, color="steelblue", label="Q01–Q99 (98%)")
     ax.fill_between(hs,
                     resultado["q05"] / 1e6, resultado["q95"] / 1e6,
-                    alpha=0.30, color="steelblue", label="Q05–Q95 (90%)")
+                    alpha=0.28, color="steelblue", label="Q05–Q95 (90%)")
+    # Bordes explícitos de Q05 y Q95 para verificar visualmente que Q50 queda entre ellos
+    ax.plot(hs, resultado["q05"] / 1e6,
+            color="steelblue", lw=1.0, ls=":", alpha=0.7, label="Q05 / Q95 (borde)")
+    ax.plot(hs, resultado["q95"] / 1e6,
+            color="steelblue", lw=1.0, ls=":", alpha=0.7)
     ax.plot(hs, resultado["q50"] / 1e6,
-            color="steelblue", lw=2.5, label="Mediana predicha (Q50)", zorder=4)
+            color="crimson", lw=2.0, label="Mediana predicha (Q50)", zorder=5)
     ax.axhline(0, color="black", lw=0.7, ls="--", alpha=0.35)
     ax.grid(True, alpha=0.25)
     ax.xaxis.set_major_locator(mticker.MultipleLocator(10))
@@ -195,4 +200,21 @@ if __name__ == "__main__":
     modelos, cols_feat     = cargar_modelos(BANCO, DIR_MODELOS)
     df_fecha, fecha_origen = leer_y_preparar(BANCO, cols_feat)
     resultado              = predecir(modelos, df_fecha, cols_feat)
+
+    # ── Verificación de ordenamiento: q01 ≤ q05 ≤ q50 ≤ q95 ≤ q99 ──────
+    q_cols = ["q01", "q05", "q50", "q95", "q99"]
+    violaciones = (
+        (resultado["q05"] < resultado["q01"]).sum() +
+        (resultado["q50"] < resultado["q05"]).sum() +
+        (resultado["q95"] < resultado["q50"]).sum() +
+        (resultado["q99"] < resultado["q95"]).sum()
+    )
+    print(f"\nVerificación de monotonicidad: {violaciones} violaciones de q01≤q05≤q50≤q95≤q99")
+    print("\nMuestra de quantiles en h clave (MM USD):")
+    h_muestra = [1, 5, 10, 20, 30, 50, 61, 70, 90]
+    sub = resultado[resultado["h"].isin(h_muestra)][["h"] + q_cols].copy()
+    for c in q_cols:
+        sub[c] = (sub[c] / 1e6).round(0)
+    print(sub.to_string(index=False))
+
     graficar(resultado, fecha_origen, BANCO)
