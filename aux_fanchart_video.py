@@ -36,9 +36,9 @@ CORTE_VAL  = pd.Timestamp("2022-07-01")   # alineado con step003
 CORTE_TEST = pd.Timestamp("2023-01-03")   # inicio de datos de tasas (allocation)
 
 # ── Parámetros del video ──────────────────────────────────────────────────────
-PASO_FECHAS = 5    # cada 5 días hábiles → 785/5 = ~157 frames (manejable para GIF)
-FPS         = 4    # frames por segundo
-DPI         = 80   # resolución reducida para GIF (MP4 puede usar 120)
+PASO_FECHAS = 1    # 1 = todos los días hábiles válidos; 2 = cada 2, etc.
+FPS         = 2    # frames por segundo (2 = cada fecha dura 0.5 s en el video)
+DPI         = 120  # resolución del video
 
 
 # ── 1. Cargar modelo ──────────────────────────────────────────────────────────
