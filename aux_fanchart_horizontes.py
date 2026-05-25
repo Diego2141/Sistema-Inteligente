@@ -1,17 +1,20 @@
 # -*- coding: utf-8 -*-
 """
 aux_fanchart_horizontes.py
-Fan chart del modelo desde la última fecha del TEST con datos realizados.
+Fan chart del modelo para múltiples fechas de origen.
 
 Lógica:
-  - Se para en la última fecha t del TEST que tiene al menos h=1 realizado.
-  - Muestra las bandas del modelo Q01-Q99 y Q05-Q95 para h=1..90.
-  - Superpone la ruta realizada D-R hasta donde hay datos disponibles;
-    para h mayores la línea se corta y las bandas continúan solas
-    (proyección pura hacia el futuro).
+  - Identifica todas las fechas del TEST donde h=90 tiene target realizado.
+  - Filtra cada N días hábiles (PASO_FECHAS) para no generar demasiados gráficos.
+  - Por cada fecha de origen genera un PNG con 3 subplots:
+      1. Flujo diario D-R: bandas + realizado
+      2. Flujo diario D-R: solo modelo (mediana visible)
+      3. Flujo neto acumulado D-R: bandas + realizado acumulado
+  - Guarda todos los PNGs en DIR_OUTPUT.
 
-Esto replica exactamente el uso operativo: parado en t, el operador ve
-la proyección del modelo para los próximos 90 días hábiles.
+Parámetros ajustables:
+  PASO_FECHAS : cada cuántos días hábiles tomar una fecha de origen (5 = semanal)
+  N_FECHAS_MAX: límite de gráficos a generar (None = todos)
 """
 
 from pathlib import Path
@@ -31,7 +34,11 @@ DIR_OUTPUT.mkdir(parents=True, exist_ok=True)
 
 BANCO        = "SISTEMA"
 SEMANAS_VAL  = 26
-SEMANAS_TEST = 20   # = h_max/5 + 2 semanas buffer → origen con h=1..90 realizado completo
+SEMANAS_TEST = 20   # = h_max/5 + 2 semanas buffer
+
+# ── Parámetros del loop ───────────────────────────────────────────────────────
+PASO_FECHAS  = 5    # cada 5 días hábiles (≈ semanal); usar 1 para todas las fechas
+N_FECHAS_MAX = None # None = generar todos; ej: 6 para las 6 primeras fechas válidas
 
 
 # ── 1. Cargar modelo más reciente ────────────────────────────────────────────
@@ -57,8 +64,10 @@ def cargar_modelos(banco: str, dir_modelos: Path) -> tuple[dict, list[str]]:
     return modelos, cols_feat
 
 
-# ── 2. Leer datos, split y seleccionar fecha de origen ───────────────────────
-def leer_y_preparar(banco: str, cols_feat: list[str]) -> tuple[pd.DataFrame, pd.Timestamp]:
+# ── 2. Leer datos y preparar medianas de imputación ─────────────────────────
+def leer_datos(banco: str, cols_feat: list[str]):
+    """Carga el parquet, hace el split y calcula medianas de TRAIN.
+    Retorna: df completo, medianas de TRAIN, lista de fechas válidas de origen."""
     df = pd.read_parquet(RUTA_MATRIZ, filters=[("banco", "==", banco)])
     df["fecha_t"] = pd.to_datetime(df["fecha_t"])
     df = df.sort_values(["fecha_t", "h"]).reset_index(drop=True)
@@ -70,51 +79,48 @@ def leer_y_preparar(banco: str, cols_feat: list[str]) -> tuple[pd.DataFrame, pd.
     corte_val  = fechas[n - n_test - n_val]
     corte_test = fechas[n - n_test]
 
-    df_train = df[df["fecha_t"] <  corte_val].copy()
+    df_train = df[df["fecha_t"] < corte_val].copy()
     df_test  = df[df["fecha_t"] >= corte_test].copy()
 
-    # Imputar con mediana de train (sin leak)
     cols_excluir = {"fecha_t", "banco", "target"}
     cols_num = [c for c in df.columns if c not in cols_excluir]
     medianas = df_train[cols_num].median()
-    df_test[cols_num] = df_test[cols_num].fillna(medianas)
 
-    print(f"\nTEST completo : {df_test['fecha_t'].min().date()} → "
+    print(f"\nTRAIN : hasta {pd.Timestamp(corte_val).date()}")
+    print(f"TEST  : {pd.Timestamp(corte_test).date()} → "
           f"{df_test['fecha_t'].max().date()} ({df_test['fecha_t'].nunique()} fechas)")
 
-    # Origen: primera fecha del TEST donde h=90 tiene target realizado.
-    # Garantiza que h=1..90 estén todos disponibles para comparar.
-    fechas_con_h90 = (
-        df_test[(df_test["h"] == 90) & df_test["target"].notna()]["fecha_t"]
+    # Fechas del TEST donde h=90 tiene target realizado
+    fechas_validas = np.sort(
+        df_test[(df_test["h"] == 90) & df_test["target"].notna()]["fecha_t"].unique()
     )
-    if fechas_con_h90.empty:
-        print("  Advertencia: ninguna fecha del TEST tiene h=90 realizado.")
-        print("  Usando primera fecha del TEST como fallback.")
-        fecha_origen = pd.Timestamp(corte_test)
-    else:
-        fecha_origen = pd.Timestamp(fechas_con_h90.min())
 
-    print(f"Fecha de origen: {fecha_origen.date()}  "
-          f"(primera fecha del TEST con h=90 realizado)")
+    if len(fechas_validas) == 0:
+        raise ValueError("Ninguna fecha del TEST tiene h=90 realizado. "
+                         "Aumenta SEMANAS_TEST o espera más datos.")
 
-    # Filtrar las filas de la fecha de origen — puede estar en df_test o df completo
-    # porque corte_test es exactamente la primera fecha del TEST
+    print(f"Fechas válidas de origen (h=90 realizado): "
+          f"{pd.Timestamp(fechas_validas[0]).date()} → "
+          f"{pd.Timestamp(fechas_validas[-1]).date()} "
+          f"({len(fechas_validas)} fechas)")
+
+    return df, medianas, cols_num, fechas_validas, cols_feat
+
+
+def preparar_fecha(df, fecha_origen: pd.Timestamp, medianas, cols_num, cols_feat) -> pd.DataFrame:
+    """Extrae y prepara las filas de una fecha de origen específica."""
     df_fecha = df[df["fecha_t"] == fecha_origen].copy().sort_values("h")
     cols_num_ok = [c for c in cols_num if c in df_fecha.columns]
     df_fecha[cols_num_ok] = df_fecha[cols_num_ok].fillna(medianas)
 
-    # Alinear cols_feat con las disponibles
-    cols_ok = [c for c in cols_feat if c in df_fecha.columns]
-    faltantes = set(cols_feat) - set(cols_ok)
+    faltantes = set(cols_feat) - set(df_fecha.columns)
     if faltantes:
-        print(f"  Advertencia: {len(faltantes)} features del modelo ausentes en el parquet — se imputan con 0")
         for c in faltantes:
             df_fecha[c] = 0.0
+    return df_fecha
 
-    return df_fecha, fecha_origen
 
-
-# ── 3. Predecir para todos los h desde la fecha de origen ────────────────────
+# ── 3. Predecir ──────────────────────────────────────────────────────────────
 def predecir(modelos: dict, df_fecha: pd.DataFrame, cols_feat: list[str]) -> pd.DataFrame:
     cols_ok = [c for c in cols_feat if c in df_fecha.columns]
     X = df_fecha[cols_ok].copy()
@@ -123,7 +129,6 @@ def predecir(modelos: dict, df_fecha: pd.DataFrame, cols_feat: list[str]) -> pd.
     for tau, model in modelos.items():
         resultado[f"q{int(tau*100):02d}"] = model.predict(X)
 
-    # Corrección de monotonicidad fila a fila
     q_cols = sorted([c for c in resultado.columns if c.startswith("q")])
     resultado[q_cols] = np.sort(resultado[q_cols].values, axis=1)
     return resultado
@@ -131,14 +136,12 @@ def predecir(modelos: dict, df_fecha: pd.DataFrame, cols_feat: list[str]) -> pd.
 
 # ── 4. Graficar ───────────────────────────────────────────────────────────────
 def _dibujar_bandas(ax, hs, resultado):
-    """Dibuja bandas Q01-Q99, Q05-Q95 y mediana Q50. Reutilizable en ambos subplots."""
     ax.fill_between(hs,
                     resultado["q01"] / 1e6, resultado["q99"] / 1e6,
                     alpha=0.12, color="steelblue", label="Q01–Q99 (98%)")
     ax.fill_between(hs,
                     resultado["q05"] / 1e6, resultado["q95"] / 1e6,
                     alpha=0.28, color="steelblue", label="Q05–Q95 (90%)")
-    # Bordes explícitos de Q05 y Q95 para verificar visualmente que Q50 queda entre ellos
     ax.plot(hs, resultado["q05"] / 1e6,
             color="steelblue", lw=1.0, ls=":", alpha=0.7, label="Q05 / Q95 (borde)")
     ax.plot(hs, resultado["q95"] / 1e6,
@@ -151,7 +154,8 @@ def _dibujar_bandas(ax, hs, resultado):
     ax.set_xlim(hs.min() - 1, hs.max() + 1)
 
 
-def graficar(resultado: pd.DataFrame, fecha_origen: pd.Timestamp, banco: str):
+def graficar(resultado: pd.DataFrame, fecha_origen: pd.Timestamp, banco: str,
+             idx: int, total: int):
     hs        = resultado["h"].values
     realizado = resultado["target"].values / 1e6
     mask_real = ~np.isnan(realizado)
@@ -164,14 +168,12 @@ def graficar(resultado: pd.DataFrame, fecha_origen: pd.Timestamp, banco: str):
         f"Proyección pura: h = {h_max_real + 1} … 90"
     )
 
-    # ── Acumulados ───────────────────────────────────────────────────────────
-    cum_q01 = np.cumsum(resultado["q01"].values / 1e6)
-    cum_q05 = np.cumsum(resultado["q05"].values / 1e6)
-    cum_q50 = np.cumsum(resultado["q50"].values / 1e6)
-    cum_q95 = np.cumsum(resultado["q95"].values / 1e6)
-    cum_q99 = np.cumsum(resultado["q99"].values / 1e6)
+    cum_q01  = np.cumsum(resultado["q01"].values / 1e6)
+    cum_q05  = np.cumsum(resultado["q05"].values / 1e6)
+    cum_q50  = np.cumsum(resultado["q50"].values / 1e6)
+    cum_q95  = np.cumsum(resultado["q95"].values / 1e6)
+    cum_q99  = np.cumsum(resultado["q99"].values / 1e6)
     cum_real = np.where(mask_real, np.nancumsum(np.where(mask_real, realizado, 0)), np.nan)
-    # Para el acumulado realizado, cortamos donde termina el dato
     cum_real[~mask_real] = np.nan
 
     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(16, 16), sharex=True,
@@ -231,30 +233,26 @@ def graficar(resultado: pd.DataFrame, fecha_origen: pd.Timestamp, banco: str):
 
     nombre = f"fanchart_{banco}_{fecha_origen.strftime('%Y%m%d')}_h1_h90.png"
     plt.savefig(DIR_OUTPUT / nombre, dpi=150, bbox_inches="tight")
-    plt.show()
-    print(f"\nGuardado: {DIR_OUTPUT / nombre}")
+    plt.close(fig)  # cierra para no acumular figuras en memoria
+    print(f"  [{idx}/{total}] Guardado: {nombre}")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    modelos, cols_feat     = cargar_modelos(BANCO, DIR_MODELOS)
-    df_fecha, fecha_origen = leer_y_preparar(BANCO, cols_feat)
-    resultado              = predecir(modelos, df_fecha, cols_feat)
+    modelos, cols_feat = cargar_modelos(BANCO, DIR_MODELOS)
+    df, medianas, cols_num, fechas_validas, cols_feat = leer_datos(BANCO, cols_feat)
 
-    # ── Verificación de ordenamiento: q01 ≤ q05 ≤ q50 ≤ q95 ≤ q99 ──────
-    q_cols = ["q01", "q05", "q50", "q95", "q99"]
-    violaciones = (
-        (resultado["q05"] < resultado["q01"]).sum() +
-        (resultado["q50"] < resultado["q05"]).sum() +
-        (resultado["q95"] < resultado["q50"]).sum() +
-        (resultado["q99"] < resultado["q95"]).sum()
-    )
-    print(f"\nVerificación de monotonicidad: {violaciones} violaciones de q01≤q05≤q50≤q95≤q99")
-    print("\nMuestra de quantiles en h clave (MM USD):")
-    h_muestra = [1, 5, 10, 20, 30, 50, 61, 70, 90]
-    sub = resultado[resultado["h"].isin(h_muestra)][["h"] + q_cols].copy()
-    for c in q_cols:
-        sub[c] = (sub[c] / 1e6).round(0)
-    print(sub.to_string(index=False))
+    # Seleccionar fechas cada PASO_FECHAS días hábiles
+    fechas_selec = fechas_validas[::PASO_FECHAS]
+    if N_FECHAS_MAX is not None:
+        fechas_selec = fechas_selec[:N_FECHAS_MAX]
 
-    graficar(resultado, fecha_origen, BANCO)
+    print(f"\nGenerando {len(fechas_selec)} gráfico(s) "
+          f"(paso={PASO_FECHAS} días hábiles, límite={N_FECHAS_MAX}):")
+    for i, f_orig in enumerate(fechas_selec, 1):
+        fecha_origen = pd.Timestamp(f_orig)
+        df_fecha  = preparar_fecha(df, fecha_origen, medianas, cols_num, cols_feat)
+        resultado = predecir(modelos, df_fecha, cols_feat)
+        graficar(resultado, fecha_origen, BANCO, idx=i, total=len(fechas_selec))
+
+    print(f"\n✓ Todos los gráficos guardados en: {DIR_OUTPUT}")
