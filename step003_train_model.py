@@ -421,10 +421,12 @@ def graficar_fanchart_split(
     dir_plots: Path,
     split_name: str = "test",
     h_ejemplo: int = 10,
+    ventana_dias: int = 90,   # días hábiles por panel
 ):
     """
     Para un horizonte h fijo, grafica la banda de predicción (Q01–Q99, Q05–Q95)
-    vs el valor realizado a lo largo del período indicado (val o test).
+    vs el valor realizado. El período se divide en subplots de ventana_dias días
+    hábiles para facilitar la lectura.
     """
     mask_h = df_split["h"] == h_ejemplo
     if mask_h.sum() < 5:
@@ -436,46 +438,74 @@ def graficar_fanchart_split(
         mask_h = df_split["h"] == h_ejemplo
 
     idx_split = np.where(mask_h.values)[0]
-    fechas    = df_split.loc[mask_h, "fecha_t"].values
+    fechas    = pd.to_datetime(df_split.loc[mask_h, "fecha_t"].values)
     y_real    = y_split.values[idx_split] / 1e6
 
     label_titulo = "Test (holdout)" if split_name == "test" else "Validación"
 
-    fig, ax = plt.subplots(figsize=(14, 6))
+    # ── Dividir en ventanas de ventana_dias días hábiles ────────────────────
+    n_obs     = len(fechas)
+    n_paneles = max(1, int(np.ceil(n_obs / ventana_dias)))
 
-    if 0.01 in preds and 0.99 in preds:
-        ax.fill_between(
-            fechas,
-            preds[0.01][idx_split] / 1e6,
-            preds[0.99][idx_split] / 1e6,
-            alpha=0.10, color="steelblue", label="P01–P99",
-        )
-    if 0.05 in preds and 0.95 in preds:
-        ax.fill_between(
-            fechas,
-            preds[0.05][idx_split] / 1e6,
-            preds[0.95][idx_split] / 1e6,
-            alpha=0.20, color="steelblue", label="P05–P95",
-        )
-    if 0.50 in preds:
-        ax.plot(fechas, preds[0.50][idx_split] / 1e6,
-                color="steelblue", lw=1.8, label="Mediana pred.", zorder=4)
-
-    ax.plot(fechas, y_real, color="black", lw=1.2, alpha=0.85,
-            label="Realizado", zorder=5)
-    ax.axhline(0, color="grey", lw=0.7, ls="--", alpha=0.5)
-
-    ax.set_xlabel("Fecha de predicción (t)", fontsize=10)
-    ax.set_ylabel("Flujo neto D−R (MM USD)", fontsize=10)
-    ax.set_title(
-        f"Fan Chart [{label_titulo}] — {banco}  |  h = {h_ejemplo} días hábiles\n"
-        f"Bandas: Q01–Q99 y Q05–Q95  vs  realizado",
-        fontweight="bold", fontsize=11,
+    fig, axes = plt.subplots(
+        n_paneles, 1,
+        figsize=(16, 4 * n_paneles),
+        gridspec_kw={"hspace": 0.45},
     )
-    ax.legend(fontsize=9, ncol=4, loc="upper left", framealpha=0.9)
-    ax.grid(True, alpha=0.25)
-    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:,.1f}"))
-    plt.tight_layout()
+    if n_paneles == 1:
+        axes = [axes]
+
+    y_all = np.concatenate([
+        preds[tau][idx_split] / 1e6
+        for tau in preds
+        if tau not in (0.50,)
+    ] + [y_real])
+    y_lim_min = np.nanpercentile(y_all, 1)
+    y_lim_max = np.nanpercentile(y_all, 99)
+    pad = (y_lim_max - y_lim_min) * 0.08
+    ylim = (y_lim_min - pad, y_lim_max + pad)
+
+    for p, ax in enumerate(axes):
+        i0 = p * ventana_dias
+        i1 = min(i0 + ventana_dias, n_obs)
+        sl = slice(i0, i1)
+
+        f_sl  = fechas[sl]
+        yr_sl = y_real[sl]
+
+        if 0.01 in preds and 0.99 in preds:
+            ax.fill_between(f_sl,
+                            preds[0.01][idx_split][sl] / 1e6,
+                            preds[0.99][idx_split][sl] / 1e6,
+                            alpha=0.10, color="steelblue", label="P01–P99")
+        if 0.05 in preds and 0.95 in preds:
+            ax.fill_between(f_sl,
+                            preds[0.05][idx_split][sl] / 1e6,
+                            preds[0.95][idx_split][sl] / 1e6,
+                            alpha=0.22, color="steelblue", label="P05–P95")
+        if 0.50 in preds:
+            ax.plot(f_sl, preds[0.50][idx_split][sl] / 1e6,
+                    color="steelblue", lw=1.8, label="Mediana pred.", zorder=4)
+        ax.plot(f_sl, yr_sl, color="black", lw=1.2, alpha=0.85,
+                label="Realizado", zorder=5)
+        ax.axhline(0, color="grey", lw=0.7, ls="--", alpha=0.5)
+
+        ax.set_ylim(*ylim)
+        ax.set_ylabel("MM USD", fontsize=9)
+        ax.set_title(
+            f"{f_sl[0].strftime('%d %b %Y')} → {f_sl[-1].strftime('%d %b %Y')}",
+            fontsize=9, style="italic",
+        )
+        ax.grid(True, alpha=0.25)
+        ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:,.0f}"))
+        if p == 0:
+            ax.legend(fontsize=9, ncol=4, loc="upper left", framealpha=0.9)
+
+    fig.suptitle(
+        f"Fan Chart [{label_titulo}] — {banco}  |  h = {h_ejemplo} días hábiles\n"
+        f"Bandas: Q01–Q99 y Q05–Q95  vs  realizado  |  ventana = {ventana_dias} días hábiles/panel",
+        fontweight="bold", fontsize=11, y=1.01,
+    )
 
     nombre = f"fanchart_{split_name}_{banco}_h{h_ejemplo:02d}.png"
     plt.savefig(dir_plots / nombre, dpi=150, bbox_inches="tight")
