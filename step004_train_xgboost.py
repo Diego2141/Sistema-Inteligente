@@ -173,15 +173,15 @@ def make_quantile_objective(tau: float, s: float):
 
       L(u) = (τ - 0.5 + arctan(u/s)/π) · u + s/π
 
-    Gradiente (∂L/∂ŷ, regla de la cadena con u = y - ŷ):
-      g = (τ - 0.5 + arctan(u/s)/π) + u·s / (π·(s²+u²))
+    Gradiente (∂L/∂ŷ, regla de la cadena con u = y - ŷ, ∂u/∂ŷ = -1):
+      g = -[(τ - 0.5 + arctan(u/s)/π) + u·s / (π·(s²+u²))]
 
-    Hessiana (∂²L/∂ŷ²):
+    Hessiana (∂²L/∂ŷ², el (-1)² cancela):
       h = 2s³ / (π·(s²+u²)²)    — siempre positiva
     """
     def objective(y_pred: np.ndarray, dtrain: xgb.DMatrix):
         u    = dtrain.get_label() - y_pred
-        grad = (tau - 0.5 + np.arctan(u / s) / np.pi) + u * s / (np.pi * (s**2 + u**2))
+        grad = -((tau - 0.5 + np.arctan(u / s) / np.pi) + u * s / (np.pi * (s**2 + u**2)))
         hess = 2 * s**3 / (np.pi * (s**2 + u**2)**2)
         return grad, hess
     return objective
