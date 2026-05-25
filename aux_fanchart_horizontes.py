@@ -82,21 +82,18 @@ def leer_y_preparar(banco: str, cols_feat: list[str]) -> tuple[pd.DataFrame, pd.
     print(f"\nTEST completo : {df_test['fecha_t'].min().date()} → "
           f"{df_test['fecha_t'].max().date()} ({df_test['fecha_t'].nunique()} fechas)")
 
-    # Última fecha t del TEST que tiene al menos h=1 realizado (target no NaN)
-    fechas_con_dato = (
-        df_test[df_test["target"].notna()]
-        .groupby("fecha_t")["h"].min()          # h mínimo con dato por fecha
-    )
-    fechas_validas = fechas_con_dato[fechas_con_dato <= 2].index  # h=1 o h=2 disponible
-    if fechas_validas.empty:
-        raise ValueError("No hay fechas del TEST con target realizado en h<=2.")
-
-    fecha_origen = pd.Timestamp(fechas_validas.max())
+    # Primera fecha del TEST como origen: los ~65 días hábiles del período
+    # de test corresponden a h=1..65 con realizado disponible para comparar.
+    # h=66..90 queda como proyección pura sin datos aún.
+    fecha_origen = pd.Timestamp(corte_test)
     print(f"Fecha de origen: {fecha_origen.date()}  "
-          f"(última del TEST con h=1 realizado)")
+          f"(primera fecha del TEST — permite comparar h=1..{n_test} con realizado)")
 
-    # Filtrar solo las filas de esa fecha
-    df_fecha = df_test[df_test["fecha_t"] == fecha_origen].copy().sort_values("h")
+    # Filtrar las filas de la fecha de origen — puede estar en df_test o df completo
+    # porque corte_test es exactamente la primera fecha del TEST
+    df_fecha = df[df["fecha_t"] == fecha_origen].copy().sort_values("h")
+    cols_num_ok = [c for c in cols_num if c in df_fecha.columns]
+    df_fecha[cols_num_ok] = df_fecha[cols_num_ok].fillna(medianas)
 
     # Alinear cols_feat con las disponibles
     cols_ok = [c for c in cols_feat if c in df_fecha.columns]
@@ -167,7 +164,8 @@ def graficar(resultado: pd.DataFrame, fecha_origen: pd.Timestamp, banco: str):
     ax.set_title(
         f"Fan Chart — {banco}  |  Fecha de origen: {fecha_origen.strftime('%d %b %Y')}\n"
         f"Proyección del modelo h = 1 … 90 días hábiles  |  "
-        f"Realizado disponible hasta h = {h_max_real}",
+        f"Realizado disponible: h = 1 … {h_max_real}  |  "
+        f"Proyección pura: h = {h_max_real+1} … 90",
         fontweight="bold", fontsize=12
     )
     ax.legend(loc="upper right", fontsize=9, framealpha=0.9)
