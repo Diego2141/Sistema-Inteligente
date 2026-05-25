@@ -36,9 +36,9 @@ CORTE_VAL  = pd.Timestamp("2022-07-01")   # alineado con step003
 CORTE_TEST = pd.Timestamp("2023-01-03")   # inicio de datos de tasas (allocation)
 
 # ── Parámetros del video ──────────────────────────────────────────────────────
-PASO_FECHAS = 1    # 1 = todos los días hábiles válidos; 2 = cada 2, etc.
-FPS         = 2    # frames por segundo (2 = cada fecha dura 0.5 s en el video)
-DPI         = 120  # resolución del video
+PASO_FECHAS = 5    # cada 5 días hábiles → 785/5 = ~157 frames (manejable para GIF)
+FPS         = 4    # frames por segundo
+DPI         = 80   # resolución reducida para GIF (MP4 puede usar 120)
 
 
 # ── 1. Cargar modelo ──────────────────────────────────────────────────────────
@@ -257,6 +257,17 @@ def animar(frames, ylim1, ylim3, banco):
     # ── Intentar guardar MP4, fallback a GIF ─────────────────────────────
     nombre_mp4 = DIR_OUTPUT / f"fanchart_{banco}_animacion.mp4"
     nombre_gif = DIR_OUTPUT / f"fanchart_{banco}_animacion.gif"
+    # ── Verificar ffmpeg antes de intentar GIF con muchos frames ────────────
+    import shutil
+    ffmpeg_ok = shutil.which("ffmpeg") is not None
+    if not ffmpeg_ok and len(frames) > 200:
+        print(f"\n⚠️  ffmpeg no encontrado y hay {len(frames)} frames.")
+        print("   Un GIF de este tamaño agotará la memoria.")
+        print("   Instala ffmpeg:  conda install -c conda-forge ffmpeg")
+        print("   O reduce PASO_FECHAS para bajar el número de frames.")
+        plt.close(fig)
+        return None
+
     try:
         writer = animation.FFMpegWriter(fps=FPS, bitrate=1800)
         anim.save(str(nombre_mp4), writer=writer, dpi=DPI)
@@ -273,8 +284,7 @@ def animar(frames, ylim1, ylim3, banco):
         return nombre_gif
     except Exception as e2:
         print(f"  Error guardando GIF: {e2}")
-        print("  Instala ffmpeg o pillow para exportar el video.")
-        plt.show()
+        print("  Instala ffmpeg:  conda install -c conda-forge ffmpeg")
         plt.close(fig)
         return None
 
