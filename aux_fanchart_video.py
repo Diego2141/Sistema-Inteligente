@@ -31,9 +31,9 @@ DIR_MODELOS  = BASE_SISTEMA / "2. Output" / "modelos"
 DIR_OUTPUT   = BASE_SISTEMA / "2. Output" / "aux_fanchart_horizontes"
 DIR_OUTPUT.mkdir(parents=True, exist_ok=True)
 
-BANCO        = "SISTEMA"
-SEMANAS_VAL  = 26
-SEMANAS_TEST = 20
+BANCO      = "SISTEMA"
+CORTE_VAL  = pd.Timestamp("2022-07-01")   # alineado con step003
+CORTE_TEST = pd.Timestamp("2023-01-03")   # inicio de datos de tasas (allocation)
 
 # ── Parámetros del video ──────────────────────────────────────────────────────
 PASO_FECHAS = 1    # 1 = todos los días hábiles válidos; 2 = cada 2, etc.
@@ -68,15 +68,8 @@ def cargar_datos(banco, cols_feat):
     df["fecha_t"] = pd.to_datetime(df["fecha_t"])
     df = df.sort_values(["fecha_t", "h"]).reset_index(drop=True)
 
-    fechas = np.sort(df["fecha_t"].unique())
-    n = len(fechas)
-    n_test = min(SEMANAS_TEST * 5, n // 6)
-    n_val  = min(SEMANAS_VAL  * 5, n // 4)
-    corte_val  = fechas[n - n_test - n_val]
-    corte_test = fechas[n - n_test]
-
-    df_train = df[df["fecha_t"] < corte_val].copy()
-    df_test  = df[df["fecha_t"] >= corte_test].copy()
+    df_train = df[df["fecha_t"] < CORTE_VAL].copy()
+    df_test  = df[df["fecha_t"] >= CORTE_TEST].copy()
 
     cols_excluir = {"fecha_t", "banco", "target"}
     cols_num  = [c for c in df.columns if c not in cols_excluir]
@@ -85,7 +78,7 @@ def cargar_datos(banco, cols_feat):
     fechas_validas = np.sort(
         df_test[(df_test["h"] == 90) & df_test["target"].notna()]["fecha_t"].unique()
     )
-    print(f"TEST  : {pd.Timestamp(corte_test).date()} → "
+    print(f"TEST  : {CORTE_TEST.date()} → "
           f"{df_test['fecha_t'].max().date()}")
     print(f"Fechas válidas : {pd.Timestamp(fechas_validas[0]).date()} → "
           f"{pd.Timestamp(fechas_validas[-1]).date()} ({len(fechas_validas)} fechas)")

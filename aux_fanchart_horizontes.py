@@ -32,9 +32,9 @@ DIR_MODELOS  = BASE_SISTEMA / "2. Output" / "modelos"
 DIR_OUTPUT   = BASE_SISTEMA / "2. Output" / "aux_fanchart_horizontes"
 DIR_OUTPUT.mkdir(parents=True, exist_ok=True)
 
-BANCO        = "SISTEMA"
-SEMANAS_VAL  = 26
-SEMANAS_TEST = 20   # = h_max/5 + 2 semanas buffer
+BANCO      = "SISTEMA"
+CORTE_VAL  = pd.Timestamp("2022-07-01")   # alineado con step003
+CORTE_TEST = pd.Timestamp("2023-01-03")   # inicio de datos de tasas (allocation)
 
 # ── Parámetros del loop ───────────────────────────────────────────────────────
 PASO_FECHAS  = 2    # cada 2 días hábiles; usar 1 para todas las fechas
@@ -72,22 +72,15 @@ def leer_datos(banco: str, cols_feat: list[str]):
     df["fecha_t"] = pd.to_datetime(df["fecha_t"])
     df = df.sort_values(["fecha_t", "h"]).reset_index(drop=True)
 
-    fechas = np.sort(df["fecha_t"].unique())
-    n = len(fechas)
-    n_test = min(SEMANAS_TEST * 5, n // 6)
-    n_val  = min(SEMANAS_VAL  * 5, n // 4)
-    corte_val  = fechas[n - n_test - n_val]
-    corte_test = fechas[n - n_test]
-
-    df_train = df[df["fecha_t"] < corte_val].copy()
-    df_test  = df[df["fecha_t"] >= corte_test].copy()
+    df_train = df[df["fecha_t"] < CORTE_VAL].copy()
+    df_test  = df[df["fecha_t"] >= CORTE_TEST].copy()
 
     cols_excluir = {"fecha_t", "banco", "target"}
     cols_num = [c for c in df.columns if c not in cols_excluir]
     medianas = df_train[cols_num].median()
 
-    print(f"\nTRAIN : hasta {pd.Timestamp(corte_val).date()}")
-    print(f"TEST  : {pd.Timestamp(corte_test).date()} → "
+    print(f"\nTRAIN : hasta {CORTE_VAL.date()}")
+    print(f"TEST  : {CORTE_TEST.date()} → "
           f"{df_test['fecha_t'].max().date()} ({df_test['fecha_t'].nunique()} fechas)")
 
     # Fechas del TEST donde h=90 tiene target realizado

@@ -66,13 +66,16 @@ DIR_PLOTS.mkdir(parents=True, exist_ok=True)
 # Quantiles a producir
 QUANTILES = [0.01, 0.05, 0.50, 0.95, 0.99]
 
-# Semanas hábiles reservadas para cada split (walk-forward, orden temporal):
-#   |─── TRAIN ──────────────|─── VAL ───|─── TEST ───|
-#   TRAIN: entrena modelos + usa early stopping interno
-#   VAL:   Optuna ajusta hiperparámetros aquí — el modelo NUNCA ve TEST
-#   TEST:  evaluación final honesta, nunca tocada durante entrenamiento/optimización
-SEMANAS_VAL  = 26   # ~6 meses para ajuste de hiperparámetros (Optuna)
-SEMANAS_TEST = 20   # = h_max/5 + 2 semanas buffer → origen con h=1..90 realizado completo
+# Cortes temporales del split (walk-forward, orden cronológico estricto):
+#   |─── TRAIN ──────────────|─── VAL ───|─── TEST ──────────────|
+#   TRAIN : 2010 → jul 2022  (incluye ciclo electoral 2021)
+#   VAL   : jul 2022 → ene 2023  (~6 meses, Optuna)
+#   TEST  : 03 ene 2023 → hoy   (alineado con datos de tasas del allocation)
+#
+# Fechas fijas en lugar de semanas proporcionales porque el corte TEST tiene
+# justificación externa: el modelo de allocation tiene tasas desde 03-ene-2023.
+CORTE_VAL  = pd.Timestamp("2022-07-01")
+CORTE_TEST = pd.Timestamp("2023-01-03")
 
 # Trials Optuna por banco
 N_TRIALS_OPTUNA = 60
@@ -135,39 +138,36 @@ def preparar_Xy(df: pd.DataFrame, cols_feat: list[str]) -> tuple[pd.DataFrame, p
 
 
 def split_walk_forward(
-    df: pd.DataFrame, semanas_val: int, semanas_test: int
+    df: pd.DataFrame,
+    corte_val:  pd.Timestamp = CORTE_VAL,
+    corte_test: pd.Timestamp = CORTE_TEST,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Divide temporalmente en tres particiones sin solapamiento:
       TRAIN | VAL | TEST  (orden cronológico estricto)
 
-    - TEST  : últimas semanas_test semanas hábiles → evaluación final honesta.
-    - VAL   : semanas_val semanas hábiles anteriores al TEST → Optuna.
-    - TRAIN : todo lo anterior → ajuste del modelo.
+    Usa fechas fijas (CORTE_VAL, CORTE_TEST) para alinear TEST con el período
+    donde el modelo de allocation tiene datos de tasas (desde 03-ene-2023).
 
     Garantías:
       · Ningún dato del futuro contamina el entrenamiento ni la optimización.
       · VAL y TEST son completamente disjuntos.
-      · El mínimo de datos de TRAIN es 50% del total para evitar splits degenerados.
+      · TRAIN incluye el ciclo electoral 2021 completo.
     """
-    fechas_unicas = np.sort(df["fecha_t"].unique())
-    n_fechas = len(fechas_unicas)
-
-    # Convertir semanas a días hábiles (~5 por semana), con techo conservador
-    n_test = min(semanas_test * 5, n_fechas // 6)
-    n_val  = min(semanas_val  * 5, n_fechas // 4)
-
-    # Garantizar que TRAIN tenga al menos 50% de las fechas
-    if n_fechas - n_test - n_val < n_fechas // 2:
-        n_val = max(10, n_fechas // 6)
-        n_test = max(5, n_fechas // 8)
-
-    corte_val  = fechas_unicas[n_fechas - n_test - n_val]
-    corte_test = fechas_unicas[n_fechas - n_test]
-
-    df_train = df[df["fecha_t"] <  corte_val ].copy()
+    df_train = df[df["fecha_t"] <  corte_val].copy()
     df_val   = df[(df["fecha_t"] >= corte_val) & (df["fecha_t"] < corte_test)].copy()
     df_test  = df[df["fecha_t"] >= corte_test].copy()
+
+    n_train = df_train["fecha_t"].nunique()
+    n_val   = df_val["fecha_t"].nunique()
+    n_test  = df_test["fecha_t"].nunique()
+    n_total = n_train + n_val + n_test
+
+    if n_train < n_total * 0.5:
+        raise ValueError(
+            f"TRAIN solo tiene {n_train} fechas ({100*n_train/n_total:.0f}% del total). "
+            "Ajusta CORTE_VAL o CORTE_TEST."
+        )
     return df_train, df_val, df_test
 
 
@@ -528,7 +528,7 @@ def entrenar_banco(banco: str) -> dict | None:
     logger.info(f"  [{banco}] Features: {len(cols_feat)}")
 
     # ── 3. Split walk-forward en tres particiones ────────────────
-    df_train, df_val, df_test = split_walk_forward(df, SEMANAS_VAL, SEMANAS_TEST)
+    df_train, df_val, df_test = split_walk_forward(df, CORTE_VAL, CORTE_TEST)
 
     logger.info(
         f"  [{banco}] TRAIN: {df_train['fecha_t'].min().date()} → "

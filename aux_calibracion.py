@@ -31,11 +31,11 @@ DIR_MODELOS  = BASE_SISTEMA / "2. Output" / "modelos"
 DIR_OUTPUT   = BASE_SISTEMA / "2. Output" / "aux_calibracion"
 DIR_OUTPUT.mkdir(parents=True, exist_ok=True)
 
-BANCO        = "SISTEMA"
-SEMANAS_VAL  = 26
-SEMANAS_TEST = 20
+BANCO      = "SISTEMA"
+CORTE_VAL  = pd.Timestamp("2022-07-01")   # alineado con step003
+CORTE_TEST = pd.Timestamp("2023-01-03")   # inicio de datos de tasas (allocation)
 
-ALPHA_CQR    = 0.10   # cobertura objetivo CQR = 1 - ALPHA_CQR = 90 %
+ALPHA_CQR  = 0.10   # cobertura objetivo CQR = 1 - ALPHA_CQR = 90 %
 
 
 # ── 1. Cargar modelo ──────────────────────────────────────────────────────────
@@ -65,16 +65,9 @@ def cargar_splits(banco, cols_feat):
     df["fecha_t"] = pd.to_datetime(df["fecha_t"])
     df = df.sort_values(["fecha_t", "h"]).reset_index(drop=True)
 
-    fechas  = np.sort(df["fecha_t"].unique())
-    n       = len(fechas)
-    n_test  = min(SEMANAS_TEST * 5, n // 6)
-    n_val   = min(SEMANAS_VAL  * 5, n // 4)
-    corte_val  = fechas[n - n_test - n_val]
-    corte_test = fechas[n - n_test]
-
     cols_excluir = {"fecha_t", "banco", "target"}
     cols_num = [c for c in df.columns if c not in cols_excluir]
-    medianas = df[df["fecha_t"] < corte_val][cols_num].median()
+    medianas = df[df["fecha_t"] < CORTE_VAL][cols_num].median()
 
     def imputar(df_):
         d = df_.copy()
@@ -84,12 +77,13 @@ def cargar_splits(banco, cols_feat):
             d[c] = 0.0
         return d
 
-    df_val  = imputar(df[(df["fecha_t"] >= corte_val)  & (df["fecha_t"] < corte_test)])
-    df_test = imputar(df[df["fecha_t"] >= corte_test])
+    df_val  = imputar(df[(df["fecha_t"] >= CORTE_VAL)  & (df["fecha_t"] < CORTE_TEST)])
+    df_test = imputar(df[df["fecha_t"] >= CORTE_TEST])
 
-    print(f"VAL  : {pd.Timestamp(corte_val).date()} → {df_val['fecha_t'].max().date()}"
+    print(f"TRAIN: hasta {CORTE_VAL.date()}")
+    print(f"VAL  : {CORTE_VAL.date()} → {df_val['fecha_t'].max().date()}"
           f"  ({df_val['fecha_t'].nunique()} fechas)")
-    print(f"TEST : {pd.Timestamp(corte_test).date()} → {df_test['fecha_t'].max().date()}"
+    print(f"TEST : {CORTE_TEST.date()} → {df_test['fecha_t'].max().date()}"
           f"  ({df_test['fecha_t'].nunique()} fechas)")
     return df_val, df_test, cols_feat
 
