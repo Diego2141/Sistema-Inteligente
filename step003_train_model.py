@@ -26,6 +26,7 @@ Flujo:
 import gc
 import json
 import logging
+import time
 import warnings
 from pathlib import Path
 
@@ -507,6 +508,7 @@ def entrenar_banco(banco: str) -> dict | None:
     logger.info(f"\n{'='*60}")
     logger.info(f"BANCO: {banco}")
     logger.info(f"{'='*60}")
+    t_banco = time.time()
 
     # ── 1. Lectura ──────────────────────────────────────────────
     try:
@@ -555,43 +557,50 @@ def entrenar_banco(banco: str) -> dict | None:
         return None
 
     # ── 4. Optuna: TRAIN → VAL ───────────────────────────────────
-    # TEST nunca se toca en este paso
+    t_optuna = time.time()
     best_params = optimizar_hiperparametros(
         X_train, y_train, X_val, y_val, N_TRIALS_OPTUNA, banco
     )
+    logger.info(f"  [{banco}] Optuna completado en {(time.time()-t_optuna)/60:.1f} min")
 
     # ── 5. Evaluación honesta en TEST ────────────────────────────
-    # Entrenamos sobre TRAIN (no sobre TRAIN+VAL) para que TEST sea limpio
+    t_eval = time.time()
     logger.info(f"  [{banco}] Entrenando sobre TRAIN para evaluación en TEST...")
     modelos_eval = entrenar_quantiles(X_train, y_train, best_params, QUANTILES, banco)
     metricas_test, preds_test = evaluar_modelos(
         modelos_eval, X_test, y_test, banco, split_name="test"
     )
-
-    # También reportamos VAL para comparar con TEST (diagnosticar sobreajuste)
     _, preds_val_diag = evaluar_modelos(
         modelos_eval, X_val, y_val, banco, split_name="val"
     )
+    logger.info(f"  [{banco}] Evaluación TEST completada en {(time.time()-t_eval):.1f} s")
 
     metricas = {**metricas_test}
 
     # ── 6. Re-entrenamiento final sobre todos los datos ──────────
-    # Este es el modelo que va a producción
+    t_prod = time.time()
     logger.info(f"  [{banco}] Re-entrenamiento final (TRAIN+VAL+TEST)...")
     X_full = pd.concat([X_train, X_val, X_test], ignore_index=True)
     y_full = pd.concat([y_train, y_val, y_test], ignore_index=True)
     modelos_prod = entrenar_quantiles(X_full, y_full, best_params, QUANTILES, banco)
+    logger.info(f"  [{banco}] Re-entrenamiento completado en {(time.time()-t_prod):.1f} s")
 
     # ── 7. Guardar ───────────────────────────────────────────────
     guardar_modelos(modelos_prod, metricas, best_params, cols_feat, banco, DIR_MODELOS)
 
     # ── 8. Gráficos ─────────────────────────────────────────────
     graficar_importancia(modelos_prod, cols_feat, banco, DIR_PLOTS)
-    # Alinear df con y y preds: filtrar solo filas con target (igual que preparar_Xy)
     df_test_plot = df_test[df_test["target"].notna()].reset_index(drop=True)
     df_val_plot  = df_val[df_val["target"].notna()].reset_index(drop=True)
     graficar_fanchart_split(df_test_plot, preds_test,     y_test, banco, DIR_PLOTS, split_name="test")
     graficar_fanchart_split(df_val_plot,  preds_val_diag, y_val,  banco, DIR_PLOTS, split_name="val")
+
+    # ── Resumen de tiempos por banco ─────────────────────────────
+    t_total_banco = time.time() - t_banco
+    logger.info(
+        f"  [{banco}] ✓ Completado en {t_total_banco/60:.1f} min  "
+        f"(Optuna: {(time.time()-t_banco - (time.time()-t_optuna)):.0f}s estimado)"
+    )
 
     # Liberar memoria
     del df, df_train, df_val, df_test
@@ -599,10 +608,11 @@ def entrenar_banco(banco: str) -> dict | None:
     del X_full, y_full, modelos_eval, modelos_prod
     gc.collect()
 
-    return {"banco": banco, **metricas}
+    return {"banco": banco, "tiempo_min": round(t_total_banco / 60, 1), **metricas}
 
 
 def main():
+    t_inicio = time.time()
     logger.info("=" * 70)
     logger.info("STEP003 — Entrenamiento LightGBM Quantile Regression")
     logger.info("=" * 70)
@@ -662,7 +672,13 @@ def main():
         df_resumen.to_csv(ruta_resumen)
         logger.info(f"\nResumen guardado en: {ruta_resumen}")
 
-    logger.info("\n✓ Entrenamiento completado.")
+    t_total = time.time() - t_inicio
+    logger.info("\n" + "=" * 70)
+    logger.info(f"✓ Entrenamiento completado en {t_total/60:.1f} min  ({t_total:.0f} s)")
+    if resumen:
+        logger.info("  Tiempo por banco:")
+        for r in resumen:
+            logger.info(f"    {r['banco']:20s}: {r.get('tiempo_min', '?')} min")
     logger.info(f"  Modelos en  : {DIR_MODELOS}")
     logger.info(f"  Gráficos en : {DIR_PLOTS}")
     logger.info("  → Siguiente paso: step004_predict.py (predicción en tiempo real)")
