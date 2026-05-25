@@ -164,38 +164,70 @@ def graficar(resultado: pd.DataFrame, fecha_origen: pd.Timestamp, banco: str):
         f"Proyección pura: h = {h_max_real + 1} … 90"
     )
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 12), sharex=True,
-                                   gridspec_kw={"hspace": 0.08})
+    # ── Acumulados ───────────────────────────────────────────────────────────
+    cum_q01 = np.cumsum(resultado["q01"].values / 1e6)
+    cum_q05 = np.cumsum(resultado["q05"].values / 1e6)
+    cum_q50 = np.cumsum(resultado["q50"].values / 1e6)
+    cum_q95 = np.cumsum(resultado["q95"].values / 1e6)
+    cum_q99 = np.cumsum(resultado["q99"].values / 1e6)
+    cum_real = np.where(mask_real, np.nancumsum(np.where(mask_real, realizado, 0)), np.nan)
+    # Para el acumulado realizado, cortamos donde termina el dato
+    cum_real[~mask_real] = np.nan
 
-    # ── Subplot superior: bandas + realizado ─────────────────────────────
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(16, 16), sharex=True,
+                                        gridspec_kw={"hspace": 0.08})
+
+    # ── Subplot 1: flujo diario — bandas + realizado ──────────────────────
     _dibujar_bandas(ax1, hs, resultado)
-
     if mask_real.any():
         ax1.plot(hs[mask_real], realizado[mask_real],
                  color="black", lw=2, label="Realizado (D−R)", zorder=5)
         ax1.scatter(hs[mask_real], realizado[mask_real],
                     color="black", s=18, zorder=6)
-
     if h_max_real > 0:
         ax1.axvline(h_max_real, color="red", lw=1.2, ls="--", alpha=0.7,
                     label=f"Último dato realizado (h={h_max_real})")
-
     ax1.set_ylabel("Flujo neto D−R (MM USD)", fontsize=11)
     ax1.set_title(titulo_base, fontweight="bold", fontsize=11)
     ax1.legend(loc="upper right", fontsize=9, framealpha=0.9)
 
-    # ── Subplot inferior: solo bandas del modelo ─────────────────────────
+    # ── Subplot 2: flujo diario — solo modelo ────────────────────────────
     _dibujar_bandas(ax2, hs, resultado)
-
     if h_max_real > 0:
         ax2.axvline(h_max_real, color="red", lw=1.2, ls="--", alpha=0.7,
                     label=f"Último dato realizado (h={h_max_real})")
-
-    ax2.set_xlabel("Horizonte h (días hábiles desde t)", fontsize=11)
     ax2.set_ylabel("Flujo neto D−R (MM USD)", fontsize=11)
     ax2.set_title("Solo proyección del modelo (sin realizado) — mediana visible",
                   fontsize=10, style="italic")
     ax2.legend(loc="upper right", fontsize=9, framealpha=0.9)
+
+    # ── Subplot 3: flujo neto ACUMULADO ──────────────────────────────────
+    ax3.fill_between(hs, cum_q01, cum_q99,
+                     alpha=0.12, color="steelblue", label="Q01–Q99 acum. (98%)")
+    ax3.fill_between(hs, cum_q05, cum_q95,
+                     alpha=0.28, color="steelblue", label="Q05–Q95 acum. (90%)")
+    ax3.plot(hs, cum_q05, color="steelblue", lw=1.0, ls=":", alpha=0.7)
+    ax3.plot(hs, cum_q95, color="steelblue", lw=1.0, ls=":", alpha=0.7)
+    ax3.plot(hs, cum_q50,
+             color="crimson", lw=2.0, label="Mediana acumulada (Q50)", zorder=5)
+    if mask_real.any():
+        hs_real = hs[mask_real]
+        ax3.plot(hs_real, cum_real[mask_real],
+                 color="black", lw=2, label="Realizado acumulado (D−R)", zorder=6)
+        ax3.scatter(hs_real, cum_real[mask_real],
+                    color="black", s=18, zorder=7)
+    if h_max_real > 0:
+        ax3.axvline(h_max_real, color="red", lw=1.2, ls="--", alpha=0.7,
+                    label=f"Último dato realizado (h={h_max_real})")
+    ax3.axhline(0, color="black", lw=0.7, ls="--", alpha=0.35)
+    ax3.set_xlabel("Horizonte h (días hábiles desde t)", fontsize=11)
+    ax3.set_ylabel("Flujo neto acumulado (MM USD)", fontsize=11)
+    ax3.set_title("Flujo neto acumulado D−R desde la fecha de origen",
+                  fontsize=10, style="italic")
+    ax3.legend(loc="upper left", fontsize=9, framealpha=0.9)
+    ax3.grid(True, alpha=0.25)
+    ax3.xaxis.set_major_locator(mticker.MultipleLocator(10))
+    ax3.set_xlim(hs.min() - 1, hs.max() + 1)
 
     nombre = f"fanchart_{banco}_{fecha_origen.strftime('%Y%m%d')}_h1_h90.png"
     plt.savefig(DIR_OUTPUT / nombre, dpi=150, bbox_inches="tight")
