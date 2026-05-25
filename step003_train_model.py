@@ -16,7 +16,7 @@ Diseño:
 
 Flujo:
   1. Leer matriz_features.parquet (banco por banco, column-subset).
-  2. Walk-forward split: últimas SEMANAS_VAL semanas hábiles como validación.
+  2. Walk-forward split: cortes por fecha fija (CORTE_VAL, CORTE_TEST).
   3. Optuna: optimizar pinball loss mediana (τ=0.50) en el split.
   4. Re-entrenar cada quantil con los mejores hiperparámetros sobre train completo.
   5. Evaluar en validación: pinball loss por quantil y RMSE mediana.
@@ -619,8 +619,8 @@ def main():
     logger.info(f"  Matriz de features : {RUTA_MATRIZ}")
     logger.info(f"  Directorio modelos : {DIR_MODELOS}")
     logger.info(f"  Quantiles          : {QUANTILES}")
-    logger.info(f"  Semanas VAL        : {SEMANAS_VAL}  (~{SEMANAS_VAL//4} meses, Optuna)")
-    logger.info(f"  Semanas TEST       : {SEMANAS_TEST} (~{SEMANAS_TEST//4} meses, holdout final)")
+    logger.info(f"  Corte VAL          : {CORTE_VAL.date()}  (inicio VAL / fin TRAIN)")
+    logger.info(f"  Corte TEST         : {CORTE_TEST.date()} (inicio TEST, alineado con tasas allocation)")
     logger.info(f"  Trials Optuna      : {N_TRIALS_OPTUNA}")
 
     if not RUTA_MATRIZ.exists():
