@@ -13,7 +13,7 @@ RUTA_MATRIZ  = BASE_SISTEMA / "1. Data" / "Clean" / "matriz_features.parquet"
 
 BANCO        = "SISTEMA"
 SEMANAS_VAL  = 26
-SEMANAS_TEST = 18   # = h_max/5 → realizado completo h=1..90 en fan chart
+SEMANAS_TEST = 20   # = h_max/5 + 2 semanas buffer → origen con h=1..90 realizado completo
 
 # ── Leer ────────────────────────────────────────────────────────────────────
 df = pd.read_parquet(RUTA_MATRIZ, filters=[("banco", "==", BANCO)])

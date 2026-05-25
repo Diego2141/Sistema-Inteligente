@@ -72,7 +72,7 @@ QUANTILES = [0.01, 0.05, 0.50, 0.95, 0.99]
 #   VAL:   Optuna ajusta hiperparámetros aquí — el modelo NUNCA ve TEST
 #   TEST:  evaluación final honesta, nunca tocada durante entrenamiento/optimización
 SEMANAS_VAL  = 26   # ~6 meses para ajuste de hiperparámetros (Optuna)
-SEMANAS_TEST = 18   # = h_max/5 = 90/5 → garantiza realizado completo h=1..90 en fan chart
+SEMANAS_TEST = 20   # = h_max/5 + 2 semanas buffer → origen con h=1..90 realizado completo
 
 # Trials Optuna por banco
 N_TRIALS_OPTUNA = 60
