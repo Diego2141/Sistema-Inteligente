@@ -31,7 +31,7 @@ DIR_OUTPUT.mkdir(parents=True, exist_ok=True)
 
 BANCO        = "SISTEMA"
 SEMANAS_VAL  = 26
-SEMANAS_TEST = 13
+SEMANAS_TEST = 18   # = h_max/5 → realizado completo h=1..90 en fan chart
 
 
 # ── 1. Cargar modelo más reciente ────────────────────────────────────────────
