@@ -82,12 +82,20 @@ def leer_y_preparar(banco: str, cols_feat: list[str]) -> tuple[pd.DataFrame, pd.
     print(f"\nTEST completo : {df_test['fecha_t'].min().date()} → "
           f"{df_test['fecha_t'].max().date()} ({df_test['fecha_t'].nunique()} fechas)")
 
-    # Primera fecha del TEST como origen: los ~65 días hábiles del período
-    # de test corresponden a h=1..65 con realizado disponible para comparar.
-    # h=66..90 queda como proyección pura sin datos aún.
-    fecha_origen = pd.Timestamp(corte_test)
+    # Origen: primera fecha del TEST donde h=90 tiene target realizado.
+    # Garantiza que h=1..90 estén todos disponibles para comparar.
+    fechas_con_h90 = (
+        df_test[(df_test["h"] == 90) & df_test["target"].notna()]["fecha_t"]
+    )
+    if fechas_con_h90.empty:
+        print("  Advertencia: ninguna fecha del TEST tiene h=90 realizado.")
+        print("  Usando primera fecha del TEST como fallback.")
+        fecha_origen = pd.Timestamp(corte_test)
+    else:
+        fecha_origen = pd.Timestamp(fechas_con_h90.min())
+
     print(f"Fecha de origen: {fecha_origen.date()}  "
-          f"(primera fecha del TEST — permite comparar h=1..{n_test} con realizado)")
+          f"(primera fecha del TEST con h=90 realizado)")
 
     # Filtrar las filas de la fecha de origen — puede estar en df_test o df completo
     # porque corte_test es exactamente la primera fecha del TEST
