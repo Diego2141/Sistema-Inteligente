@@ -122,16 +122,8 @@ def predecir(modelos: dict, df_fecha: pd.DataFrame, cols_feat: list[str]) -> pd.
 
 
 # ── 4. Graficar ───────────────────────────────────────────────────────────────
-def graficar(resultado: pd.DataFrame, fecha_origen: pd.Timestamp, banco: str):
-    hs       = resultado["h"].values
-    realizado = resultado["target"].values / 1e6
-    mask_real = ~np.isnan(realizado)
-
-    h_max_real = int(resultado.loc[mask_real, "h"].max()) if mask_real.any() else 0
-
-    fig, ax = plt.subplots(figsize=(16, 7))
-
-    # ── Bandas de predicción ─────────────────────────────────────────────
+def _dibujar_bandas(ax, hs, resultado):
+    """Dibuja bandas Q01-Q99, Q05-Q95 y mediana Q50. Reutilizable en ambos subplots."""
     ax.fill_between(hs,
                     resultado["q01"] / 1e6, resultado["q99"] / 1e6,
                     alpha=0.15, color="steelblue", label="Q01–Q99 (90% + cola)")
@@ -139,40 +131,58 @@ def graficar(resultado: pd.DataFrame, fecha_origen: pd.Timestamp, banco: str):
                     resultado["q05"] / 1e6, resultado["q95"] / 1e6,
                     alpha=0.30, color="steelblue", label="Q05–Q95 (90%)")
     ax.plot(hs, resultado["q50"] / 1e6,
-            color="steelblue", lw=2, label="Mediana predicha (Q50)", zorder=4)
-
-    # ── Ruta realizada (solo donde hay dato) ────────────────────────────
-    if mask_real.any():
-        ax.plot(hs[mask_real], realizado[mask_real],
-                color="black", lw=2, label="Realizado (D−R)", zorder=5)
-        ax.scatter(hs[mask_real], realizado[mask_real],
-                   color="black", s=18, zorder=6)
-
-    # ── Línea vertical: límite entre conocido y proyección pura ─────────
-    if h_max_real > 0:
-        ax.axvline(h_max_real, color="red", lw=1.2, ls="--", alpha=0.7,
-                   label=f"Último dato realizado (h={h_max_real})")
-        ax.annotate("← Realizado  |  Proyección →",
-                    xy=(h_max_real, ax.get_ylim()[1] if ax.get_ylim()[1] > 0 else 0.5),
-                    xytext=(h_max_real + 1, 0),
-                    fontsize=8, color="red", alpha=0.8)
-
+            color="steelblue", lw=2.5, label="Mediana predicha (Q50)", zorder=4)
     ax.axhline(0, color="black", lw=0.7, ls="--", alpha=0.35)
-
-    ax.set_xlabel("Horizonte h (días hábiles desde t)", fontsize=11)
-    ax.set_ylabel("Flujo neto D−R (MM USD)", fontsize=11)
-    ax.set_title(
-        f"Fan Chart — {banco}  |  Fecha de origen: {fecha_origen.strftime('%d %b %Y')}\n"
-        f"Proyección del modelo h = 1 … 90 días hábiles  |  "
-        f"Realizado disponible: h = 1 … {h_max_real}  |  "
-        f"Proyección pura: h = {h_max_real+1} … 90",
-        fontweight="bold", fontsize=12
-    )
-    ax.legend(loc="upper right", fontsize=9, framealpha=0.9)
     ax.grid(True, alpha=0.25)
     ax.xaxis.set_major_locator(mticker.MultipleLocator(10))
     ax.set_xlim(hs.min() - 1, hs.max() + 1)
-    plt.tight_layout()
+
+
+def graficar(resultado: pd.DataFrame, fecha_origen: pd.Timestamp, banco: str):
+    hs        = resultado["h"].values
+    realizado = resultado["target"].values / 1e6
+    mask_real = ~np.isnan(realizado)
+    h_max_real = int(resultado.loc[mask_real, "h"].max()) if mask_real.any() else 0
+
+    titulo_base = (
+        f"Fan Chart — {banco}  |  Fecha de origen: {fecha_origen.strftime('%d %b %Y')}  |  "
+        f"h = 1 … 90 días hábiles\n"
+        f"Realizado disponible: h = 1 … {h_max_real}  |  "
+        f"Proyección pura: h = {h_max_real + 1} … 90"
+    )
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 12), sharex=True,
+                                   gridspec_kw={"hspace": 0.08})
+
+    # ── Subplot superior: bandas + realizado ─────────────────────────────
+    _dibujar_bandas(ax1, hs, resultado)
+
+    if mask_real.any():
+        ax1.plot(hs[mask_real], realizado[mask_real],
+                 color="black", lw=2, label="Realizado (D−R)", zorder=5)
+        ax1.scatter(hs[mask_real], realizado[mask_real],
+                    color="black", s=18, zorder=6)
+
+    if h_max_real > 0:
+        ax1.axvline(h_max_real, color="red", lw=1.2, ls="--", alpha=0.7,
+                    label=f"Último dato realizado (h={h_max_real})")
+
+    ax1.set_ylabel("Flujo neto D−R (MM USD)", fontsize=11)
+    ax1.set_title(titulo_base, fontweight="bold", fontsize=11)
+    ax1.legend(loc="upper right", fontsize=9, framealpha=0.9)
+
+    # ── Subplot inferior: solo bandas del modelo ─────────────────────────
+    _dibujar_bandas(ax2, hs, resultado)
+
+    if h_max_real > 0:
+        ax2.axvline(h_max_real, color="red", lw=1.2, ls="--", alpha=0.7,
+                    label=f"Último dato realizado (h={h_max_real})")
+
+    ax2.set_xlabel("Horizonte h (días hábiles desde t)", fontsize=11)
+    ax2.set_ylabel("Flujo neto D−R (MM USD)", fontsize=11)
+    ax2.set_title("Solo proyección del modelo (sin realizado) — mediana visible",
+                  fontsize=10, style="italic")
+    ax2.legend(loc="upper right", fontsize=9, framealpha=0.9)
 
     nombre = f"fanchart_{banco}_{fecha_origen.strftime('%Y%m%d')}_h1_h90.png"
     plt.savefig(DIR_OUTPUT / nombre, dpi=150, bbox_inches="tight")
