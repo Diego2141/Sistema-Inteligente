@@ -167,7 +167,7 @@ def get_feature_cols(df: pd.DataFrame) -> list[str]:
 # PARTE 2 — Objetivo arctan y métrica de evaluación
 ###############################################################################
 
-def make_quantile_objective(tau: float, s: float):
+def make_quantile_objective(tau: float, s: float, std_y: float):
     """
     Gradiente y hessiana de la arctan pinball loss — ecuación (11):
 
@@ -178,11 +178,19 @@ def make_quantile_objective(tau: float, s: float):
 
     Hessiana (∂²L/∂ŷ², el (-1)² cancela):
       h = 2s³ / (π·(s²+u²)²)    — siempre positiva
+
+    Normalización: cuando u >> s (típico en la práctica), h ≈ 2s³/(π·u⁴) → ~1e-13,
+    lo que impide cualquier split porque Σh << min_child_weight.
+    Se multiplica (g, h) por scale = π·(s²+std_y²)²/(2s³) para que
+    h(u=std_y) = 1 por muestra, dando a min_child_weight semántica de conteo.
+    Leaf = -Σg/Σh es invariante a la escala, por lo que las predicciones no cambian.
     """
+    _scale = np.pi * (s**2 + std_y**2)**2 / (2.0 * s**3)
+
     def objective(y_pred: np.ndarray, dtrain: xgb.DMatrix):
         u    = dtrain.get_label() - y_pred
-        grad = -((tau - 0.5 + np.arctan(u / s) / np.pi) + u * s / (np.pi * (s**2 + u**2)))
-        hess = 2 * s**3 / (np.pi * (s**2 + u**2)**2)
+        grad = -((tau - 0.5 + np.arctan(u / s) / np.pi) + u * s / (np.pi * (s**2 + u**2))) * _scale
+        hess = 2 * s**3 / (np.pi * (s**2 + u**2)**2) * _scale
         return grad, hess
     return objective
 
@@ -241,7 +249,7 @@ def objective_xgb(
         params,
         dtrain_opt,
         num_boost_round=n_estimators,
-        obj=make_quantile_objective(tau, s),
+        obj=make_quantile_objective(tau, s, std_y),
         custom_metric=make_pinball_metric(tau),
         evals=[(dval_opt, "val")],
         callbacks=[xgb.callback.EarlyStopping(
@@ -296,10 +304,11 @@ def entrenar_quantiles(
     best_params: dict,
     quantiles: list[float],
     banco: str,
+    std_y: float,
 ) -> dict[float, xgb.Booster]:
     """
     Re-entrena un modelo XGBoost por cada cuantil con los mejores hiperparámetros.
-    s se extrae de best_params y se pasa al objetivo arctan de cada cuantil.
+    s y std_y se pasan al objetivo arctan para normalizar la hessiana.
     """
     s_best       = best_params["s"]
     n_estimators = best_params["n_estimators"]
@@ -316,7 +325,7 @@ def entrenar_quantiles(
             params_base,
             dtrain,
             num_boost_round=n_estimators,
-            obj=make_quantile_objective(tau, s_best),
+            obj=make_quantile_objective(tau, s_best, std_y),
             verbose_eval=False,
         )
         modelos[tau] = model
@@ -591,7 +600,7 @@ def entrenar_banco(banco: str) -> dict | None:
     # ── 5. Evaluación honesta en TEST ────────────────────────────
     t_eval = time.time()
     logger.info(f"  [{banco}] Entrenando sobre TRAIN para evaluación en TEST...")
-    modelos_eval = entrenar_quantiles(X_train, y_train, best_params, QUANTILES, banco)
+    modelos_eval = entrenar_quantiles(X_train, y_train, best_params, QUANTILES, banco, std_y)
     metricas_test, preds_test = evaluar_modelos(
         modelos_eval, X_test, y_test, banco, split_name="test"
     )
@@ -607,7 +616,7 @@ def entrenar_banco(banco: str) -> dict | None:
     logger.info(f"  [{banco}] Re-entrenamiento final (TRAIN+VAL+TEST)...")
     X_full = pd.concat([X_train, X_val, X_test], ignore_index=True)
     y_full = pd.concat([y_train, y_val, y_test], ignore_index=True)
-    modelos_prod = entrenar_quantiles(X_full, y_full, best_params, QUANTILES, banco)
+    modelos_prod = entrenar_quantiles(X_full, y_full, best_params, QUANTILES, banco, std_y)
     logger.info(f"  [{banco}] Re-entrenamiento completado en {(time.time()-t_prod):.1f} s")
 
     # ── 7. Guardar ───────────────────────────────────────────────
