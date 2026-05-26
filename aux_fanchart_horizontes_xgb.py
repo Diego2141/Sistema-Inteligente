@@ -29,7 +29,7 @@ import matplotlib.ticker as mticker
 # ── Rutas ─────────────────────────────────────────────────────────────────────
 BASE_SISTEMA = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente")
 RUTA_MATRIZ  = BASE_SISTEMA / "1. Data"   / "Clean"  / "matriz_features.parquet"
-DIR_MODELOS  = BASE_SISTEMA / "2. Output" / "modelos_xgb"
+DIR_MODELOS  = BASE_SISTEMA / "2. Output" / "modelos_xgb" / "eval"
 DIR_OUTPUT   = BASE_SISTEMA / "2. Output" / "aux_fanchart_horizontes_xgb"
 DIR_OUTPUT.mkdir(parents=True, exist_ok=True)
 

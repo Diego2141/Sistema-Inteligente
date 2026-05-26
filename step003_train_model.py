@@ -57,10 +57,12 @@ logger = logging.getLogger(__name__)
 ###############################################################################
 BASE_SISTEMA = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente")
 RUTA_MATRIZ  = BASE_SISTEMA / "1. Data" / "Clean" / "matriz_features.parquet"
-DIR_MODELOS  = BASE_SISTEMA / "2. Output" / "modelos"
-DIR_PLOTS    = BASE_SISTEMA / "2. Output" / "plots_entrenamiento"
+DIR_MODELOS      = BASE_SISTEMA / "2. Output" / "modelos"
+DIR_MODELOS_EVAL = DIR_MODELOS / "eval"   # modelos TRAIN-only → evaluación honesta OOS
+DIR_PLOTS        = BASE_SISTEMA / "2. Output" / "plots_entrenamiento"
 
 DIR_MODELOS.mkdir(parents=True, exist_ok=True)
+DIR_MODELOS_EVAL.mkdir(parents=True, exist_ok=True)
 DIR_PLOTS.mkdir(parents=True, exist_ok=True)
 
 # Quantiles a producir
@@ -606,6 +608,9 @@ def entrenar_banco(banco: str) -> dict | None:
     logger.info(f"  [{banco}] Evaluación TEST completada en {(time.time()-t_eval):.1f} s")
 
     metricas = {**metricas_test}
+
+    # Guardar modelos_eval (TRAIN only) → usados por aux scripts para evaluación honesta OOS
+    guardar_modelos(modelos_eval, metricas, best_params, cols_feat, banco, DIR_MODELOS_EVAL)
 
     # ── 6. Re-entrenamiento final sobre todos los datos ──────────
     t_prod = time.time()
