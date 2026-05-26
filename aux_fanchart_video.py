@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+import os
+os.environ["PATH"] += r";H:\DPINV\CARPETAS PERSONALES\DIEGO\2. Python\Paquetes python\ffmpeg-8.1.1-essentials_build\ffmpeg-8.1.1-essentials_build\bin"
 """
 aux_fanchart_video.py
 Genera un video MP4 (o GIF como fallback) animando el fan chart del modelo
