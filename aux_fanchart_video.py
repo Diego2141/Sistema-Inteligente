@@ -297,9 +297,10 @@ if __name__ == "__main__":
     df, medianas, cols_num, fechas_validas = cargar_datos(BANCO, cols_feat)
 
     frames = precomputar(df, medianas, cols_num, cols_feat, modelos, fechas_validas)
-    ylim1, ylim3 = rangos_globales(frames)
+    _, ylim3 = rangos_globales(frames)
+    ylim1 = (-3000, 3000)  # límite fijo flujo diario (MM USD)
 
-    print(f"\nRango Y flujo diario   : {ylim1[0]:.0f} → {ylim1[1]:.0f} MM USD")
+    print(f"\nRango Y flujo diario   : {ylim1[0]:.0f} → {ylim1[1]:.0f} MM USD (fijo)")
     print(f"Rango Y acumulado      : {ylim3[0]:.0f} → {ylim3[1]:.0f} MM USD")
     print(f"\nGenerando video ({len(frames)} frames, {FPS} fps)...")
 
