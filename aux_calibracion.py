@@ -36,6 +36,7 @@ DIR_OUTPUT.mkdir(parents=True, exist_ok=True)
 BANCO      = "SISTEMA"
 CORTE_VAL  = pd.Timestamp("2022-07-01")
 CORTE_TEST = pd.Timestamp("2023-01-03")
+CORTE_TEST_FIN = pd.Timestamp("2023-12-31")  # None = toda la muestra TEST
 ALPHA_CQR  = 0.10   # cobertura objetivo = 1 - ALPHA_CQR = 90%
 
 # Colores por modelo (consistentes con step003/step004 y fancharts)
@@ -113,12 +114,17 @@ def cargar_splits(banco: str, cols_feat: list[str]):
         return d
 
     df_val  = imputar(df[(df["fecha_t"] >= CORTE_VAL) & (df["fecha_t"] < CORTE_TEST)])
-    df_test = imputar(df[df["fecha_t"] >= CORTE_TEST])
+    mask_test = df["fecha_t"] >= CORTE_TEST
+    if CORTE_TEST_FIN is not None:
+        mask_test &= df["fecha_t"] <= CORTE_TEST_FIN
+    df_test = imputar(df[mask_test])
 
     print(f"  VAL : {CORTE_VAL.date()} → {df_val['fecha_t'].max().date()}"
           f"  ({df_val['fecha_t'].nunique()} fechas)")
-    print(f"  TEST: {CORTE_TEST.date()} → {df_test['fecha_t'].max().date()}"
-          f"  ({df_test['fecha_t'].nunique()} fechas)")
+    fin_test = CORTE_TEST_FIN.date() if CORTE_TEST_FIN else df_test['fecha_t'].max().date()
+    print(f"  TEST: {CORTE_TEST.date()} → {fin_test}"
+          f"  ({df_test['fecha_t'].nunique()} fechas)"
+          f"{'  [primer año]' if CORTE_TEST_FIN else ''}")
     return df_val, df_test
 
 
@@ -414,7 +420,9 @@ def comparar_modelos(banco: str, resultados: dict):
     hs    = lgb_r["hs"]
 
     fig, axes = plt.subplots(2, 2, figsize=(18, 14))
-    fig.suptitle(f"LightGBM vs XGBoost — {banco} (TEST)\nComparación de calibración",
+    periodo = (f"{CORTE_TEST.strftime('%b %Y')} – {CORTE_TEST_FIN.strftime('%b %Y')}"
+               if CORTE_TEST_FIN else f"{CORTE_TEST.strftime('%b %Y')} – hoy")
+    fig.suptitle(f"LightGBM vs XGBoost — {banco}  |  TEST: {periodo}\nComparación de calibración",
                  fontsize=14, fontweight="bold", y=1.01)
 
     # ── 1. Calibration Plot ──────────────────────────────────────────────────
