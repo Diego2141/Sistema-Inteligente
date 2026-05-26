@@ -48,7 +48,7 @@ CORTE_TEST = pd.Timestamp("2023-01-03")
 # ── Parámetros del video ──────────────────────────────────────────────────────
 PASO_FECHAS = 1    # 1 = todos los días hábiles válidos; 2 = cada 2, etc.
 FPS         = 2    # frames por segundo
-DPI         = 120  # resolución del video
+DPI         = 72   # resolución reducida para evitar out-of-memory
 
 COLOR = "darkorange"  # distingue XGBoost de LightGBM (steelblue)
 
@@ -182,7 +182,7 @@ def rangos_globales(frames):
 
 # ── 6. Animar ─────────────────────────────────────────────────────────────────
 def animar(frames, ylim1, ylim3, banco):
-    fig, (ax1, ax3) = plt.subplots(2, 1, figsize=(16, 12), sharex=True,
+    fig, (ax1, ax3) = plt.subplots(2, 1, figsize=(12, 8), sharex=True,
                                    gridspec_kw={"hspace": 0.08})
     hs = frames[0]["hs"]
 
