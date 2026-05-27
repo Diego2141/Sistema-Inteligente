@@ -139,6 +139,17 @@ MODELO_CV = "xgb"
 assert MODELO_CV in ("xgb", "lgbm", "xgb_qt"), \
     f"MODELO_CV debe ser 'xgb', 'lgbm' o 'xgb_qt', recibido: {MODELO_CV!r}"
 
+# ── Regularización Optuna: espacio de búsqueda de reg_alpha / reg_lambda ─────
+# False (original): reg_alpha ∈ [1e-4, 10] log-scale; reg_lambda ∈ [1e-4, 10] log-scale
+# True  (propuesto): reg_alpha = 0.0 fijo; reg_lambda ∈ [0.1, 5.0] lineal
+#
+# Motivación: reg_alpha tiene CV>200% en todos los modelos porque su efecto sobre
+# la pérdida cuantílica es ~0.04% — indistinguible del ruido de entrenamiento.
+# Fijarlo libera trials Optuna para parámetros con gradiente informativo.
+# reg_lambda se acota a [0.1, 5.0] porque el óptimo empírico de XGBoost es ≈1.0
+# y el rango log [1e-4, 10] concentra la mitad de los trials en zona inútil.
+FIX_REG_SEARCH = False
+
 # ── Rutas de salida — subcarpeta específica por modelo ───────────────────────
 # Estructura: step005_wfcv/<modelo>/  (CSVs y PNGs)
 #             step005_wfcv/<modelo>/modelos/  (archivos .json/.txt guardados)
@@ -446,8 +457,8 @@ def _objective_optuna(trial, X_tr, y_tr, X_va, y_va, std_y):
         "min_child_weight": trial.suggest_int("min_child_weight", 10, 200),
         "colsample_bytree": trial.suggest_float("colsample_bytree", 0.4, 1.0),
         "subsample"       : trial.suggest_float("subsample", 0.5, 1.0),
-        "reg_alpha"       : trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True),
-        "reg_lambda"      : trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
+        "reg_alpha"       : 0.0 if FIX_REG_SEARCH else trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True),
+        "reg_lambda"      : trial.suggest_float("reg_lambda", 0.1, 5.0) if FIX_REG_SEARCH else trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
         "tree_method"     : "hist",
         "seed"            : 42,
     }
@@ -536,8 +547,8 @@ def _objetivo_optuna_lgbm(trial, X_tr, y_tr, X_va, y_va):
         "min_child_samples": trial.suggest_int(  "min_child_samples", 10,  200),
         "subsample"        : trial.suggest_float("subsample",       0.5,   1.0),
         "colsample_bytree" : trial.suggest_float("colsample_bytree", 0.4,  1.0),
-        "reg_alpha"        : trial.suggest_float("reg_alpha",  1e-4,  10.0, log=True),
-        "reg_lambda"       : trial.suggest_float("reg_lambda", 1e-4,  10.0, log=True),
+        "reg_alpha"        : 0.0 if FIX_REG_SEARCH else trial.suggest_float("reg_alpha",  1e-4, 10.0, log=True),
+        "reg_lambda"       : trial.suggest_float("reg_lambda", 0.1, 5.0) if FIX_REG_SEARCH else trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
         "subsample_freq"   : 1,
     }
     n_est = trial.suggest_int("n_estimators", 100, 1000)
@@ -614,8 +625,8 @@ def _objetivo_optuna_xgb_qt_tau(trial, tau, X_tr, y_tr, X_va, y_va, std_y):
         "min_child_weight": trial.suggest_int(  "min_child_weight", 10,   200),
         "colsample_bytree": trial.suggest_float("colsample_bytree",  0.4,  1.0),
         "subsample"       : trial.suggest_float("subsample",         0.5,  1.0),
-        "reg_alpha"       : trial.suggest_float("reg_alpha",    1e-4, 10.0, log=True),
-        "reg_lambda"      : trial.suggest_float("reg_lambda",   1e-4, 10.0, log=True),
+        "reg_alpha"       : 0.0 if FIX_REG_SEARCH else trial.suggest_float("reg_alpha",  1e-4, 10.0, log=True),
+        "reg_lambda"      : trial.suggest_float("reg_lambda", 0.1, 5.0) if FIX_REG_SEARCH else trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
         "tree_method"     : "hist",
         "seed"            : 42,
     }
