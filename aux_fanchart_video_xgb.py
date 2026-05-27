@@ -263,8 +263,10 @@ def animar(frames, ylim1, ylim3, banco):
     anim = animation.FuncAnimation(fig, update, frames=len(frames),
                                    interval=1000 // FPS, blit=False)
 
-    nombre_mp4 = DIR_OUTPUT / f"fanchart_xgb_{banco}_animacion.mp4"
-    nombre_gif = DIR_OUTPUT / f"fanchart_xgb_{banco}_animacion.gif"
+    from datetime import datetime
+    _ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    nombre_mp4 = DIR_OUTPUT / f"fanchart_xgb_{banco}_animacion_{_ts}.mp4"
+    nombre_gif = DIR_OUTPUT / f"fanchart_xgb_{banco}_animacion_{_ts}.gif"
 
     ffmpeg_ok = shutil.which("ffmpeg") is not None
     if not ffmpeg_ok and len(frames) > 200:

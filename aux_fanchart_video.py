@@ -257,8 +257,10 @@ def animar(frames, ylim1, ylim3, banco):
                                    interval=1000 // FPS, blit=False)
 
     # ── Intentar guardar MP4, fallback a GIF ─────────────────────────────
-    nombre_mp4 = DIR_OUTPUT / f"fanchart_{banco}_animacion.mp4"
-    nombre_gif = DIR_OUTPUT / f"fanchart_{banco}_animacion.gif"
+    from datetime import datetime
+    _ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    nombre_mp4 = DIR_OUTPUT / f"fanchart_{banco}_animacion_{_ts}.mp4"
+    nombre_gif = DIR_OUTPUT / f"fanchart_{banco}_animacion_{_ts}.gif"
     # ── Verificar ffmpeg antes de intentar GIF con muchos frames ────────────
     import shutil
     ffmpeg_ok = shutil.which("ffmpeg") is not None
