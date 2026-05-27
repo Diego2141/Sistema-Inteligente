@@ -29,7 +29,7 @@ import matplotlib.ticker as mticker
 # ── Rutas ─────────────────────────────────────────────────────────────────────
 BASE_SISTEMA = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente")
 RUTA_MATRIZ  = BASE_SISTEMA / "1. Data"   / "Clean"  / "matriz_features.parquet"
-DIR_MODELOS  = BASE_SISTEMA / "2. Output" / "modelos_xgb" / "eval"
+DIR_MODELOS  = BASE_SISTEMA / "2. Output" / "modelos_xgb_qt" / "eval"
 DIR_OUTPUT   = BASE_SISTEMA / "2. Output" / "aux_fanchart_horizontes_xgb_qt"
 DIR_OUTPUT.mkdir(parents=True, exist_ok=True)
 
@@ -46,7 +46,7 @@ COLOR_BANDA = "tomato"  # distingue XGBoost QT de XGBoost estándar (darkorange)
 
 # ── 1. Cargar modelos XGBoost QT más recientes ────────────────────────────────
 def cargar_modelos(banco: str, dir_modelos: Path) -> tuple[dict, list[str]]:
-    metas = sorted(dir_modelos.glob(f"metadata_xgb_{banco}_*.json"), reverse=True)
+    metas = sorted(dir_modelos.glob(f"metadata_xgb_qt_{banco}_*.json"), reverse=True)
     if not metas:
         raise FileNotFoundError(
             f"No se encontró metadata XGBoost para banco={banco} en {dir_modelos}"
@@ -58,7 +58,7 @@ def cargar_modelos(banco: str, dir_modelos: Path) -> tuple[dict, list[str]]:
 
     modelos = {}
     for tau in quantiles:
-        ruta = dir_modelos / f"xgb_{banco}_q{int(tau*100):02d}_{fecha}.json"
+        ruta = dir_modelos / f"xgb_qt_{banco}_q{int(tau*100):02d}_{fecha}.json"
         if not ruta.exists():
             raise FileNotFoundError(f"Modelo no encontrado: {ruta}")
         booster = xgb.Booster()

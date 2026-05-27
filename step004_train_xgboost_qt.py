@@ -60,9 +60,9 @@ logger = logging.getLogger(__name__)
 ###############################################################################
 BASE_SISTEMA = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente")
 RUTA_MATRIZ  = BASE_SISTEMA / "1. Data" / "Clean" / "matriz_features.parquet"
-DIR_MODELOS      = BASE_SISTEMA / "2. Output" / "modelos_xgb"
+DIR_MODELOS      = BASE_SISTEMA / "2. Output" / "modelos_xgb_qt"
 DIR_MODELOS_EVAL = DIR_MODELOS / "eval"   # modelos TRAIN-only → evaluación honesta OOS
-DIR_PLOTS        = BASE_SISTEMA / "2. Output" / "plots_entrenamiento_xgb"
+DIR_PLOTS        = BASE_SISTEMA / "2. Output" / "plots_entrenamiento_xgb_qt"
 
 DIR_MODELOS.mkdir(parents=True, exist_ok=True)
 DIR_MODELOS_EVAL.mkdir(parents=True, exist_ok=True)
@@ -388,7 +388,7 @@ def guardar_modelos(
     fecha_hoy = pd.Timestamp.today().strftime("%Y%m%d")
 
     for tau, model in modelos.items():
-        ruta_model = dir_modelos / f"xgb_{banco}_q{int(tau*100):02d}_{fecha_hoy}.json"
+        ruta_model = dir_modelos / f"xgb_qt_{banco}_q{int(tau*100):02d}_{fecha_hoy}.json"
         model.save_model(str(ruta_model))
 
     metadata = {
@@ -404,7 +404,7 @@ def guardar_modelos(
         },
         "metricas"            : metricas,
     }
-    ruta_meta = dir_modelos / f"metadata_xgb_{banco}_{fecha_hoy}.json"
+    ruta_meta = dir_modelos / f"metadata_xgb_qt_{banco}_{fecha_hoy}.json"
     with open(ruta_meta, "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2, ensure_ascii=False)
 
