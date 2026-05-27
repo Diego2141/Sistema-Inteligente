@@ -36,7 +36,7 @@ DIR_OUTPUT.mkdir(parents=True, exist_ok=True)
 BANCO      = "SISTEMA"
 CORTE_VAL  = pd.Timestamp("2022-07-01")
 CORTE_TEST = pd.Timestamp("2023-01-03")
-CORTE_TEST_FIN = pd.Timestamp("2023-12-31")  # None = toda la muestra TEST
+CORTE_TEST_FIN = None  # None = toda la muestra TEST | pd.Timestamp("2023-12-31") = primer año
 ALPHA_CQR  = 0.10   # cobertura objetivo = 1 - ALPHA_CQR = 90%
 
 # Colores por modelo (consistentes con step003/step004 y fancharts)
