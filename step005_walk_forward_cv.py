@@ -106,12 +106,7 @@ logger = logging.getLogger(__name__)
 
 BASE_SISTEMA = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente")
 RUTA_MATRIZ  = BASE_SISTEMA / "1. Data" / "Clean" / "matriz_features.parquet"
-DIR_OUTPUT   = BASE_SISTEMA / "2. Output" / "step005_wfcv"
-DIR_MODELOS  = DIR_OUTPUT / "modelos"
-DIR_PLOTS    = DIR_OUTPUT / "plots"
-
-for d in (DIR_OUTPUT, DIR_MODELOS, DIR_PLOTS):
-    d.mkdir(parents=True, exist_ok=True)
+DIR_OUTPUT   = BASE_SISTEMA / "2. Output" / "step005_wfcv"   # raíz compartida
 
 # ── Ventana rodante ───────────────────────────────────────────────────────────
 VENTANA_TRAIN_AÑOS  = 5      # años de TRAIN por fold  (probar: 5 ó 7)
@@ -143,6 +138,17 @@ MODELO_CV = "xgb"
 #   "xgb_qt" → XGBoost arctan pinball,   Optuna per-cuantil       (estilo step004_qt)
 assert MODELO_CV in ("xgb", "lgbm", "xgb_qt"), \
     f"MODELO_CV debe ser 'xgb', 'lgbm' o 'xgb_qt', recibido: {MODELO_CV!r}"
+
+# ── Rutas de salida — subcarpeta específica por modelo ───────────────────────
+# Estructura: step005_wfcv/<modelo>/  (CSVs y PNGs)
+#             step005_wfcv/<modelo>/modelos/  (archivos .json/.txt guardados)
+#             step005_wfcv/<modelo>/plots/    (gráficos PNG)
+DIR_MODELO_OUTPUT = DIR_OUTPUT / MODELO_CV
+DIR_MODELOS       = DIR_MODELO_OUTPUT / "modelos"
+DIR_PLOTS         = DIR_MODELO_OUTPUT / "plots"
+
+for _d in (DIR_OUTPUT, DIR_MODELO_OUTPUT, DIR_MODELOS, DIR_PLOTS):
+    _d.mkdir(parents=True, exist_ok=True)
 
 
 ###############################################################################
@@ -306,8 +312,12 @@ def reemplazar_garch_fold(df_fold: pd.DataFrame, train_end: pd.Timestamp) -> pd.
 
     # 2. garch_vol_tc — volatilidad condicional de retornos log del TC
     if "TC_PEN_USD" in raw.columns:
-        tc            = raw["TC_PEN_USD"].replace(0, np.nan).ffill()
-        retornos_tc   = np.log(tc / tc.shift(1))
+        tc = raw["TC_PEN_USD"].replace(0, np.nan).ffill()
+        # Rellenar el gap del embargo con la última observación de TRAIN para
+        # que shift(1) no genere un retorno de 90 días en el primer día de VAL.
+        tc_reidx    = tc.reindex(pd.bdate_range(tc.index.min(), tc.index.max()))
+        tc_reidx    = tc_reidx.ffill()
+        retornos_tc = np.log(tc_reidx / tc_reidx.shift(1)).reindex(tc.index)
         sigma_tc      = _garch_vol_fold(retornos_tc, train_end)
         df_fold["garch_vol_tc"] = df_fold["fecha_t"].map(sigma_tc)
         logger.debug(f"    garch_vol_tc re-estimado hasta {train_end.date()}")
@@ -565,24 +575,23 @@ def optimizar_hiperparametros_lgbm(X_tr, y_tr, X_va, y_va, n_trials, fold_num):
 def entrenar_quantiles_lgbm(X_tr, y_tr, best_params, quantiles):
     if not _LGBM_OK:
         raise ImportError("lightgbm no está instalado")
-    n_est = best_params.pop("n_estimators", 300)
+    n_est  = int(best_params.get("n_estimators", 300))
+    hp     = {k: v for k, v in best_params.items() if k != "n_estimators"}
     modelos = {}
     for tau in quantiles:
         params = {
-            "objective"        : "quantile",
-            "alpha"            : tau,
-            "verbosity"        : -1,
-            "seed"             : 42,
-            **{k: v for k, v in best_params.items() if k != "n_estimators"},
-            "subsample_freq"   : 1,
+            "objective"     : "quantile",
+            "alpha"         : tau,
+            "verbosity"     : -1,
+            "seed"          : 42,
+            "subsample_freq": 1,
+            **hp,
         }
         dtrain = lgb.Dataset(X_tr.values, label=y_tr.values)
-        callbacks_tr = [lgb.log_evaluation(-1)]
         modelos[tau] = lgb.train(
             params, dtrain, num_boost_round=n_est,
-            callbacks=callbacks_tr,
+            callbacks=[lgb.log_evaluation(-1)],
         )
-    best_params["n_estimators"] = n_est   # restaurar por si acaso
     return modelos
 
 
@@ -788,7 +797,6 @@ def preparar_fold_data(
 def calcular_metricas_fold(
     preds: dict[float, np.ndarray],
     y_true: np.ndarray,
-    h_arr: np.ndarray,
     fold: dict,
 ) -> dict:
     """
@@ -905,7 +913,7 @@ def graficar_metricas_wfcv(df_metricas: pd.DataFrame, banco: str):
         ax.set_xlabel("Fold", fontsize=9)
         ax.set_xticks(folds)
         ax.yaxis.set_major_formatter(mticker.FuncFormatter(
-            lambda x, _: f"{x:,.0f}" if col != "coverage_90" else f"{x:.1%}"
+            lambda x, _, _col=col: f"{x:,.0f}" if _col != "coverage_90" else f"{x:.1%}"
         ))
         ax.grid(True, alpha=0.25)
 
@@ -1162,7 +1170,7 @@ def evaluar_banco(banco: str):
         preds = predecir_fold(modelos, X_val)
 
         # 3e. Métricas
-        row_fold = calcular_metricas_fold(preds, y_val.values, h_val, fold)
+        row_fold = calcular_metricas_fold(preds, y_val.values, fold)
         row_fold["tiempo_min"]  = round((time.time() - t_fold) / 60, 2)
         row_fold["modelo_cv"]   = MODELO_CV
         # Hiperparámetros óptimos — columnas normalizadas para HP stability plot.
@@ -1219,8 +1227,9 @@ def evaluar_banco(banco: str):
 
     # ── 5. Guardar CSVs ───────────────────────────────────────────────────────
     fecha_hoy = pd.Timestamp.today().strftime("%Y%m%d")
-    ruta_metricas = DIR_OUTPUT / f"wfcv_metricas_{banco}_{MODELO_CV}_{fecha_hoy}.csv"
-    ruta_por_h    = DIR_OUTPUT / f"wfcv_metricas_por_h_{banco}_{MODELO_CV}_{fecha_hoy}.csv"
+    # Todos los CSVs y plots van a la subcarpeta del modelo
+    ruta_metricas = DIR_MODELO_OUTPUT / f"wfcv_metricas_{banco}_{fecha_hoy}.csv"
+    ruta_por_h    = DIR_MODELO_OUTPUT / f"wfcv_metricas_por_h_{banco}_{fecha_hoy}.csv"
     df_metricas.to_csv(ruta_metricas, index=False)
     if not df_por_h.empty:
         df_por_h.to_csv(ruta_por_h, index=False)
@@ -1231,13 +1240,13 @@ def evaluar_banco(banco: str):
                "min_child_weight", "subsample", "colsample_bytree",
                "reg_alpha", "reg_lambda"]
     cols_hp_ok = [c for c in cols_hp if c in df_metricas.columns]
-    ruta_hp = DIR_OUTPUT / f"wfcv_hiperparametros_{banco}_{MODELO_CV}_{fecha_hoy}.csv"
+    ruta_hp = DIR_MODELO_OUTPUT / f"wfcv_hiperparametros_{banco}_{fecha_hoy}.csv"
     df_metricas[cols_hp_ok].to_csv(ruta_hp, index=False)
 
-    logger.info(f"  [{banco}] Archivos guardados:")
-    logger.info(f"    {ruta_metricas}")
-    logger.info(f"    {ruta_por_h}")
-    logger.info(f"    {ruta_hp}")
+    logger.info(f"  [{banco}] Archivos guardados en: {DIR_MODELO_OUTPUT}")
+    logger.info(f"    {ruta_metricas.name}")
+    logger.info(f"    {ruta_por_h.name}")
+    logger.info(f"    {ruta_hp.name}")
 
     # ── 6. Gráficos ───────────────────────────────────────────────────────────
     graficar_metricas_wfcv(df_metricas, f"{banco}_{MODELO_CV}")
@@ -1287,7 +1296,7 @@ def evaluar_banco(banco: str):
         ruta_meta = DIR_MODELOS / f"metadata_{MODELO_CV}_wfcv_{banco}_{fecha_hoy}.json"
         with open(ruta_meta, "w", encoding="utf-8") as fh:
             json.dump(metadata, fh, indent=2, ensure_ascii=False)
-        logger.info(f"    Modelo final guardado en {DIR_MODELOS}")
+        logger.info(f"    Modelo final guardado en: {DIR_MODELOS}")
 
     # ── 8. Resumen en consola ─────────────────────────────────────────────────
     t_total = time.time() - t_inicio
@@ -1354,7 +1363,7 @@ def main():
                         f"pinball_Q50_avg={avg_pb:,.0f} | coverage_90_avg={avg_cov:.1%}")
 
     logger.info(f"\n✓ Total: {(time.time()-t0)/60:.1f} min")
-    logger.info(f"  Resultados en: {DIR_OUTPUT}")
+    logger.info(f"  Resultados en: {DIR_MODELO_OUTPUT}")
 
 
 if __name__ == "__main__":
