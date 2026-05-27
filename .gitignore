@@ -6,11 +6,36 @@
 # Excepciones: archivos de referencia no confidenciales
 !1. Data/Raw/series_bcrp.xlsx
 
-# Outputs generados
+# Outputs generados — datos limpios
 1. Data/Clean/matriz_features.xlsx
 1. Data/Clean/matriz_features.pkl
 *.parquet
 *.pkl
+
+# Outputs generados — carpeta 2. Output/
+# Se excluye todo excepto archivos de referencia commiteados explícitamente
+2. Output/**/*.png
+2. Output/**/*.gif
+2. Output/**/*.mp4
+2. Output/**/*.csv
+2. Output/**/*.json
+2. Output/**/Thumbs.db
+2. Output/modelos/
+2. Output/modelos_xgb/
+2. Output/modelos_xgb_qt/
+2. Output/plots_entrenamiento/
+2. Output/plots_entrenamiento_xgb/
+2. Output/plots_entrenamiento_xgb_qt/
+2. Output/step005_wfcv/
+2. Output/aux_fanchart_horizontes_xgb/
+2. Output/aux_fanchart_horizontes_xgb_qt/
+2. Output/aux_validacion_flujos/
+2. Output/aux_validar_matriz/
+2. Output/aux_visualizar_series/
+2. Output/calibracion_v1/
+2. Output/diagnostico_sistema/
+# Excepción: el Excel de referencia sí se trackea
+!2. Output/hiperparametros_optuna.xlsx
 
 # Python
 __pycache__/
