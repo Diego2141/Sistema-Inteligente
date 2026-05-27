@@ -82,6 +82,13 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 from scipy.optimize import minimize
 
+try:
+    import lightgbm as lgb
+    _LGBM_OK = True
+except ImportError:
+    lgb = None
+    _LGBM_OK = False
+
 warnings.filterwarnings("ignore", category=UserWarning)
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
@@ -127,6 +134,15 @@ CORTE_TEST = pd.Timestamp("2023-01-03")
 BANCOS_A_EVALUAR  = ["SISTEMA"]
 GUARDAR_MODELO_FINAL = True    # True → guarda modelo del último fold TRAIN
 COLS_EXCLUIR      = {"fecha_t", "banco", "target"}
+
+# ── Selector de modelo ────────────────────────────────────────────────────────
+MODELO_CV = "xgb"
+# Opciones:
+#   "xgb"    → XGBoost arctan pinball, Optuna τ=0.50 compartido (estilo step004)
+#   "lgbm"   → LightGBM cuantil nativo,  Optuna τ=0.50 compartido (estilo step003)
+#   "xgb_qt" → XGBoost arctan pinball,   Optuna per-cuantil       (estilo step004_qt)
+assert MODELO_CV in ("xgb", "lgbm", "xgb_qt"), \
+    f"MODELO_CV debe ser 'xgb', 'lgbm' o 'xgb_qt', recibido: {MODELO_CV!r}"
 
 
 ###############################################################################
@@ -486,6 +502,204 @@ def predecir_y_corregir(modelos, X):
     taus   = sorted(preds_raw)
     matrix = np.sort(np.column_stack([preds_raw[t] for t in taus]), axis=1)
     return {t: matrix[:, i] for i, t in enumerate(taus)}
+
+
+###############################################################################
+# PARTE 4b — LightGBM (estilo step003) y XGBoost QT (estilo step004_qt)
+###############################################################################
+
+# ── LightGBM ──────────────────────────────────────────────────────────────────
+
+def _objetivo_optuna_lgbm(trial, X_tr, y_tr, X_va, y_va):
+    """Optuna para LightGBM cuantil nativo, optimiza τ=0.50 en VAL."""
+    if not _LGBM_OK:
+        raise ImportError("lightgbm no está instalado (pip install lightgbm)")
+    tau = 0.50
+    params = {
+        "objective"        : "quantile",
+        "alpha"            : tau,
+        "verbosity"        : -1,
+        "seed"             : 42,
+        "learning_rate"    : trial.suggest_float("learning_rate",  0.01,  0.3,  log=True),
+        "num_leaves"       : trial.suggest_int(  "num_leaves",      15,   255),
+        "max_depth"        : trial.suggest_int(  "max_depth",        3,    10),
+        "min_child_samples": trial.suggest_int(  "min_child_samples", 10,  200),
+        "subsample"        : trial.suggest_float("subsample",       0.5,   1.0),
+        "colsample_bytree" : trial.suggest_float("colsample_bytree", 0.4,  1.0),
+        "reg_alpha"        : trial.suggest_float("reg_alpha",  1e-4,  10.0, log=True),
+        "reg_lambda"       : trial.suggest_float("reg_lambda", 1e-4,  10.0, log=True),
+        "subsample_freq"   : 1,
+    }
+    n_est = trial.suggest_int("n_estimators", 100, 1000)
+    dtrain = lgb.Dataset(X_tr.values, label=y_tr.values)
+    dval   = lgb.Dataset(X_va.values, label=y_va.values, reference=dtrain)
+    callbacks = [lgb.log_evaluation(-1)]
+    try:
+        callbacks.append(lgb.early_stopping(50, verbose=False))
+    except Exception:
+        pass
+    model = lgb.train(
+        params, dtrain, num_boost_round=n_est,
+        valid_sets=[dval], valid_names=["val"],
+        callbacks=callbacks,
+    )
+    return pinball_loss(y_va.values, model.predict(X_va.values), tau)
+
+
+def optimizar_hiperparametros_lgbm(X_tr, y_tr, X_va, y_va, n_trials, fold_num):
+    logger.info(f"    Optuna[LGBM] fold {fold_num} ({n_trials} trials, τ=0.50)...")
+    study = optuna.create_study(
+        direction="minimize",
+        sampler=optuna.samplers.TPESampler(seed=42 + fold_num),
+    )
+    study.optimize(
+        lambda t: _objetivo_optuna_lgbm(t, X_tr, y_tr, X_va, y_va),
+        n_trials=n_trials, show_progress_bar=False,
+    )
+    bp = study.best_params
+    logger.info(f"    Fold {fold_num} [LGBM] best pinball(Q50)={study.best_value:.4f} "
+                f"n_est={bp['n_estimators']} lr={bp['learning_rate']:.4f}")
+    return bp
+
+
+def entrenar_quantiles_lgbm(X_tr, y_tr, best_params, quantiles):
+    if not _LGBM_OK:
+        raise ImportError("lightgbm no está instalado")
+    n_est = best_params.pop("n_estimators", 300)
+    modelos = {}
+    for tau in quantiles:
+        params = {
+            "objective"        : "quantile",
+            "alpha"            : tau,
+            "verbosity"        : -1,
+            "seed"             : 42,
+            **{k: v for k, v in best_params.items() if k != "n_estimators"},
+            "subsample_freq"   : 1,
+        }
+        dtrain = lgb.Dataset(X_tr.values, label=y_tr.values)
+        callbacks_tr = [lgb.log_evaluation(-1)]
+        modelos[tau] = lgb.train(
+            params, dtrain, num_boost_round=n_est,
+            callbacks=callbacks_tr,
+        )
+    best_params["n_estimators"] = n_est   # restaurar por si acaso
+    return modelos
+
+
+def predecir_lgbm(modelos, X):
+    """Predice y corrige cruces de cuantiles para LightGBM."""
+    preds_raw = {tau: m.predict(X.values) for tau, m in modelos.items()}
+    taus   = sorted(preds_raw)
+    matrix = np.sort(np.column_stack([preds_raw[t] for t in taus]), axis=1)
+    return {t: matrix[:, i] for i, t in enumerate(taus)}
+
+
+# ── XGBoost QT (per-quantile Optuna) ─────────────────────────────────────────
+
+def _objetivo_optuna_xgb_qt_tau(trial, tau, X_tr, y_tr, X_va, y_va, std_y):
+    """Optuna para un cuantil τ específico (xgb_qt mode)."""
+    s = trial.suggest_float("s", std_y * S_MIN_FACTOR, std_y * S_MAX_FACTOR, log=True)
+    params = {
+        "learning_rate"   : trial.suggest_float("learning_rate",   0.01,  0.3,  log=True),
+        "max_depth"       : trial.suggest_int(  "max_depth",         3,    10),
+        "min_child_weight": trial.suggest_int(  "min_child_weight", 10,   200),
+        "colsample_bytree": trial.suggest_float("colsample_bytree",  0.4,  1.0),
+        "subsample"       : trial.suggest_float("subsample",         0.5,  1.0),
+        "reg_alpha"       : trial.suggest_float("reg_alpha",    1e-4, 10.0, log=True),
+        "reg_lambda"      : trial.suggest_float("reg_lambda",   1e-4, 10.0, log=True),
+        "tree_method"     : "hist",
+        "seed"            : 42,
+    }
+    n_est  = trial.suggest_int("n_estimators", 100, 1000)
+    dtrain = xgb.DMatrix(X_tr, label=y_tr)
+    dval   = xgb.DMatrix(X_va, label=y_va)
+    model  = xgb.train(
+        params, dtrain, num_boost_round=n_est,
+        obj=make_quantile_objective(tau, s, std_y),
+        custom_metric=make_pinball_metric(tau),
+        evals=[(dval, "val")],
+        callbacks=[xgb.callback.EarlyStopping(rounds=50, metric_name="pinball",
+                                               save_best=False, maximize=False)],
+        verbose_eval=False,
+    )
+    return pinball_loss(y_va.values, model.predict(dval), tau)
+
+
+def _entrenar_fold_xgb_qt(X_tr, y_tr, X_va, y_va, std_y, n_trials, fold_num):
+    """
+    Per-quantile Optuna (estilo step004_qt):
+    cada τ tiene su propio estudio con sus propios hiperparámetros y s.
+    Retorna: modelos dict, y best_params de τ=0.50 para HP tracking.
+    """
+    best_by_tau = {}
+    modelos     = {}
+    for tau in QUANTILES:
+        seed_tau = 42 + fold_num + int(tau * 100)
+        study = optuna.create_study(
+            direction="minimize",
+            sampler=optuna.samplers.TPESampler(seed=seed_tau),
+        )
+        study.optimize(
+            lambda t, _tau=tau: _objetivo_optuna_xgb_qt_tau(
+                t, _tau, X_tr, y_tr, X_va, y_va, std_y),
+            n_trials=n_trials, show_progress_bar=False,
+        )
+        bp = study.best_params
+        best_by_tau[tau] = bp
+        logger.info(f"    [xgb_qt] τ={tau} fold {fold_num}: "
+                    f"pinball={study.best_value:.4f} s={bp['s']:.3f}")
+        # Entrenar el modelo final para este τ
+        s      = bp["s"]
+        n_est  = bp["n_estimators"]
+        params = {k: v for k, v in bp.items() if k not in ("s", "n_estimators")}
+        params.update({"tree_method": "hist", "seed": 42})
+        dtrain = xgb.DMatrix(X_tr, label=y_tr)
+        modelos[tau] = xgb.train(
+            params, dtrain, num_boost_round=n_est,
+            obj=make_quantile_objective(tau, s, std_y),
+            verbose_eval=False,
+        )
+    # Devolver Q50 params para HP tracking (más informativo que cualquier otro τ)
+    best_q50 = best_by_tau.get(0.50, list(best_by_tau.values())[0])
+    return modelos, best_q50
+
+
+# ── Dispatchers ───────────────────────────────────────────────────────────────
+
+def entrenar_fold(X_tr, y_tr, X_va, y_va, std_y, n_trials, fold_num):
+    """
+    Entrena un fold completo (Optuna + todos los cuantiles) según MODELO_CV.
+    Retorna: (modelos: dict[float, booster], best_params: dict)
+    best_params es siempre el diccionario del estudio τ=0.50 para HP tracking.
+    """
+    if MODELO_CV == "xgb":
+        best_params = optimizar_hiperparametros(
+            X_tr, y_tr, X_va, y_va, std_y, n_trials, fold_num)
+        modelos = entrenar_quantiles(X_tr, y_tr, best_params, QUANTILES, std_y)
+        return modelos, best_params
+
+    elif MODELO_CV == "lgbm":
+        if not _LGBM_OK:
+            raise ImportError("MODELO_CV='lgbm' requiere lightgbm instalado")
+        best_params = optimizar_hiperparametros_lgbm(
+            X_tr, y_tr, X_va, y_va, n_trials, fold_num)
+        modelos = entrenar_quantiles_lgbm(X_tr, y_tr, best_params.copy(), QUANTILES)
+        return modelos, best_params
+
+    elif MODELO_CV == "xgb_qt":
+        return _entrenar_fold_xgb_qt(
+            X_tr, y_tr, X_va, y_va, std_y, n_trials, fold_num)
+
+    else:
+        raise ValueError(f"MODELO_CV desconocido: {MODELO_CV!r}")
+
+
+def predecir_fold(modelos, X):
+    """Predice según MODELO_CV y corrige cruces de cuantiles."""
+    if MODELO_CV == "lgbm":
+        return predecir_lgbm(modelos, X)
+    else:
+        return predecir_y_corregir(modelos, X)
 
 
 ###############################################################################
@@ -940,31 +1154,40 @@ def evaluar_banco(banco: str):
         logger.info(f"    Medianas imputación (medida #3): calculadas sobre "
                     f"{fold['n_train_fechas']} fechas TRAIN")
 
-        # 3b. Optuna tuning sobre TRAIN → VAL
-        best_params = optimizar_hiperparametros(
+        # 3b-3d. Entrenar y predecir — dispatcher según MODELO_CV
+        modelos, best_params = entrenar_fold(
             X_train, y_train, X_val, y_val, std_y,
             N_TRIALS_OPTUNA, fold["fold"]
         )
-
-        # 3c. Entrenar todos los cuantiles con best_params
-        modelos = entrenar_quantiles(X_train, y_train, best_params, QUANTILES, std_y)
-
-        # 3d. Predecir en VAL
-        preds = predecir_y_corregir(modelos, X_val)
+        preds = predecir_fold(modelos, X_val)
 
         # 3e. Métricas
         row_fold = calcular_metricas_fold(preds, y_val.values, h_val, fold)
-        row_fold["tiempo_min"]       = round((time.time() - t_fold) / 60, 2)
-        # Hiperparámetros óptimos del fold — columnas para análisis de estabilidad
-        row_fold["s_optimo"]          = round(best_params.get("s", 0), 4)
-        row_fold["learning_rate"]     = round(best_params.get("learning_rate", 0), 4)
-        row_fold["max_depth"]         = int(best_params.get("max_depth", 0))
-        row_fold["n_estimators"]      = int(best_params.get("n_estimators", 0))
-        row_fold["min_child_weight"]  = int(best_params.get("min_child_weight", 0))
-        row_fold["subsample"]         = round(best_params.get("subsample", 0), 3)
-        row_fold["colsample_bytree"]  = round(best_params.get("colsample_bytree", 0), 3)
-        row_fold["reg_alpha"]         = round(best_params.get("reg_alpha", 0), 5)
-        row_fold["reg_lambda"]        = round(best_params.get("reg_lambda", 0), 5)
+        row_fold["tiempo_min"]  = round((time.time() - t_fold) / 60, 2)
+        row_fold["modelo_cv"]   = MODELO_CV
+        # Hiperparámetros óptimos — columnas normalizadas para HP stability plot.
+        # lgbm: num_leaves→max_depth col, min_child_samples→min_child_weight col
+        # xgb_qt: best_params = Q50 best (re: entrenar_fold dispatcher)
+        if MODELO_CV == "lgbm":
+            row_fold["s_optimo"]         = 0.0   # N/A (no arctan pinball)
+            row_fold["learning_rate"]    = round(best_params.get("learning_rate",     0), 4)
+            row_fold["max_depth"]        = int(  best_params.get("num_leaves",        0))
+            row_fold["n_estimators"]     = int(  best_params.get("n_estimators",      0))
+            row_fold["min_child_weight"] = int(  best_params.get("min_child_samples", 0))
+            row_fold["subsample"]        = round(best_params.get("subsample",         0), 3)
+            row_fold["colsample_bytree"] = round(best_params.get("colsample_bytree",  0), 3)
+            row_fold["reg_alpha"]        = round(best_params.get("reg_alpha",         0), 5)
+            row_fold["reg_lambda"]       = round(best_params.get("reg_lambda",        0), 5)
+        else:  # "xgb" y "xgb_qt" comparten la misma estructura de params
+            row_fold["s_optimo"]         = round(best_params.get("s",                0), 4)
+            row_fold["learning_rate"]    = round(best_params.get("learning_rate",    0), 4)
+            row_fold["max_depth"]        = int(  best_params.get("max_depth",        0))
+            row_fold["n_estimators"]     = int(  best_params.get("n_estimators",     0))
+            row_fold["min_child_weight"] = int(  best_params.get("min_child_weight", 0))
+            row_fold["subsample"]        = round(best_params.get("subsample",        0), 3)
+            row_fold["colsample_bytree"] = round(best_params.get("colsample_bytree", 0), 3)
+            row_fold["reg_alpha"]        = round(best_params.get("reg_alpha",        0), 5)
+            row_fold["reg_lambda"]       = round(best_params.get("reg_lambda",       0), 5)
         resultados_fold.append(row_fold)
 
         df_h = calcular_metricas_por_h(preds, y_val.values, h_val, fold["fold"])
@@ -996,19 +1219,19 @@ def evaluar_banco(banco: str):
 
     # ── 5. Guardar CSVs ───────────────────────────────────────────────────────
     fecha_hoy = pd.Timestamp.today().strftime("%Y%m%d")
-    ruta_metricas = DIR_OUTPUT / f"wfcv_metricas_{banco}_{fecha_hoy}.csv"
-    ruta_por_h    = DIR_OUTPUT / f"wfcv_metricas_por_h_{banco}_{fecha_hoy}.csv"
+    ruta_metricas = DIR_OUTPUT / f"wfcv_metricas_{banco}_{MODELO_CV}_{fecha_hoy}.csv"
+    ruta_por_h    = DIR_OUTPUT / f"wfcv_metricas_por_h_{banco}_{MODELO_CV}_{fecha_hoy}.csv"
     df_metricas.to_csv(ruta_metricas, index=False)
     if not df_por_h.empty:
         df_por_h.to_csv(ruta_por_h, index=False)
 
     # CSV de hiperparámetros separado para análisis de estabilidad
-    cols_hp = ["fold", "train_start", "train_end",
+    cols_hp = ["fold", "train_start", "train_end", "modelo_cv",
                "s_optimo", "learning_rate", "max_depth", "n_estimators",
                "min_child_weight", "subsample", "colsample_bytree",
                "reg_alpha", "reg_lambda"]
     cols_hp_ok = [c for c in cols_hp if c in df_metricas.columns]
-    ruta_hp = DIR_OUTPUT / f"wfcv_hiperparametros_{banco}_{fecha_hoy}.csv"
+    ruta_hp = DIR_OUTPUT / f"wfcv_hiperparametros_{banco}_{MODELO_CV}_{fecha_hoy}.csv"
     df_metricas[cols_hp_ok].to_csv(ruta_hp, index=False)
 
     logger.info(f"  [{banco}] Archivos guardados:")
@@ -1017,9 +1240,9 @@ def evaluar_banco(banco: str):
     logger.info(f"    {ruta_hp}")
 
     # ── 6. Gráficos ───────────────────────────────────────────────────────────
-    graficar_metricas_wfcv(df_metricas, banco)
-    graficar_cobertura_por_h(df_por_h, banco)
-    graficar_hiperparametros_wfcv(df_metricas, banco)
+    graficar_metricas_wfcv(df_metricas, f"{banco}_{MODELO_CV}")
+    graficar_cobertura_por_h(df_por_h, f"{banco}_{MODELO_CV}")
+    graficar_hiperparametros_wfcv(df_metricas, f"{banco}_{MODELO_CV}")
 
     # ── 7. Modelo final (opcional) ────────────────────────────────────────────
     if GUARDAR_MODELO_FINAL and modelos_ultimo is not None:
@@ -1029,12 +1252,16 @@ def evaluar_banco(banco: str):
             f"{ultimo_fold['train_start'].date()} → {ultimo_fold['train_end'].date()})"
         )
         for tau, model in modelos_ultimo.items():
-            ruta_m = DIR_MODELOS / f"xgb_wfcv_{banco}_q{int(tau*100):02d}_{fecha_hoy}.json"
-            model.save_model(str(ruta_m))
+            if MODELO_CV == "lgbm":
+                ruta_m = DIR_MODELOS / f"lgbm_wfcv_{banco}_q{int(tau*100):02d}_{fecha_hoy}.txt"
+                model.save_model(str(ruta_m))
+            else:
+                ruta_m = DIR_MODELOS / f"{MODELO_CV}_wfcv_{banco}_q{int(tau*100):02d}_{fecha_hoy}.json"
+                model.save_model(str(ruta_m))
 
         metadata = {
             "banco"                : banco,
-            "modelo"               : "xgboost_wfcv_arctan_pinball",
+            "modelo"               : f"{MODELO_CV}_wfcv",
             "fecha_entrenamiento"  : pd.Timestamp.today().strftime("%Y-%m-%d"),
             "config": {
                 "ventana_train_años" : VENTANA_TRAIN_AÑOS,
@@ -1057,7 +1284,7 @@ def evaluar_banco(banco: str):
             "features"  : cols_feat,
             "best_params_ultimo_fold": params_ultimo,
         }
-        ruta_meta = DIR_MODELOS / f"metadata_xgb_wfcv_{banco}_{fecha_hoy}.json"
+        ruta_meta = DIR_MODELOS / f"metadata_{MODELO_CV}_wfcv_{banco}_{fecha_hoy}.json"
         with open(ruta_meta, "w", encoding="utf-8") as fh:
             json.dump(metadata, fh, indent=2, ensure_ascii=False)
         logger.info(f"    Modelo final guardado en {DIR_MODELOS}")
@@ -1091,8 +1318,11 @@ def evaluar_banco(banco: str):
 
 def main():
     logger.info("=" * 65)
-    logger.info("STEP005 — Walk-Forward CV con ventana rodante (XGBoost)")
+    logger.info(f"STEP005 — Walk-Forward CV con ventana rodante  [MODELO: {MODELO_CV.upper()}]")
     logger.info("=" * 65)
+    if MODELO_CV == "lgbm" and not _LGBM_OK:
+        logger.error("MODELO_CV='lgbm' pero lightgbm no está instalado.  pip install lightgbm")
+        return
     logger.info("Medidas anti-leakage activas:")
     logger.info(f"  #1 Embargo          : {EMBARGO_DIAS_HAB} días hábiles")
     logger.info(f"  #2 GARCH por fold   : garch_vol / garch_vol_tc / garch_vol_embi")
