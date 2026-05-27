@@ -739,6 +739,115 @@ def graficar_cobertura_por_h(df_por_h: pd.DataFrame, banco: str):
     logger.info(f"  Heatmap cobertura guardado: {nombre}")
 
 
+def graficar_hiperparametros_wfcv(df_metricas: pd.DataFrame, banco: str):
+    """
+    Evolución temporal de los hiperparámetros óptimos por fold.
+
+    Por qué es útil:
+      · s (smoothing): si crece en folds recientes → el régimen se volvió más
+        ruidoso y la arctan necesita más suavizado para producir hessianas
+        estables. Caída de s → más confianza en datos más nítidos.
+      · learning_rate: tasas altas suelen indicar un paisaje de pérdida más
+        suave (menor complejidad efectiva del fold).
+      · max_depth: árbol más profundo en ciertos períodos puede indicar
+        interacciones no lineales más fuertes (ej. combinaciones de régimen).
+      · n_estimators: si cae con el tiempo el modelo converge más rápido,
+        posiblemente porque los patrones son más fáciles de aprender.
+      · min_child_weight: controla cuántos datos mínimos necesita cada hoja;
+        valores altos → más regularización por tamaño de muestra.
+      · subsample / colsample_bytree: nivel de stochasticity preferido por
+        Optuna en cada época; inestabilidad aquí puede reflejar overfitting.
+      · reg_alpha / reg_lambda: regularización L1/L2; si suben en folds
+        recientes puede indicar mayor riesgo de sobreajuste (series más cortas
+        relativas al ruido).
+
+    Un hiperparámetro estable entre folds indica que el modelo aprende
+    estructuras consistentes. Saltos bruscos señalan cambios de régimen
+    que el modelo gestiona ajustando su complejidad interna.
+    """
+    if df_metricas.empty:
+        return
+
+    HP_CONFIG = [
+        ("s_optimo",         "s (smoothing arctan)",       "steelblue",   "log"),
+        ("learning_rate",    "learning rate",               "darkorange",  "log"),
+        ("max_depth",        "max depth",                   "seagreen",    "linear"),
+        ("n_estimators",     "n_estimators",                "crimson",     "linear"),
+        ("min_child_weight", "min child weight",            "purple",      "linear"),
+        ("subsample",        "subsample",                   "saddlebrown", "linear"),
+        ("colsample_bytree", "colsample bytree",            "teal",        "linear"),
+        ("reg_alpha",        "reg_alpha (L1)",              "goldenrod",   "log"),
+        ("reg_lambda",       "reg_lambda (L2)",             "slategrey",   "log"),
+    ]
+
+    # Solo graficar hiperparámetros presentes en el CSV
+    hp_presentes = [(col, lbl, clr, sc) for col, lbl, clr, sc in HP_CONFIG
+                    if col in df_metricas.columns]
+    if not hp_presentes:
+        return
+
+    n     = len(hp_presentes)
+    ncols = 3
+    nrows = int(np.ceil(n / ncols))
+    folds = df_metricas["fold"].values
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 5, nrows * 3.5),
+                             gridspec_kw={"hspace": 0.55, "wspace": 0.35})
+    axes_flat = axes.flatten() if n > 1 else [axes]
+
+    fig.suptitle(
+        f"Estabilidad de hiperparámetros — Walk-forward CV — {banco}\n"
+        f"TRAIN {VENTANA_TRAIN_AÑOS}yr / VAL {VENTANA_VAL_AÑOS}yr / "
+        f"paso {PASO_AÑOS}yr / embargo {EMBARGO_DIAS_HAB}dh  "
+        f"({len(folds)} folds)",
+        fontweight="bold", fontsize=11,
+    )
+
+    for ax, (col, label, color, scale) in zip(axes_flat, hp_presentes):
+        vals = df_metricas[col].values.astype(float)
+
+        ax.plot(folds, vals, "o-", color=color, lw=2, ms=7, zorder=4, label=label)
+
+        # Banda ±1 std alrededor de la media para referencia visual
+        mu, sigma = vals.mean(), vals.std()
+        ax.axhline(mu, color=color, lw=1.0, ls="--", alpha=0.5,
+                   label=f"media={mu:.4g}")
+        if sigma > 0:
+            ax.axhspan(mu - sigma, mu + sigma, alpha=0.08, color=color,
+                       label=f"±1σ ({sigma:.4g})")
+
+        # Tendencia lineal
+        if len(folds) >= 3:
+            z    = np.polyfit(folds, vals if scale == "linear"
+                              else np.log(np.maximum(vals, 1e-12)), 1)
+            xfit = np.linspace(folds[0], folds[-1], 50)
+            yfit = np.polyval(z, xfit)
+            if scale == "log":
+                yfit = np.exp(yfit)
+            ax.plot(xfit, yfit, "-", color="black", lw=1.0, alpha=0.4,
+                    label=f"tendencia")
+
+        if scale == "log":
+            ax.set_yscale("log")
+
+        # Coeficiente de variación como indicador de inestabilidad
+        cv = sigma / abs(mu) if abs(mu) > 1e-9 else 0.0
+        ax.set_title(f"{label}  (CV={cv:.1%})", fontsize=9, fontweight="bold")
+        ax.set_xlabel("Fold", fontsize=8)
+        ax.set_xticks(folds)
+        ax.legend(fontsize=7, framealpha=0.85, loc="best")
+        ax.grid(True, alpha=0.25)
+
+    # Ocultar paneles sobrantes
+    for ax in axes_flat[n:]:
+        ax.set_visible(False)
+
+    nombre = DIR_PLOTS / f"wfcv_hiperparametros_{banco}.png"
+    plt.savefig(nombre, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    logger.info(f"  Gráfico hiperparámetros guardado: {nombre}")
+
+
 ###############################################################################
 # PARTE 8 — Pipeline principal por banco
 ###############################################################################
@@ -845,9 +954,17 @@ def evaluar_banco(banco: str):
 
         # 3e. Métricas
         row_fold = calcular_metricas_fold(preds, y_val.values, h_val, fold)
-        row_fold["tiempo_min"] = round((time.time() - t_fold) / 60, 2)
-        row_fold["s_optimo"]   = round(best_params.get("s", 0), 2)
-        row_fold["n_est"]      = best_params.get("n_estimators", 0)
+        row_fold["tiempo_min"]       = round((time.time() - t_fold) / 60, 2)
+        # Hiperparámetros óptimos del fold — columnas para análisis de estabilidad
+        row_fold["s_optimo"]          = round(best_params.get("s", 0), 4)
+        row_fold["learning_rate"]     = round(best_params.get("learning_rate", 0), 4)
+        row_fold["max_depth"]         = int(best_params.get("max_depth", 0))
+        row_fold["n_estimators"]      = int(best_params.get("n_estimators", 0))
+        row_fold["min_child_weight"]  = int(best_params.get("min_child_weight", 0))
+        row_fold["subsample"]         = round(best_params.get("subsample", 0), 3)
+        row_fold["colsample_bytree"]  = round(best_params.get("colsample_bytree", 0), 3)
+        row_fold["reg_alpha"]         = round(best_params.get("reg_alpha", 0), 5)
+        row_fold["reg_lambda"]        = round(best_params.get("reg_lambda", 0), 5)
         resultados_fold.append(row_fold)
 
         df_h = calcular_metricas_por_h(preds, y_val.values, h_val, fold["fold"])
@@ -884,13 +1001,25 @@ def evaluar_banco(banco: str):
     df_metricas.to_csv(ruta_metricas, index=False)
     if not df_por_h.empty:
         df_por_h.to_csv(ruta_por_h, index=False)
-    logger.info(f"  [{banco}] Métricas guardadas:")
+
+    # CSV de hiperparámetros separado para análisis de estabilidad
+    cols_hp = ["fold", "train_start", "train_end",
+               "s_optimo", "learning_rate", "max_depth", "n_estimators",
+               "min_child_weight", "subsample", "colsample_bytree",
+               "reg_alpha", "reg_lambda"]
+    cols_hp_ok = [c for c in cols_hp if c in df_metricas.columns]
+    ruta_hp = DIR_OUTPUT / f"wfcv_hiperparametros_{banco}_{fecha_hoy}.csv"
+    df_metricas[cols_hp_ok].to_csv(ruta_hp, index=False)
+
+    logger.info(f"  [{banco}] Archivos guardados:")
     logger.info(f"    {ruta_metricas}")
     logger.info(f"    {ruta_por_h}")
+    logger.info(f"    {ruta_hp}")
 
     # ── 6. Gráficos ───────────────────────────────────────────────────────────
     graficar_metricas_wfcv(df_metricas, banco)
     graficar_cobertura_por_h(df_por_h, banco)
+    graficar_hiperparametros_wfcv(df_metricas, banco)
 
     # ── 7. Modelo final (opcional) ────────────────────────────────────────────
     if GUARDAR_MODELO_FINAL and modelos_ultimo is not None:
