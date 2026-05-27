@@ -283,7 +283,11 @@ def animar(frames, ylim1, ylim3, banco):
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
             tmp_path = tmp.name
         anim.save(tmp_path, writer=writer, dpi=DPI)
-        shutil.move(tmp_path, str(nombre_mp4))
+        # shutil.move falla en SMB al copiar metadatos de permisos.
+        # Copia binaria manual: solo datos, sin atributos.
+        with open(tmp_path, "rb") as src_f, open(str(nombre_mp4), "wb") as dst_f:
+            shutil.copyfileobj(src_f, dst_f)
+        os.unlink(tmp_path)
         print(f"\n✓ Video guardado: {nombre_mp4}")
         plt.close(fig)
         return nombre_mp4
