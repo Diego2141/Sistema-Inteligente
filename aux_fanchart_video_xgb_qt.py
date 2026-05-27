@@ -278,19 +278,25 @@ def animar(frames, ylim1, ylim3, banco):
     try:
         import tempfile
         writer = animation.FFMpegWriter(fps=FPS, bitrate=1800)
-        # ffmpeg no puede escribir directamente en shares SMB (\\servidor).
-        # Guardamos en un temporal local y luego movemos al destino final.
-        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
-            tmp_path = tmp.name
-        anim.save(tmp_path, writer=writer, dpi=DPI)
-        # shutil.move falla en SMB al copiar metadatos de permisos.
-        # Copia binaria manual: solo datos, sin atributos.
-        with open(tmp_path, "rb") as src_f, open(str(nombre_mp4), "wb") as dst_f:
-            shutil.copyfileobj(src_f, dst_f)
-        os.unlink(tmp_path)
-        print(f"\n✓ Video guardado: {nombre_mp4}")
-        plt.close(fig)
-        return nombre_mp4
+        # ffmpeg no puede escribir en shares SMB: guardar en local primero.
+        # nombre_mp4_local queda en %TEMP% y es el output garantizado.
+        nombre_mp4_local = Path(tempfile.gettempdir()) / nombre_mp4.name
+        anim.save(str(nombre_mp4_local), writer=writer, dpi=DPI)
+        print(f"\n✓ MP4 generado localmente: {nombre_mp4_local}")
+        # Intentar copiar a la red (puede fallar sin problema).
+        try:
+            with open(nombre_mp4_local, "rb") as src_f, \
+                 open(str(nombre_mp4), "wb") as dst_f:
+                shutil.copyfileobj(src_f, dst_f)
+            nombre_mp4_local.unlink(missing_ok=True)
+            print(f"  Copiado a red: {nombre_mp4}")
+            plt.close(fig)
+            return nombre_mp4
+        except Exception as e_red:
+            print(f"  No se pudo copiar a la red ({e_red}).")
+            print(f"  Mueve manualmente: {nombre_mp4_local} → {nombre_mp4.parent}")
+            plt.close(fig)
+            return nombre_mp4_local
     except Exception as e:
         print(f"  ffmpeg no disponible ({e}). Guardando como GIF...")
     try:
