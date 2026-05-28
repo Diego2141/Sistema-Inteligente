@@ -1221,8 +1221,13 @@ def graficar_fanchart_test_fold(
             ax.fill_between(h_s, p_s[0.05] / 1e6, p_s[0.95] / 1e6,
                             alpha=0.28, color="steelblue", label="Q05-Q95")
         if 0.50 in p_s:
-            ax.plot(h_s, p_s[0.50] / 1e6, color="steelblue", lw=1.8,
-                    zorder=3, label="Q50")
+            lw_q50 = 1.4 if "mean" in p_s else 1.8
+            ls_q50 = "--" if "mean" in p_s else "-"
+            ax.plot(h_s, p_s[0.50] / 1e6, color="steelblue", lw=lw_q50,
+                    ls=ls_q50, zorder=3, label="Q50")
+        if "mean" in p_s:
+            ax.plot(h_s, p_s["mean"] / 1e6, color="navy", lw=2.2,
+                    zorder=4, label="Media")
 
         # Realizados: línea punteada + scatter coloreado por cobertura
         q_lo   = p_s.get(0.05, np.full_like(y_s, -np.inf))
