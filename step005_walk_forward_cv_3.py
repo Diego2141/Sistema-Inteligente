@@ -113,6 +113,10 @@ GUARDAR_MODELO_FINAL      = True
 # True  → guarda modelos de TODOS los folds (permite fan chart histórico sin lookahead)
 # False → solo guarda el último fold (comportamiento anterior)
 GUARDAR_MODELOS_TODOS_FOLDS = True
+
+# True  → omite Optuna/entrenamiento, carga modelos del disco y solo regenera los plots
+# False → entrenamiento completo (comportamiento normal)
+SOLO_REGENERAR_PLOTS = False
 COLS_EXCLUIR              = {"fecha_t", "banco", "target"}
 
 # ── Límite de folds ───────────────────────────────────────────────────────────
@@ -1270,6 +1274,53 @@ def graficar_fanchart_test_fold(
 # PARTE 8 — Pipeline principal
 ###############################################################################
 
+def _cargar_metadata_disco(banco: str) -> dict:
+    """
+    Encuentra y carga el metadata JSON más reciente para el banco y MODELO_CV
+    en DIR_MODELOS. Lanza FileNotFoundError si no existe.
+    """
+    sfx = "lgbm_wfcv_v3" if MODELO_CV == "lgbm" else f"{MODELO_CV}_wfcv_v3"
+    candidatos = sorted(DIR_MODELOS.glob(f"metadata_{sfx}_{banco}_*.json"), reverse=True)
+    if not candidatos:
+        raise FileNotFoundError(
+            f"No se encontró metadata para banco={banco} modelo={MODELO_CV} en {DIR_MODELOS}"
+        )
+    meta = json.loads(candidatos[0].read_text(encoding="utf-8"))
+    logger.info(f"  [REPLOT] Metadata cargado: {candidatos[0].name}")
+    return meta
+
+
+def _cargar_modelos_fold_disco(fold_info: dict, banco: str) -> dict:
+    """
+    Carga desde disco los modelos de un fold específico.
+    Usa fecha_hoy guardada en fold_info (del manifest original).
+    """
+    sfx      = "lgbm_wfcv_v3" if MODELO_CV == "lgbm" else f"{MODELO_CV}_wfcv_v3"
+    ext      = ".txt" if MODELO_CV == "lgbm" else ".json"
+    fold_num = fold_info["fold"]
+    fecha    = fold_info["fecha_hoy"]
+
+    modelos = {}
+    for tau in QUANTILES:
+        ruta = DIR_MODELOS / f"{sfx}_{banco}_fold{fold_num:02d}_q{int(tau*100):02d}_{fecha}{ext}"
+        if not ruta.exists():
+            raise FileNotFoundError(f"Modelo fold {fold_num} no encontrado: {ruta}")
+        if MODELO_CV == "lgbm":
+            import lightgbm as lgb_load
+            modelos[tau] = lgb_load.Booster(model_file=str(ruta))
+        else:
+            b = xgb.Booster(); b.load_model(str(ruta)); modelos[tau] = b
+
+    # Mean model (opcional — solo existe si fue entrenado con la nueva versión)
+    ruta_mean = DIR_MODELOS / f"{sfx}_{banco}_fold{fold_num:02d}_mean_{fecha}{ext}"
+    if ruta_mean.exists():
+        b = xgb.Booster(); b.load_model(str(ruta_mean)); modelos["mean"] = b
+
+    has_mean = "mean" in modelos
+    logger.info(f"  [REPLOT] Fold {fold_num} cargado desde disco"
+                f"{'  (+ media)' if has_mean else ''}")
+    return modelos
+
 def evaluar_banco(banco: str):
     modo = "EXPANDING" if EXPANDING else "ROLLING"
     logger.info(f"\n{'='*65}")
@@ -1335,6 +1386,21 @@ def evaluar_banco(banco: str):
     folds_manifest    = []   # registro de todos los folds para fan chart histórico
     fecha_hoy         = pd.Timestamp.today().strftime("%Y%m%d")
 
+    # ── Modo regenerar plots: carga metadata del disco para obtener fecha_hoy ───
+    _meta_disco = None
+    if SOLO_REGENERAR_PLOTS:
+        try:
+            _meta_disco   = _cargar_metadata_disco(banco)
+            folds_manifest = _meta_disco.get("folds_manifest", [])
+            # Indexar por fold_num para acceso rápido
+            _fm_idx = {fi["fold"]: fi for fi in folds_manifest}
+            logger.info(f"  [REPLOT] {len(folds_manifest)} folds en manifest — "
+                        f"solo se regenerarán los fan charts")
+        except FileNotFoundError as _e_meta:
+            logger.error(f"  [REPLOT] {_e_meta}")
+            logger.error("  [REPLOT] Ejecuta primero con SOLO_REGENERAR_PLOTS=False")
+            return None
+
     for fold in folds:
         t_fold = time.time()
         logger.info(f"\n  ── Fold {fold['fold']}/{len(folds)} ──────────────────────")
@@ -1357,69 +1423,85 @@ def evaluar_banco(banco: str):
         logger.info(f"    X_train={len(X_train):,} | X_val={len(X_val):,} | "
                     f"X_test={len(X_test):,} | std_y={std_y:,.0f}")
 
-        modelos, best_params = entrenar_fold(
-            X_train, y_train, X_val, y_val, std_y,
-            N_TRIALS_OPTUNA, fold["fold"]
-        )
+        if SOLO_REGENERAR_PLOTS:
+            # ── Modo replot: carga modelos del disco, salta Optuna ───────────
+            fold_num  = fold["fold"]
+            fold_info = _fm_idx.get(fold_num)
+            if fold_info is None:
+                logger.warning(f"  [REPLOT] Fold {fold_num} no está en el manifest — omitiendo")
+                continue
+            try:
+                modelos = _cargar_modelos_fold_disco(fold_info, banco)
+            except FileNotFoundError as _e_load:
+                logger.warning(f"  [REPLOT] {_e_load} — omitiendo fold {fold_num}")
+                continue
+            best_params = {}
+        else:
+            # ── Modo normal: Optuna + entrenamiento ─────────────────────────
+            modelos, best_params = entrenar_fold(
+                X_train, y_train, X_val, y_val, std_y,
+                N_TRIALS_OPTUNA, fold["fold"]
+            )
 
-        # Importancia de features (promedio entre cuantiles)
-        try:
-            imp = _extraer_importancias(modelos, cols_feat)
-            importancias_folds.append({"fold": fold["fold"], "importancias": imp})
-        except Exception as _e_imp:
-            logger.warning(f"    Importancia fold {fold['fold']}: {_e_imp}")
+            # Importancia de features (promedio entre cuantiles)
+            try:
+                imp = _extraer_importancias(modelos, cols_feat)
+                importancias_folds.append({"fold": fold["fold"], "importancias": imp})
+            except Exception as _e_imp:
+                logger.warning(f"    Importancia fold {fold['fold']}: {_e_imp}")
 
         preds_test = predecir_fold(modelos, X_test)
         preds_val  = predecir_fold(modelos, X_val)
 
-        row_test = calcular_metricas_fold(preds_test, y_test.values, fold, "test")
-        row_val  = calcular_metricas_fold(preds_val,  y_val.values,  fold, "val")
-        row_test["tiempo_min"] = round((time.time() - t_fold) / 60, 2)
-        row_val["modelo_cv"]   = MODELO_CV
-        row_test["modelo_cv"]  = MODELO_CV
+        if not SOLO_REGENERAR_PLOTS:
+            row_test = calcular_metricas_fold(preds_test, y_test.values, fold, "test")
+            row_val  = calcular_metricas_fold(preds_val,  y_val.values,  fold, "val")
+            row_test["tiempo_min"] = round((time.time() - t_fold) / 60, 2)
+            row_val["modelo_cv"]   = MODELO_CV
+            row_test["modelo_cv"]  = MODELO_CV
 
-        def _hp(d, key, default=0):
-            return d.get(key, default)
+            def _hp(d, key, default=0):
+                return d.get(key, default)
 
-        for row in (row_test, row_val):
-            if MODELO_CV == "lgbm":
-                row.update({
-                    "s_optimo"        : 0.0,
-                    "learning_rate"   : round(_hp(best_params, "learning_rate"), 4),
-                    "max_depth"       : int(_hp(best_params, "num_leaves")),
-                    "n_estimators"    : int(_hp(best_params, "n_estimators")),
-                    "min_child_weight": int(_hp(best_params, "min_child_samples")),
-                    "subsample"       : round(_hp(best_params, "subsample"), 3),
-                    "colsample_bytree": round(_hp(best_params, "colsample_bytree"), 3),
-                    "reg_alpha"       : round(_hp(best_params, "reg_alpha"), 5),
-                    "reg_lambda"      : round(_hp(best_params, "reg_lambda"), 5),
-                })
-            else:
-                row.update({
-                    "s_optimo"        : round(_hp(best_params, "s"), 4),
-                    "learning_rate"   : round(_hp(best_params, "learning_rate"), 4),
-                    "max_depth"       : int(_hp(best_params, "max_depth")),
-                    "n_estimators"    : int(_hp(best_params, "n_estimators")),
-                    "min_child_weight": int(_hp(best_params, "min_child_weight")),
-                    "subsample"       : round(_hp(best_params, "subsample"), 3),
-                    "colsample_bytree": round(_hp(best_params, "colsample_bytree"), 3),
-                    "reg_alpha"       : round(_hp(best_params, "reg_alpha"), 5),
-                    "reg_lambda"      : round(_hp(best_params, "reg_lambda"), 5),
-                })
+            for row in (row_test, row_val):
+                if MODELO_CV == "lgbm":
+                    row.update({
+                        "s_optimo"        : 0.0,
+                        "learning_rate"   : round(_hp(best_params, "learning_rate"), 4),
+                        "max_depth"       : int(_hp(best_params, "num_leaves")),
+                        "n_estimators"    : int(_hp(best_params, "n_estimators")),
+                        "min_child_weight": int(_hp(best_params, "min_child_samples")),
+                        "subsample"       : round(_hp(best_params, "subsample"), 3),
+                        "colsample_bytree": round(_hp(best_params, "colsample_bytree"), 3),
+                        "reg_alpha"       : round(_hp(best_params, "reg_alpha"), 5),
+                        "reg_lambda"      : round(_hp(best_params, "reg_lambda"), 5),
+                    })
+                else:
+                    row.update({
+                        "s_optimo"        : round(_hp(best_params, "s"), 4),
+                        "learning_rate"   : round(_hp(best_params, "learning_rate"), 4),
+                        "max_depth"       : int(_hp(best_params, "max_depth")),
+                        "n_estimators"    : int(_hp(best_params, "n_estimators")),
+                        "min_child_weight": int(_hp(best_params, "min_child_weight")),
+                        "subsample"       : round(_hp(best_params, "subsample"), 3),
+                        "colsample_bytree": round(_hp(best_params, "colsample_bytree"), 3),
+                        "reg_alpha"       : round(_hp(best_params, "reg_alpha"), 5),
+                        "reg_lambda"      : round(_hp(best_params, "reg_lambda"), 5),
+                    })
 
-        resultados_test.append(row_test)
-        resultados_val.append(row_val)
-        por_h_test.append(calcular_metricas_por_h(preds_test, y_test.values, h_test, fold["fold"]))
-        por_h_val.append(calcular_metricas_por_h(preds_val,  y_val.values,  h_val,  fold["fold"]))
+            resultados_test.append(row_test)
+            resultados_val.append(row_val)
+            por_h_test.append(calcular_metricas_por_h(preds_test, y_test.values, h_test, fold["fold"]))
+            por_h_val.append(calcular_metricas_por_h(preds_val,  y_val.values,  h_val,  fold["fold"]))
 
-        cov_t = row_test.get("coverage_90", float("nan"))
-        cov_v = row_val.get("coverage_90",  float("nan"))
-        logger.info(
-            f"    TEST: coverage={cov_t:.1%}  pinball_Q50={row_test.get('pinball_q50','?'):,.0f}  "
-            f"winkler={row_test.get('winkler_90','?'):,.0f}  "
-            f"| VAL coverage={cov_v:.1%} (sesgo={cov_v-cov_t:+.1%})  "
-            f"({row_test['tiempo_min']} min)"
-        )
+            cov_t = row_test.get("coverage_90", float("nan"))
+            cov_v = row_val.get("coverage_90",  float("nan"))
+            logger.info(
+                f"    TEST: coverage={cov_t:.1%}  pinball_Q50={row_test.get('pinball_q50','?'):,.0f}  "
+                f"winkler={row_test.get('winkler_90','?'):,.0f}  "
+                f"| VAL coverage={cov_v:.1%} (sesgo={cov_v-cov_t:+.1%})  "
+                f"({row_test['tiempo_min']} min)"
+            )
 
         # Fan charts TEST (una figura por fold con N snapshots)
         graficar_fanchart_test_fold(
@@ -1429,41 +1511,46 @@ def evaluar_banco(banco: str):
         modelos_ultimo = modelos
         params_ultimo  = best_params
 
-        # ── Guardar modelo del fold + manifest ───────────────────────────────
-        sfx = "lgbm_wfcv_v3" if MODELO_CV == "lgbm" else f"{MODELO_CV}_wfcv_v3"
-        ext = ".txt" if MODELO_CV == "lgbm" else ".json"
-        fold_num = fold["fold"]
+        if not SOLO_REGENERAR_PLOTS:
+            # ── Guardar modelo del fold + manifest ───────────────────────────
+            sfx = "lgbm_wfcv_v3" if MODELO_CV == "lgbm" else f"{MODELO_CV}_wfcv_v3"
+            ext = ".txt" if MODELO_CV == "lgbm" else ".json"
+            fold_num = fold["fold"]
 
-        # GARCH params de este fold para reproducción histórica
-        garch_fold = {}
-        try:
-            garch_fold = _extraer_garch_params_fold(df, fold["train_end"])
-        except Exception as _eg:
-            logger.warning(f"  Fold {fold_num}: no se pudo extraer GARCH — {_eg}")
+            garch_fold = {}
+            try:
+                garch_fold = _extraer_garch_params_fold(df, fold["train_end"])
+            except Exception as _eg:
+                logger.warning(f"  Fold {fold_num}: no se pudo extraer GARCH — {_eg}")
 
-        if GUARDAR_MODELOS_TODOS_FOLDS:
-            for tau, model in modelos.items():
-                if tau == "mean":
-                    ruta_f = (DIR_MODELOS /
-                              f"{sfx}_{banco}_fold{fold_num:02d}_mean_{fecha_hoy}{ext}")
-                else:
-                    ruta_f = (DIR_MODELOS /
-                              f"{sfx}_{banco}_fold{fold_num:02d}_q{int(tau*100):02d}_{fecha_hoy}{ext}")
-                model.save_model(str(ruta_f))
-            logger.info(f"    Modelos fold {fold_num} guardados en {DIR_MODELOS.name}/")
+            if GUARDAR_MODELOS_TODOS_FOLDS:
+                for tau, model in modelos.items():
+                    if tau == "mean":
+                        ruta_f = (DIR_MODELOS /
+                                  f"{sfx}_{banco}_fold{fold_num:02d}_mean_{fecha_hoy}{ext}")
+                    else:
+                        ruta_f = (DIR_MODELOS /
+                                  f"{sfx}_{banco}_fold{fold_num:02d}_q{int(tau*100):02d}_{fecha_hoy}{ext}")
+                    model.save_model(str(ruta_f))
+                logger.info(f"    Modelos fold {fold_num} guardados en {DIR_MODELOS.name}/")
 
-        folds_manifest.append({
-            "fold"       : fold_num,
-            "train_start": str(fold["train_start"].date()),
-            "train_end"  : str(fold["train_end"].date()),
-            "test_start" : str(fold["test_start"].date()),
-            "test_end"   : str(fold["test_end"].date()),
-            "fecha_hoy"  : fecha_hoy,
-            "garch"      : garch_fold,
-        })
+            folds_manifest.append({
+                "fold"       : fold_num,
+                "train_start": str(fold["train_start"].date()),
+                "train_end"  : str(fold["train_end"].date()),
+                "test_start" : str(fold["test_start"].date()),
+                "test_end"   : str(fold["test_end"].date()),
+                "fecha_hoy"  : fecha_hoy,
+                "garch"      : garch_fold,
+            })
 
         del X_train, y_train, X_val, y_val, X_test, y_test
         gc.collect()
+
+    if SOLO_REGENERAR_PLOTS:
+        logger.info(f"\n  [REPLOT] Fan charts regenerados para {banco}. "
+                    f"Métricas y metadata no actualizados.")
+        return None
 
     if not resultados_test:
         logger.error(f"  [{banco}] Ningún fold completado")
