@@ -242,6 +242,65 @@ def reemplazar_garch_fold(df_fold, train_end):
     return df_fold
 
 
+def _extraer_garch_params_fold(df, train_end):
+    """
+    Estima parámetros GARCH(1,1) usando solo datos de TRAIN (hasta train_end).
+    Devuelve un dict por serie listo para guardar en metadata y reproducir el
+    GARCH en producción sin lookahead.
+
+    Claves por serie: omega, alpha, beta, escala, var_unc, last_sigma2, last_x_scaled
+    """
+    params   = {}
+    idx_cols = ["fecha_t", "R_t0", "D_t0", "TC_PEN_USD", "EMBI_PERU"]
+    avail    = [c for c in idx_cols if c in df.columns]
+    raw      = (df[avail].drop_duplicates("fecha_t")
+                .set_index("fecha_t").sort_index())
+
+    def _params_serie(serie):
+        serie_full  = serie.ffill().fillna(0.0)
+        serie_train = serie_full[serie_full.index <= train_end]
+        if len(serie_train) < 60 or serie_train.std() < 1e-9:
+            return None
+        escala  = float(serie_train.std())
+        x_train = (serie_train / escala).values.astype(float)
+        var_unc = max(float(np.var(x_train)), 1e-12)
+        omega, alpha, beta = _ajustar_garch_params(x_train)
+        n  = len(x_train)
+        s2 = np.empty(n)
+        s2[0] = var_unc
+        for t in range(1, n):
+            s2[t] = omega + alpha * x_train[t - 1] ** 2 + beta * s2[t - 1]
+        return {
+            "omega"         : omega,
+            "alpha"         : alpha,
+            "beta"          : beta,
+            "escala"        : escala,
+            "var_unc"       : var_unc,
+            "last_sigma2"   : float(s2[-1]),
+            "last_x_scaled" : float(x_train[-1]),
+        }
+
+    if {"R_t0", "D_t0"}.issubset(raw.columns):
+        p = _params_serie(raw["D_t0"] - raw["R_t0"])
+        if p:
+            params["garch_vol"] = p
+
+    if "TC_PEN_USD" in raw.columns:
+        tc  = raw["TC_PEN_USD"].replace(0, np.nan).ffill()
+        tci = tc.reindex(pd.bdate_range(tc.index.min(), tc.index.max())).ffill()
+        ret = np.log(tci / tci.shift(1)).reindex(tc.index)
+        p = _params_serie(ret)
+        if p:
+            params["garch_vol_tc"] = p
+
+    if "EMBI_PERU" in raw.columns:
+        p = _params_serie(raw["EMBI_PERU"].diff(1))
+        if p:
+            params["garch_vol_embi"] = p
+
+    return params
+
+
 ###############################################################################
 # PARTE 3 — Generación de folds  (EXPANDING o ROLLING según toggle)
 ###############################################################################
@@ -1338,6 +1397,15 @@ def evaluar_banco(banco: str):
 
     if GUARDAR_MODELO_FINAL and modelos_ultimo is not None:
         ultimo = folds[-1]
+
+        # ── Parámetros GARCH del último fold (para producción) ────────────────
+        garch_params_prod = {}
+        try:
+            garch_params_prod = _extraer_garch_params_fold(df, ultimo["train_end"])
+            logger.info(f"  GARCH producción extraído: {list(garch_params_prod.keys())}")
+        except Exception as _eg:
+            logger.warning(f"  No se pudieron extraer GARCH params: {_eg}")
+
         for tau, model in modelos_ultimo.items():
             sfx = "lgbm_wfcv_v3" if MODELO_CV == "lgbm" else f"{MODELO_CV}_wfcv_v3"
             ext = ".txt" if MODELO_CV == "lgbm" else ".json"
@@ -1365,6 +1433,16 @@ def evaluar_banco(banco: str):
             "ultimo_fold": {
                 "train_start": str(ultimo["train_start"].date()),
                 "train_end"  : str(ultimo["train_end"].date()),
+                "test_start" : str(ultimo["test_start"].date()),
+                "test_end"   : str(ultimo["test_end"].date()),
+            },
+            "garch_produccion": {
+                "train_end" : str(ultimo["train_end"].date()),
+                "series"    : garch_params_prod,
+                "uso"       : (
+                    "Usar omega/alpha/beta para propagar GARCH desde train_end "
+                    "en producción — garantiza consistencia entrenamiento-predicción"
+                ),
             },
             "n_folds": len(folds), "quantiles": QUANTILES,
             "features": cols_feat, "best_params_ultimo_fold": params_ultimo,

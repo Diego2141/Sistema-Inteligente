@@ -42,8 +42,16 @@ DIR_OUTPUT   = BASE_SISTEMA / "2. Output" / "aux_fanchart_horizontes_xgb_qt"
 DIR_OUTPUT.mkdir(parents=True, exist_ok=True)
 
 BANCO      = "SISTEMA"
-CORTE_VAL  = pd.Timestamp("2022-07-01")
 CORTE_TEST = pd.Timestamp("2023-01-03")
+
+# ── Configuración CV ──────────────────────────────────────────────────────────
+# True  → carga modelos y GARCH desde step005_wfcv_v3 (consistente con entrenamiento)
+# False → carga modelos desde DIR_MODELOS (comportamiento anterior)
+USAR_MODELOS_CV = True
+_CV_MODO        = "expanding"   # "expanding" o "rolling"
+_CV_VENTANAS    = "511"         # f"{TRAIN}{VAL}{TEST}" en años
+DIR_MODELOS_CV  = (BASE_SISTEMA / "2. Output" / "step005_wfcv_v3" /
+                   f"xgb_qt_{_CV_MODO}_{_CV_VENTANAS}" / "modelos")
 
 # ── Parámetros del video ──────────────────────────────────────────────────────
 PASO_FECHAS = 1    # 1 = todos los días hábiles válidos; 2 = cada 2, etc.
@@ -55,11 +63,29 @@ COLOR = "tomato"  # distingue XGBoost QT de XGBoost estándar (darkorange) y Lig
 
 # ── 1. Cargar modelos XGBoost QT ──────────────────────────────────────────────
 def cargar_modelos(banco: str, dir_modelos: Path):
-    metas = sorted(dir_modelos.glob(f"metadata_xgb_qt_{banco}_*.json"), reverse=True)
+    """
+    Carga modelos y metadata desde dir_modelos.
+
+    Soporta dos convenciones de nombre:
+      · CV  (step005_wfcv_v3): metadata_xgb_qt_wfcv_v3_{banco}_*.json
+                                xgb_qt_wfcv_v3_{banco}_q{tau}_{fecha}.json
+      · Old (modelos_xgb_qt) : metadata_xgb_qt_{banco}_*.json
+                                xgb_qt_{banco}_q{tau}_{fecha}.json
+
+    Retorna (modelos, cols_feat, quantiles, meta).
+    """
+    # Intentar convención CV primero, luego legacy
+    metas = sorted(dir_modelos.glob(f"metadata_xgb_qt_wfcv_v3_{banco}_*.json"),
+                   reverse=True)
+    cv_naming = bool(metas)
+    if not metas:
+        metas = sorted(dir_modelos.glob(f"metadata_xgb_qt_{banco}_*.json"),
+                       reverse=True)
     if not metas:
         raise FileNotFoundError(
             f"No se encontró metadata XGBoost para banco={banco} en {dir_modelos}"
         )
+
     meta      = json.loads(metas[0].read_text(encoding="utf-8"))
     fecha     = metas[0].stem.split("_")[-1]
     cols_feat = meta["features"]
@@ -67,24 +93,105 @@ def cargar_modelos(banco: str, dir_modelos: Path):
 
     modelos = {}
     for tau in quantiles:
-        ruta = dir_modelos / f"xgb_qt_{banco}_q{int(tau*100):02d}_{fecha}.json"
+        # Nombre de archivo del modelo
+        if cv_naming:
+            ruta = dir_modelos / f"xgb_qt_wfcv_v3_{banco}_q{int(tau*100):02d}_{fecha}.json"
+        else:
+            ruta = dir_modelos / f"xgb_qt_{banco}_q{int(tau*100):02d}_{fecha}.json"
         if not ruta.exists():
             raise FileNotFoundError(f"Modelo no encontrado: {ruta}")
         booster = xgb.Booster()
         booster.load_model(str(ruta))
         modelos[tau] = booster
 
-    print(f"Modelo XGBoost QT cargado : {metas[0].name}  ({len(cols_feat)} features)")
-    return modelos, cols_feat, quantiles
+    conv = "CV (wfcv_v3)" if cv_naming else "legacy"
+    print(f"Modelo XGBoost QT cargado [{conv}]: {metas[0].name}  ({len(cols_feat)} features)")
+    if "garch_produccion" in meta:
+        gp = meta["garch_produccion"]
+        print(f"  GARCH producción: train_end={gp['train_end']}  "
+              f"series={list(gp.get('series', {}).keys())}")
+    return modelos, cols_feat, quantiles, meta
 
 
-# ── 2. Datos ──────────────────────────────────────────────────────────────────
-def cargar_datos(banco: str, cols_feat: list[str]):
+# ── 2a. GARCH consistente con el fold de entrenamiento ────────────────────────
+def aplicar_garch_cv(df: pd.DataFrame, meta: dict) -> pd.DataFrame:
+    """
+    Reemplaza garch_vol / garch_vol_tc / garch_vol_embi en df usando los
+    parámetros GARCH guardados en el metadata del CV (último fold TRAIN).
+
+    Garantiza consistencia entrenamiento–predicción: el modelo ve en producción
+    los mismos valores GARCH que vio al entrenarse, sin lookahead.
+    """
+    gp           = meta.get("garch_produccion", {})
+    series_params = gp.get("series", {})
+    if not series_params:
+        print("  [GARCH-CV] Sin parámetros en metadata — usando GARCH del parquet")
+        return df
+
+    train_end = pd.Timestamp(gp["train_end"])
+    print(f"  [GARCH-CV] Parámetros del fold TRAIN hasta {train_end.date()}")
+
+    df       = df.copy()
+    idx_cols = ["fecha_t", "R_t0", "D_t0", "TC_PEN_USD", "EMBI_PERU"]
+    avail    = [c for c in idx_cols if c in df.columns]
+    raw      = (df[avail].drop_duplicates("fecha_t")
+                .set_index("fecha_t").sort_index())
+
+    def _propagar(serie: pd.Series, p: dict) -> pd.Series:
+        s      = serie.ffill().fillna(0.0)
+        escala = p["escala"]
+        omega, alpha, beta = p["omega"], p["alpha"], p["beta"]
+        x      = (s / escala).values.astype(float)
+        n      = len(x)
+        s2     = np.empty(n)
+        s2[0]  = p["var_unc"]
+        for t in range(1, n):
+            s2[t] = omega + alpha * x[t - 1] ** 2 + beta * s2[t - 1]
+        return pd.Series(np.sqrt(np.maximum(s2, 0)) * escala, index=s.index)
+
+    if "garch_vol" in series_params and {"R_t0", "D_t0"}.issubset(raw.columns):
+        vol = _propagar(raw["D_t0"] - raw["R_t0"], series_params["garch_vol"])
+        df["garch_vol"] = df["fecha_t"].map(vol)
+        print(f"    garch_vol        reemplazado")
+
+    if "garch_vol_tc" in series_params and "TC_PEN_USD" in raw.columns:
+        tc  = raw["TC_PEN_USD"].replace(0, np.nan).ffill()
+        tci = tc.reindex(pd.bdate_range(tc.index.min(), tc.index.max())).ffill()
+        ret = np.log(tci / tci.shift(1)).reindex(tc.index)
+        vol = _propagar(ret, series_params["garch_vol_tc"])
+        df["garch_vol_tc"] = df["fecha_t"].map(vol)
+        print(f"    garch_vol_tc     reemplazado")
+
+    if "garch_vol_embi" in series_params and "EMBI_PERU" in raw.columns:
+        vol = _propagar(raw["EMBI_PERU"].diff(1), series_params["garch_vol_embi"])
+        df["garch_vol_embi"] = df["fecha_t"].map(vol)
+        print(f"    garch_vol_embi   reemplazado")
+
+    return df
+
+
+# ── 2b. Datos ─────────────────────────────────────────────────────────────────
+def cargar_datos(banco: str, cols_feat: list[str], meta: dict = None):
+    """
+    Carga el parquet, aplica GARCH consistente con el fold CV (si meta disponible)
+    y calcula medianas usando solo datos hasta train_end del último fold.
+    """
     df = pd.read_parquet(RUTA_MATRIZ, filters=[("banco", "==", banco)])
     df["fecha_t"] = pd.to_datetime(df["fecha_t"])
     df = df.sort_values(["fecha_t", "h"]).reset_index(drop=True)
 
-    df_train = df[df["fecha_t"] < CORTE_VAL].copy()
+    # Corte de entrenamiento: usar train_end del último fold si está disponible
+    if meta and "ultimo_fold" in meta:
+        train_end = pd.Timestamp(meta["ultimo_fold"]["train_end"])
+    else:
+        train_end = pd.Timestamp("2022-07-01")   # fallback legacy
+    print(f"TRAIN hasta : {train_end.date()}")
+
+    # Aplicar GARCH del CV (reemplaza valores del parquet para consistencia)
+    if meta and meta.get("garch_produccion", {}).get("series"):
+        df = aplicar_garch_cv(df, meta)
+
+    df_train = df[df["fecha_t"] <= train_end].copy()
     df_test  = df[df["fecha_t"] >= CORTE_TEST].copy()
 
     cols_excluir = {"fecha_t", "banco", "target"}
@@ -95,7 +202,7 @@ def cargar_datos(banco: str, cols_feat: list[str]):
         df_test[(df_test["h"] == 90) & df_test["target"].notna()]["fecha_t"].unique()
     )
     print(f"TEST  : {CORTE_TEST.date()} → {df_test['fecha_t'].max().date()}")
-    print(f"Fechas válidas : {pd.Timestamp(fechas_validas[0]).date()} → "
+    print(f"Fechas válidas: {pd.Timestamp(fechas_validas[0]).date()} → "
           f"{pd.Timestamp(fechas_validas[-1]).date()} ({len(fechas_validas)} fechas)")
 
     return df, medianas, cols_num, fechas_validas
@@ -300,8 +407,9 @@ def animar(frames, ylim1, ylim3, banco):
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    modelos, cols_feat, _ = cargar_modelos(BANCO, DIR_MODELOS)
-    df, medianas, cols_num, fechas_validas = cargar_datos(BANCO, cols_feat)
+    _dir_mod = DIR_MODELOS_CV if USAR_MODELOS_CV else DIR_MODELOS
+    modelos, cols_feat, _, meta = cargar_modelos(BANCO, _dir_mod)
+    df, medianas, cols_num, fechas_validas = cargar_datos(BANCO, cols_feat, meta)
 
     frames = precomputar(df, medianas, cols_num, cols_feat, modelos, fechas_validas)
     _, ylim3 = rangos_globales(frames)
