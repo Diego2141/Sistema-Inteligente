@@ -432,6 +432,7 @@ def _objective_optuna(trial, X_tr, y_tr, X_va, y_va, std_y):
         "reg_alpha"       : 0.0 if FIX_REG_ALPHA else trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True),
         "reg_lambda"      : trial.suggest_float("reg_lambda", 0.1, 5.0) if FIX_REG_LAMBDA else trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
         "tree_method"     : "hist",
+        "nthread"         : _XGB_NTHREAD,
         "seed"            : 42,
     }
     n_est  = trial.suggest_int("n_estimators", 100, 1000)
@@ -569,6 +570,7 @@ def _objetivo_optuna_xgb_qt_tau(trial, tau, X_tr, y_tr, X_va, y_va, std_y):
         "reg_alpha"       : 0.0 if FIX_REG_ALPHA else trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True),
         "reg_lambda"      : trial.suggest_float("reg_lambda", 0.1, 5.0) if FIX_REG_LAMBDA else trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
         "tree_method"     : "hist",
+        "nthread"         : _XGB_NTHREAD,   # limita threads por trial en paralelo
         "seed"            : 42,
     }
     n_est  = trial.suggest_int("n_estimators", 100, 1000)
