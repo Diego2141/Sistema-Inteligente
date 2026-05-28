@@ -890,20 +890,22 @@ def graficar_fanchart_test_fold(
     if not origenes:
         return
 
-    n   = len(origenes)
-    fig, axes = plt.subplots(1, n, figsize=(n * 5.5, 5), sharey=False)
-    if n == 1:
-        axes = [axes]
+    # Layout 2×2
+    ncols = 2
+    nrows = int(np.ceil(len(origenes) / ncols))
+    modo  = "EXPANDING" if EXPANDING else "ROLLING"
 
-    modo = "EXPANDING" if EXPANDING else "ROLLING"
+    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 7, nrows * 5), sharey=False)
+    axes_flat = axes.flatten() if len(origenes) > 1 else [axes]
+
     fig.suptitle(
         f"Fan chart TEST OOS — Fold {fold['fold']} — {banco} [{modo}]\n"
         f"TEST: {fold['test_start'].date()} → {fold['test_end'].date()}  |  "
         f"TRAIN hasta: {fold['train_end'].date()}",
-        fontweight="bold", fontsize=10,
+        fontweight="bold", fontsize=11,
     )
 
-    for ax, t0 in zip(axes, origenes):
+    for ax, t0 in zip(axes_flat, origenes):
         mask = np.array([pd.Timestamp(f) == t0 for f in fechas_t_test])
         if mask.sum() == 0:
             ax.set_visible(False)
@@ -913,7 +915,6 @@ def graficar_fanchart_test_fold(
         y_s = y_test[mask]
         p_s = {tau: arr[mask] for tau, arr in preds_test.items()}
 
-        # Ordenar por horizonte
         order = np.argsort(h_s)
         h_s   = h_s[order]
         y_s   = y_s[order]
@@ -930,14 +931,17 @@ def graficar_fanchart_test_fold(
             ax.plot(h_s, p_s[0.50] / 1e6, color="steelblue", lw=1.8,
                     zorder=3, label="Q50")
 
-        # Realizados: verde dentro / rojo fuera de Q05-Q95
-        q_lo = p_s.get(0.05, np.full_like(y_s, -np.inf))
-        q_hi = p_s.get(0.95, np.full_like(y_s,  np.inf))
+        # Realizados: línea punteada + scatter coloreado por cobertura
+        q_lo   = p_s.get(0.05, np.full_like(y_s, -np.inf))
+        q_hi   = p_s.get(0.95, np.full_like(y_s,  np.inf))
         dentro = (y_s >= q_lo) & (y_s <= q_hi)
-        ax.scatter(h_s[dentro],  y_s[dentro]  / 1e6, color="seagreen", s=18,
-                   zorder=5, label="Realizado (dentro)")
-        ax.scatter(h_s[~dentro], y_s[~dentro] / 1e6, color="crimson",  s=18,
-                   zorder=5, label="Realizado (fuera)")
+
+        ax.plot(h_s, y_s / 1e6, color="dimgray", lw=1.0, ls="--",
+                zorder=4, alpha=0.75, label="Realizado")
+        ax.scatter(h_s[dentro],  y_s[dentro]  / 1e6, color="seagreen", s=20,
+                   zorder=5, label="Dentro Q05-Q95")
+        ax.scatter(h_s[~dentro], y_s[~dentro] / 1e6, color="crimson",  s=20,
+                   zorder=5, label="Fuera Q05-Q95")
 
         cov_snap = float(dentro.mean())
         ax.set_title(
@@ -945,15 +949,17 @@ def graficar_fanchart_test_fold(
             fontsize=9, fontweight="bold",
         )
         ax.set_xlabel("Horizonte h (días hábiles)", fontsize=8)
+        ax.set_ylabel("Flujo D-R (MM USD)", fontsize=8)
         ax.axhline(0, color="black", lw=0.5, alpha=0.3, ls="--")
         ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:,.0f}"))
         ax.grid(True, alpha=0.25)
 
-    axes[0].set_ylabel("Flujo D-R (MM USD)", fontsize=9)
-    # Leyenda solo en el primer panel
-    handles, labels = axes[0].get_legend_handles_labels()
+    # Leyenda en el primer panel; ocultar paneles sobrantes
+    handles, labels = axes_flat[0].get_legend_handles_labels()
     if handles:
-        axes[0].legend(handles, labels, fontsize=7, loc="best")
+        axes_flat[0].legend(handles, labels, fontsize=7, loc="best")
+    for ax in axes_flat[len(origenes):]:
+        ax.set_visible(False)
 
     plt.tight_layout()
     nombre = DIR_FANCHARTS / f"fanchart_test_fold{fold['fold']:02d}_{banco}.png"
