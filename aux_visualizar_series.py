@@ -34,6 +34,19 @@ datos    = bfm.load_manual_data(PARAMS)
 df_macro = bfm.download_external_series(PARAMS)
 df_banc  = datos["bancarios"]
 
+# step001 devuelve formato ANCHO ({banco}_R / {banco}_D).
+# Reconvertir a formato LARGO (fecha, banco, R, D) que usa este script.
+if not df_banc.empty:
+    _bancos = [c[:-2] for c in df_banc.columns if c.endswith("_R")]
+    _partes = []
+    for _b in _bancos:
+        _tmp = df_banc[[f"{_b}_R", f"{_b}_D"]].rename(
+            columns={f"{_b}_R": "R", f"{_b}_D": "D"}
+        )
+        _tmp["banco"] = _b
+        _partes.append(_tmp.reset_index())
+    df_banc = pd.concat(_partes, ignore_index=True)
+
 # ─────────────────────────────────────────────────────────────────
 # BLOQUE 1: Series externas base
 # ─────────────────────────────────────────────────────────────────
