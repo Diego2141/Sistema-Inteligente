@@ -138,6 +138,22 @@ FIX_REG_LAMBDA = False
 # ── Fan chart TEST: número de snapshots por fold ──────────────────────────────
 FANCHART_N_SNAPSHOTS = 4   # 1 cada ~3 meses para TEST de 1 año
 
+# ── Comparación con Step004 en fan charts ─────────────────────────────────────
+# True  → superpone predicciones del modelo step004 (línea naranja discontinua)
+#          para comparar visualmente con step005 fold-by-fold
+# False → solo muestra predicciones step005 (comportamiento normal)
+COMPARAR_CON_STEP004 = False
+# Directorio donde están los modelos step004 (eval = entrenado solo hasta TRAIN)
+_STEP004_SUFIJO = {
+    "xgb"   : ("modelos_xgb",    "eval", "xgb"),
+    "xgb_qt": ("modelos_xgb_qt", "eval", "xgb_qt"),
+    "lgbm"  : ("modelos_lgbm",   "eval", "lgbm"),
+}
+_s4_carpeta, _s4_subcarpeta, _s4_prefijo = _STEP004_SUFIJO.get(
+    MODELO_CV, ("modelos_xgb", "eval", "xgb")
+)
+DIR_MODELOS_STEP004 = BASE_SISTEMA / "2. Output" / _s4_carpeta / _s4_subcarpeta
+
 # ── Rutas de salida ───────────────────────────────────────────────────────────
 _modo           = "expanding" if EXPANDING else "rolling"
 _ventanas       = f"{VENTANA_TRAIN_AÑOS}{VENTANA_VAL_AÑOS}{VENTANA_TEST_AÑOS}"
@@ -1154,6 +1170,7 @@ def graficar_fanchart_test_fold(
     fechas_t_test,
     fold: dict,
     banco: str,
+    preds_overlay: dict | None = None,   # step004 predictions para comparación
 ):
     """
     Fan chart TEST out-of-sample para un fold.
@@ -1195,10 +1212,11 @@ def graficar_fanchart_test_fold(
     fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 7, nrows * 5), sharey=False)
     axes_flat = axes.flatten() if len(origenes) > 1 else [axes]
 
+    s4_tag = "  |  🟠 naranja = Step004 (GARCH global, lookahead)" if preds_overlay is not None else ""
     fig.suptitle(
         f"Fan chart TEST OOS — Fold {fold['fold']} — {banco} [{modo}]\n"
         f"TEST: {fold['test_start'].date()} → {fold['test_end'].date()}  |  "
-        f"TRAIN hasta: {fold['train_end'].date()}",
+        f"TRAIN hasta: {fold['train_end'].date()}{s4_tag}",
         fontweight="bold", fontsize=11,
     )
 
@@ -1217,21 +1235,36 @@ def graficar_fanchart_test_fold(
         y_s   = y_s[order]
         p_s   = {tau: arr[order] for tau, arr in p_s.items()}
 
-        # Bandas de incertidumbre
+        # Predicciones step004 overlay (misma máscara y orden)
+        p_s4 = None
+        if preds_overlay is not None:
+            p_s4 = {tau: arr[mask][order] for tau, arr in preds_overlay.items()
+                    if tau != "mean"}
+
+        # Bandas de incertidumbre — step005 (azul)
         if {0.01, 0.99}.issubset(p_s):
             ax.fill_between(h_s, p_s[0.01] / 1e6, p_s[0.99] / 1e6,
-                            alpha=0.12, color="steelblue", label="Q01-Q99")
+                            alpha=0.12, color="steelblue", label="Q01-Q99 (CV)")
         if {0.05, 0.95}.issubset(p_s):
             ax.fill_between(h_s, p_s[0.05] / 1e6, p_s[0.95] / 1e6,
-                            alpha=0.28, color="steelblue", label="Q05-Q95")
+                            alpha=0.28, color="steelblue", label="Q05-Q95 (CV)")
         if 0.50 in p_s:
             lw_q50 = 1.4 if "mean" in p_s else 1.8
             ls_q50 = "--" if "mean" in p_s else "-"
             ax.plot(h_s, p_s[0.50] / 1e6, color="steelblue", lw=lw_q50,
-                    ls=ls_q50, zorder=3, label="Q50")
+                    ls=ls_q50, zorder=3, label="Q50 (CV)")
         if "mean" in p_s:
             ax.plot(h_s, p_s["mean"] / 1e6, color="navy", lw=2.2,
-                    zorder=4, label="Media")
+                    zorder=4, label="Media (CV)")
+
+        # Overlay step004 — naranja discontinuo
+        if p_s4 is not None:
+            if {0.05, 0.95}.issubset(p_s4):
+                ax.fill_between(h_s, p_s4[0.05] / 1e6, p_s4[0.95] / 1e6,
+                                alpha=0.10, color="darkorange")
+            if 0.50 in p_s4:
+                ax.plot(h_s, p_s4[0.50] / 1e6, color="darkorange", lw=1.6,
+                        ls="--", zorder=4, alpha=0.85, label="Q50 Step004")
 
         # Realizados: línea punteada + scatter coloreado por cobertura
         q_lo   = p_s.get(0.05, np.full_like(y_s, -np.inf))
@@ -1321,6 +1354,45 @@ def _cargar_modelos_fold_disco(fold_info: dict, banco: str) -> dict:
                 f"{'  (+ media)' if has_mean else ''}")
     return modelos
 
+
+def _cargar_modelos_step004(banco: str) -> dict | None:
+    """
+    Carga los modelos del step004 (eval) para el banco indicado.
+    Retorna dict {tau: Booster} o None si no se encuentran archivos.
+    Soporta naming xgb_qt y xgb.
+    """
+    if not DIR_MODELOS_STEP004.exists():
+        logger.warning(f"  [S4] Directorio step004 no encontrado: {DIR_MODELOS_STEP004}")
+        return None
+
+    sfx = _s4_prefijo
+    # Buscar metadata para obtener fecha del modelo
+    metas = sorted(DIR_MODELOS_STEP004.glob(f"metadata_{sfx}_{banco}_*.json"), reverse=True)
+    if not metas:
+        # fallback: sin metadata, buscar modelos directamente
+        metas = sorted(DIR_MODELOS_STEP004.glob(f"metadata_{sfx}_wfcv_v3_{banco}_*.json"), reverse=True)
+    if not metas:
+        logger.warning(f"  [S4] No se encontró metadata step004 en {DIR_MODELOS_STEP004}")
+        return None
+
+    meta  = json.loads(metas[0].read_text(encoding="utf-8"))
+    fecha = metas[0].stem.split("_")[-1]
+    quantiles_s4 = meta.get("quantiles", QUANTILES)
+
+    modelos_s4 = {}
+    for tau in quantiles_s4:
+        ruta = DIR_MODELOS_STEP004 / f"{sfx}_{banco}_q{int(tau*100):02d}_{fecha}.json"
+        if not ruta.exists():
+            logger.warning(f"  [S4] Modelo no encontrado: {ruta.name}")
+            return None
+        b = xgb.Booster(); b.load_model(str(ruta))
+        modelos_s4[tau] = b
+
+    logger.info(f"  [S4] Modelos step004 cargados: {metas[0].name}  "
+                f"({len(modelos_s4)} cuantiles)")
+    return modelos_s4
+
+
 def evaluar_banco(banco: str):
     modo = "EXPANDING" if EXPANDING else "ROLLING"
     logger.info(f"\n{'='*65}")
@@ -1346,6 +1418,11 @@ def evaluar_banco(banco: str):
     fechas    = pd.DatetimeIndex(df["fecha_t"].unique())
     logger.info(f"  [{banco}] {len(df):,} filas | {len(cols_feat)} features | "
                 f"rango: {fechas.min().date()} → {fechas.max().date()}")
+
+    # Cargar modelos step004 para comparación (opcional)
+    modelos_s4 = _cargar_modelos_step004(banco) if COMPARAR_CON_STEP004 else None
+    if COMPARAR_CON_STEP004 and modelos_s4 is None:
+        logger.warning("  [S4] No se pudo cargar step004 — comparación desactivada")
 
     folds = generar_folds(
         fechas_disponibles=fechas,
@@ -1504,8 +1581,11 @@ def evaluar_banco(banco: str):
             )
 
         # Fan charts TEST (una figura por fold con N snapshots)
+        # Predicciones step004 para comparación (usa mismas X_test, GARCH distinto)
+        preds_s4 = predecir_y_corregir(modelos_s4, X_test) if modelos_s4 is not None else None
         graficar_fanchart_test_fold(
-            preds_test, y_test.values, h_test, fechas_t_test, fold, banco
+            preds_test, y_test.values, h_test, fechas_t_test, fold, banco,
+            preds_overlay=preds_s4,
         )
 
         modelos_ultimo = modelos
