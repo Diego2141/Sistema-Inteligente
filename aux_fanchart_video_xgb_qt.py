@@ -58,6 +58,13 @@ DIR_MODELOS_CV  = (BASE_SISTEMA / "2. Output" / "step005_wfcv_v3" /
 # MODO_HISTORICO = False → siempre usa el último fold (modo producción)
 MODO_HISTORICO = True
 
+# ── Comparación con Step004 ───────────────────────────────────────────────────
+# True  → superpone predicciones del step004 (GARCH lookahead, línea naranja)
+#          para ver si ahora cuadra con el step005 (GARCH por fold, correcto)
+# False → solo muestra step005
+COMPARAR_CON_STEP004 = False
+DIR_MODELOS_STEP004  = BASE_SISTEMA / "2. Output" / "modelos_xgb_qt" / "eval"
+
 # ── Parámetros del video ──────────────────────────────────────────────────────
 PASO_FECHAS = 1    # 1 = todos los días hábiles válidos; 2 = cada 2, etc.
 FPS         = 2    # frames por segundo
@@ -131,6 +138,36 @@ def cargar_modelos(banco: str, dir_modelos: Path):
     if n_folds_manifest:
         print(f"  folds_manifest: {n_folds_manifest} folds disponibles para modo histórico")
     return modelos, cols_feat, quantiles, meta
+
+
+# ── 1a. Carga de modelos Step004 para comparación ────────────────────────────
+def cargar_modelos_step004(banco: str) -> dict | None:
+    """
+    Carga los modelos XGBoost QT del step004 (eval) para superponerlos
+    en el fan chart y comparar con step005 (GARCH por fold).
+    Retorna {tau: Booster} o None si no se encuentran.
+    """
+    if not DIR_MODELOS_STEP004.exists():
+        print(f"  [S4] Directorio no encontrado: {DIR_MODELOS_STEP004}")
+        return None
+    metas = sorted(DIR_MODELOS_STEP004.glob(f"metadata_xgb_qt_{banco}_*.json"),
+                   reverse=True)
+    if not metas:
+        print(f"  [S4] No se encontró metadata step004 en {DIR_MODELOS_STEP004}")
+        return None
+    meta_s4 = json.loads(metas[0].read_text(encoding="utf-8"))
+    fecha   = metas[0].stem.split("_")[-1]
+    quants  = meta_s4.get("quantiles", [0.01, 0.05, 0.50, 0.95, 0.99])
+    modelos_s4 = {}
+    for tau in quants:
+        ruta = DIR_MODELOS_STEP004 / f"xgb_qt_{banco}_q{int(tau*100):02d}_{fecha}.json"
+        if not ruta.exists():
+            print(f"  [S4] No encontrado: {ruta.name}")
+            return None
+        b = xgb.Booster(); b.load_model(str(ruta))
+        modelos_s4[tau] = b
+    print(f"  [S4] Step004 cargado: {metas[0].name}  ({len(modelos_s4)} cuantiles)")
+    return modelos_s4
 
 
 # ── 1b. Carga de un fold específico para modo histórico ───────────────────────
@@ -326,7 +363,7 @@ def predecir_fecha(df, fecha_origen, medianas, cols_num, cols_feat, modelos):
 
 # ── 4. Pre-computar todos los resultados ──────────────────────────────────────
 def precomputar(df, medianas, cols_num, cols_feat, modelos, fechas_validas,
-                meta=None, dir_modelos=None, banco=None):
+                meta=None, dir_modelos=None, banco=None, modelos_s4=None):
     fechas_sel      = fechas_validas[::PASO_FECHAS]
     total           = len(fechas_sel)
     folds_manifest  = (meta or {}).get("folds_manifest", []) if MODO_HISTORICO else []
@@ -396,6 +433,19 @@ def precomputar(df, medianas, cols_num, cols_feat, modelos, fechas_validas,
         if "mean" in res.columns:
             frame_data["mean"]     = res["mean"].values / 1e6
             frame_data["cum_mean"] = np.cumsum(res["mean"].values / 1e6)
+
+        # Step004 overlay: predice con GARCH del parquet (lookahead) usando df base
+        if modelos_s4 is not None:
+            res_s4 = predecir_fecha(df, fecha_origen, medianas,
+                                    cols_num, cols_feat, modelos_s4)
+            if "q50" in res_s4.columns:
+                frame_data["s4_q05"]     = res_s4["q05"].values / 1e6
+                frame_data["s4_q50"]     = res_s4["q50"].values / 1e6
+                frame_data["s4_q95"]     = res_s4["q95"].values / 1e6
+                frame_data["s4_cum_q05"] = np.cumsum(res_s4["q05"].values / 1e6)
+                frame_data["s4_cum_q50"] = np.cumsum(res_s4["q50"].values / 1e6)
+                frame_data["s4_cum_q95"] = np.cumsum(res_s4["q95"].values / 1e6)
+
         frames.append(frame_data)
         if i % 5 == 0 or i == total:
             fold_tag = (f" [fold {fold_activo_num}]" if usar_historico and fold_activo_num
@@ -442,35 +492,40 @@ def animar(frames, ylim1, ylim3, banco):
     ax3.set_xlabel("Horizonte h (días hábiles desde t)", fontsize=11)
 
     has_mean = "mean" in frames[0]
+    has_s4   = "s4_q50" in frames[0]
+    _s4_patch_d = ([Line2D([0], [0], color="darkorange", lw=1.8, ls="--",
+                            label="Q50 Step004 (GARCH global)")] if has_s4 else [])
+    _s4_patch_a = ([Line2D([0], [0], color="darkorange", lw=1.8, ls="--",
+                            label="Q50 acum. Step004")] if has_s4 else [])
 
     if has_mean:
         legend_diario = [
-            Patch(facecolor=COLOR, alpha=0.12, label="Q01–Q99 (98%)"),
-            Patch(facecolor=COLOR, alpha=0.40, label="Q05–Q95 (90%)"),
-            Line2D([0], [0], color="crimson", lw=2,   ls="--", label="Mediana Q50"),
-            Line2D([0], [0], color="darkred", lw=2.5, label="Media proyectada"),
+            Patch(facecolor=COLOR, alpha=0.12, label="Q01–Q99 CV (98%)"),
+            Patch(facecolor=COLOR, alpha=0.40, label="Q05–Q95 CV (90%)"),
+            Line2D([0], [0], color="crimson", lw=2,   ls="--", label="Mediana Q50 CV"),
+            Line2D([0], [0], color="darkred", lw=2.5, label="Media proyectada CV"),
             Line2D([0], [0], color="black",   lw=2,   label="Realizado (D−R)"),
             Line2D([0], [0], color="red",     lw=1.2, ls="--", alpha=0.7,
                    label="Último dato realizado"),
-        ]
+        ] + _s4_patch_d
         legend_acum = [
-            Patch(facecolor=COLOR, alpha=0.12, label="Q01–Q99 acum."),
-            Patch(facecolor=COLOR, alpha=0.40, label="Q05–Q95 acum."),
-            Line2D([0], [0], color="crimson", lw=2,   ls="--", label="Mediana acum. Q50"),
-            Line2D([0], [0], color="darkred", lw=2.5, label="Media acumulada"),
+            Patch(facecolor=COLOR, alpha=0.12, label="Q01–Q99 CV acum."),
+            Patch(facecolor=COLOR, alpha=0.40, label="Q05–Q95 CV acum."),
+            Line2D([0], [0], color="crimson", lw=2,   ls="--", label="Mediana acum. Q50 CV"),
+            Line2D([0], [0], color="darkred", lw=2.5, label="Media acumulada CV"),
             Line2D([0], [0], color="black",   lw=2,   label="Realizado acumulado"),
-        ]
+        ] + _s4_patch_a
     else:
         legend_diario = [
-            Patch(facecolor=COLOR, alpha=0.12, label="Q01–Q99 (98%)"),
-            Patch(facecolor=COLOR, alpha=0.40, label="Q05–Q95 (90%)"),
-            Line2D([0], [0], color="crimson", lw=2,   label="Mediana Q50"),
+            Patch(facecolor=COLOR, alpha=0.12, label="Q01–Q99 CV (98%)"),
+            Patch(facecolor=COLOR, alpha=0.40, label="Q05–Q95 CV (90%)"),
+            Line2D([0], [0], color="crimson", lw=2,   label="Mediana Q50 CV"),
             Line2D([0], [0], color="black",   lw=2,   label="Realizado (D−R)"),
             Line2D([0], [0], color="red",     lw=1.2, ls="--", alpha=0.7,
                    label="Último dato realizado"),
-        ]
+        ] + _s4_patch_d
         legend_acum = [
-            Patch(facecolor=COLOR, alpha=0.12, label="Q01–Q99 acum."),
+            Patch(facecolor=COLOR, alpha=0.12, label="Q01–Q99 CV acum."),
             Patch(facecolor=COLOR, alpha=0.40, label="Q05–Q95 acum."),
             Line2D([0], [0], color="crimson", lw=2, label="Mediana acumulada Q50"),
             Line2D([0], [0], color="black",   lw=2, label="Realizado acumulado"),
@@ -502,6 +557,11 @@ def animar(frames, ylim1, ylim3, banco):
             ax1.plot(hs, f["mean"], color="darkred", lw=2.5, zorder=6)
         else:
             ax1.plot(hs, f["q50"], color="crimson", lw=2.0, zorder=5)
+        if has_s4 and "s4_q50" in f:
+            ax1.fill_between(hs, f["s4_q05"], f["s4_q95"],
+                             alpha=0.10, color="darkorange")
+            ax1.plot(hs, f["s4_q50"], color="darkorange", lw=1.8,
+                     ls="--", zorder=4, alpha=0.85)
         if f["mask"].any():
             ax1.plot(hs[f["mask"]], f["real"][f["mask"]], color="black", lw=2, zorder=7)
             ax1.scatter(hs[f["mask"]], f["real"][f["mask"]], color="black", s=18, zorder=8)
@@ -519,6 +579,11 @@ def animar(frames, ylim1, ylim3, banco):
             ax3.plot(hs, f["cum_mean"], color="darkred", lw=2.5, zorder=6)
         else:
             ax3.plot(hs, f["cum_q50"], color="crimson", lw=2.0, zorder=5)
+        if has_s4 and "s4_cum_q50" in f:
+            ax3.fill_between(hs, f["s4_cum_q05"], f["s4_cum_q95"],
+                             alpha=0.10, color="darkorange")
+            ax3.plot(hs, f["s4_cum_q50"], color="darkorange", lw=1.8,
+                     ls="--", zorder=4, alpha=0.85)
         if f["mask"].any():
             ax3.plot(hs[f["mask"]], f["cum_r"][f["mask"]], color="black", lw=2, zorder=7)
             ax3.scatter(hs[f["mask"]], f["cum_r"][f["mask"]], color="black", s=18, zorder=8)
@@ -576,8 +641,11 @@ if __name__ == "__main__":
     modelos, cols_feat, _, meta = cargar_modelos(BANCO, _dir_mod)
     df, medianas, cols_num, fechas_validas = cargar_datos(BANCO, cols_feat, meta)
 
+    _modelos_s4 = cargar_modelos_step004(BANCO) if COMPARAR_CON_STEP004 else None
+
     frames = precomputar(df, medianas, cols_num, cols_feat, modelos, fechas_validas,
-                         meta=meta, dir_modelos=_dir_mod, banco=BANCO)
+                         meta=meta, dir_modelos=_dir_mod, banco=BANCO,
+                         modelos_s4=_modelos_s4)
     _, ylim3 = rangos_globales(frames)
     ylim1 = (-3000, 3000)  # límite fijo flujo diario (MM USD)
 
