@@ -145,7 +145,7 @@ assert MODELO_CV in ("xgb", "lgbm", "xgb_qt"), \
 #   False → búsqueda original (CV>200%, paisaje plano, trials desperdiciados).
 #   Evidencia: CV>200% en xgb y xgb_qt; efecto sobre pérdida <0.04%.
 #   RECOMENDADO: True — no afecta cobertura, solo elimina ruido de búsqueda.
-FIX_REG_ALPHA = True
+FIX_REG_ALPHA = False
 
 # FIX_REG_LAMBDA: acota reg_lambda a [0.1, 5.0] lineal en vez de [1e-4,10] log.
 #   True  → rango estrecho centrado en el default de XGBoost (1.0).

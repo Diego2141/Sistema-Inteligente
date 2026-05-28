@@ -119,7 +119,7 @@ assert MODELO_CV in ("xgb", "lgbm", "xgb_qt"), \
     f"MODELO_CV debe ser 'xgb', 'lgbm' o 'xgb_qt', recibido: {MODELO_CV!r}"
 
 # ── Regularización Optuna ─────────────────────────────────────────────────────
-FIX_REG_ALPHA  = True   # reg_alpha=0 fijo (CV>200%, paisaje plano, sin efecto real)
+FIX_REG_ALPHA  = False  # búsqueda original [1e-4, 10] log-scale
 FIX_REG_LAMBDA = False  # False=búsqueda log [1e-4,10]; True demostró empeorar folds 5-8
 
 # ── Rutas de salida ───────────────────────────────────────────────────────────
