@@ -109,6 +109,10 @@ BANCOS_A_ENTRENAR = ["SISTEMA"]
 COLS_EXCLUIR = {"fecha_t", "banco", "target"}
 COLS_TEXTO   = {"banco"}
 
+# True  → re-estima GARCH(1,1) solo con datos TRAIN (hasta CORTE_VAL) antes de entrenar
+# False → usa GARCH del parquet tal cual (comportamiento original)
+USAR_GARCH_SIN_LEAKAGE = False
+
 
 ###############################################################################
 # PARTE 1 — Utilidades
@@ -184,6 +188,65 @@ def _fmt_tiempo(segundos: float) -> str:
     if segundos >= 60:
         return f"{segundos/60:.1f} min  ({segundos:.0f} s)"
     return f"{segundos:.1f} s"
+
+
+###############################################################################
+# GARCH sin leakage  (estimación solo sobre TRAIN)
+###############################################################################
+
+def _ajustar_garch_s4(x_train):
+    from scipy.optimize import minimize as _min
+    n = len(x_train)
+    var_unc = max(float(np.var(x_train)), 1e-12)
+    def _s2(o, a, b):
+        s2 = np.empty(n); s2[0] = var_unc
+        for t in range(1, n): s2[t] = o + a * x_train[t-1]**2 + b * s2[t-1]
+        return s2
+    def _nll(p):
+        o, a, b = p
+        if o <= 0 or a <= 0 or b <= 0 or a + b >= 0.9999: return 1e10
+        s2 = _s2(o, a, b)
+        return 1e10 if np.any(s2 <= 0) else 0.5*float(np.sum(np.log(s2) + x_train**2/s2))
+    try:
+        r = _min(_nll, [0.01, 0.08, 0.88], method="L-BFGS-B",
+                 bounds=[(1e-7,0.5),(1e-7,0.5),(1e-7,0.9999)],
+                 options={"maxiter":500,"ftol":1e-10,"gtol":1e-7})
+        if r.fun < 1e9: return float(r.x[0]), float(r.x[1]), float(r.x[2])
+    except Exception: pass
+    return 0.01, 0.08, 0.88
+
+def _garch_vol_s4(serie, train_end):
+    sf = serie.ffill().fillna(0.0)
+    st = sf[sf.index <= train_end]
+    if len(st) < 60 or st.std() < 1e-9:
+        return sf.rolling(20).std().fillna(st.std())
+    esc = float(st.std()); x_tr = (st / esc).values.astype(float)
+    var_unc = max(float(np.var(x_tr)), 1e-12)
+    o, a, b = _ajustar_garch_s4(x_tr)
+    xf = (sf / esc).values.astype(float); nf = len(xf)
+    s2 = np.empty(nf); s2[0] = var_unc
+    for t in range(1, nf): s2[t] = o + a * xf[t-1]**2 + b * s2[t-1]
+    return pd.Series(np.sqrt(np.maximum(s2, 0)) * esc, index=sf.index)
+
+def reemplazar_garch_sin_leakage(df, train_end):
+    """Re-estima GARCH(1,1) solo con datos ≤ train_end y propaga hacia adelante."""
+    df = df.copy()
+    avail = [c for c in ["fecha_t","R_t0","D_t0","TC_PEN_USD","EMBI_PERU"] if c in df.columns]
+    raw   = df[avail].drop_duplicates("fecha_t").set_index("fecha_t").sort_index()
+    if "garch_vol" in df.columns and {"R_t0","D_t0"}.issubset(raw.columns):
+        df["garch_vol"] = df["fecha_t"].map(_garch_vol_s4(raw["D_t0"]-raw["R_t0"], train_end))
+        logger.info("    garch_vol        re-estimado sin leakage")
+    if "garch_vol_tc" in df.columns and "TC_PEN_USD" in raw.columns:
+        tc = raw["TC_PEN_USD"].replace(0, np.nan).ffill()
+        tci = tc.reindex(pd.bdate_range(tc.index.min(), tc.index.max())).ffill()
+        ret = np.log(tci / tci.shift(1)).reindex(tc.index)
+        df["garch_vol_tc"] = df["fecha_t"].map(_garch_vol_s4(ret, train_end))
+        logger.info("    garch_vol_tc     re-estimado sin leakage")
+    if "garch_vol_embi" in df.columns and "EMBI_PERU" in raw.columns:
+        df["garch_vol_embi"] = df["fecha_t"].map(
+            _garch_vol_s4(raw["EMBI_PERU"].diff(1), train_end))
+        logger.info("    garch_vol_embi   re-estimado sin leakage")
+    return df
 
 
 ###############################################################################
@@ -663,6 +726,10 @@ def entrenar_banco(banco: str) -> dict | None:
     logger.info(f"  [{banco}] Features: {len(cols_feat)}")
 
     # ── 3. Split walk-forward ────────────────────────────────────
+    if USAR_GARCH_SIN_LEAKAGE:
+        logger.info(f"  [{banco}] Re-estimando GARCH sin leakage (TRAIN hasta {CORTE_VAL.date()})...")
+        df = reemplazar_garch_sin_leakage(df, CORTE_VAL)
+
     df_train, df_val, df_test = split_walk_forward(df, CORTE_VAL, CORTE_TEST)
 
     logger.info(f"  [{banco}] TRAIN: {df_train['fecha_t'].min().date()} → "
