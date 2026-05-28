@@ -47,8 +47,10 @@ from __future__ import annotations
 import gc
 import json
 import logging
+import os
 import time
 import warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -180,6 +182,15 @@ def crps_approx(y_true, preds):
 # PARTE 2 — GARCH por fold
 ###############################################################################
 
+# Número de threads por modelo XGBoost cuando se entrenan en paralelo.
+# Si hay N cuantiles en paralelo, cada uno usa cpu_count/N threads → sin over-subscription.
+_N_QUANTILES_PARALLEL = len([0.01, 0.05, 0.50, 0.95, 0.99])  # = 5
+_XGB_NTHREAD = max(1, (os.cpu_count() or 4) // _N_QUANTILES_PARALLEL)
+
+# Cache de parámetros GARCH por fecha de corte de TRAIN — evita re-estimación en el
+# mismo fold y para el guardado de metadata (antes se estimaba 2-3 veces por fold).
+_garch_params_cache: dict[str, dict] = {}
+
 def _ajustar_garch_params(x_train):
     n       = len(x_train)
     var_unc = max(float(np.var(x_train)), 1e-12)
@@ -254,11 +265,12 @@ def reemplazar_garch_fold(df_fold, train_end):
 def _extraer_garch_params_fold(df, train_end):
     """
     Estima parámetros GARCH(1,1) usando solo datos de TRAIN (hasta train_end).
-    Devuelve un dict por serie listo para guardar en metadata y reproducir el
-    GARCH en producción sin lookahead.
-
-    Claves por serie: omega, alpha, beta, escala, var_unc, last_sigma2, last_x_scaled
+    Resultado cacheado por fecha de corte para no re-estimar en el mismo fold.
     """
+    cache_key = str(train_end.date()) if hasattr(train_end, "date") else str(train_end)
+    if cache_key in _garch_params_cache:
+        return _garch_params_cache[cache_key]
+
     params   = {}
     idx_cols = ["fecha_t", "R_t0", "D_t0", "TC_PEN_USD", "EMBI_PERU"]
     avail    = [c for c in idx_cols if c in df.columns]
@@ -307,6 +319,7 @@ def _extraer_garch_params_fold(df, train_end):
         if p:
             params["garch_vol_embi"] = p
 
+    _garch_params_cache[cache_key] = params
     return params
 
 
@@ -456,15 +469,20 @@ def entrenar_quantiles(X_tr, y_tr, best_params, quantiles, std_y):
     s_best = best_params["s"]
     n_est  = best_params["n_estimators"]
     params = {k: v for k, v in best_params.items() if k not in ("s", "n_estimators")}
-    params.update({"tree_method": "hist", "seed": 42})
-    dtrain  = xgb.DMatrix(X_tr, label=y_tr)
-    modelos = {}
-    for tau in quantiles:
-        modelos[tau] = xgb.train(
+    params.update({"tree_method": "hist", "seed": 42, "nthread": _XGB_NTHREAD})
+
+    def _train_tau(tau):
+        dtrain = xgb.DMatrix(X_tr, label=y_tr)
+        return tau, xgb.train(
             params, dtrain, num_boost_round=n_est,
             obj=make_quantile_objective(tau, s_best, std_y),
             verbose_eval=False,
         )
+
+    modelos = {}
+    with ThreadPoolExecutor(max_workers=len(quantiles)) as ex:
+        for tau, model in ex.map(lambda t: _train_tau(t), quantiles):
+            modelos[tau] = model
     return modelos
 
 
@@ -569,32 +587,44 @@ def _objetivo_optuna_xgb_qt_tau(trial, tau, X_tr, y_tr, X_va, y_va, std_y):
 
 
 def _entrenar_fold_xgb_qt(X_tr, y_tr, X_va, y_va, std_y, n_trials, fold_num):
-    best_by_tau = {}
-    modelos     = {}
-    for tau in QUANTILES:
+    """
+    Entrena un modelo por cuantil con Optuna independiente para cada uno.
+    Los 5 estudios corren en paralelo (ThreadPoolExecutor); cada XGBoost usa
+    _XGB_NTHREAD threads para evitar over-subscription de CPU.
+    """
+    def _optuna_y_train_tau(tau):
         study = optuna.create_study(
             direction="minimize",
             sampler=optuna.samplers.TPESampler(seed=42 + fold_num + int(tau * 100)),
         )
         study.optimize(
-            lambda t, _tau=tau: _objetivo_optuna_xgb_qt_tau(
-                t, _tau, X_tr, y_tr, X_va, y_va, std_y),
+            lambda t: _objetivo_optuna_xgb_qt_tau(t, tau, X_tr, y_tr, X_va, y_va, std_y),
             n_trials=n_trials, show_progress_bar=False,
         )
-        bp = study.best_params
-        best_by_tau[tau] = bp
-        logger.info(f"    [xgb_qt] τ={tau} fold {fold_num}: "
-                    f"pinball/VAL={study.best_value:.4f} s={bp['s']:.3f}")
+        bp     = study.best_params
         s      = bp["s"]
         n_est  = bp["n_estimators"]
         params = {k: v for k, v in bp.items() if k not in ("s", "n_estimators")}
-        params.update({"tree_method": "hist", "seed": 42})
+        params.update({"tree_method": "hist", "seed": 42, "nthread": _XGB_NTHREAD})
         dtrain = xgb.DMatrix(X_tr, label=y_tr)
-        modelos[tau] = xgb.train(
+        model  = xgb.train(
             params, dtrain, num_boost_round=n_est,
             obj=make_quantile_objective(tau, s, std_y),
             verbose_eval=False,
         )
+        logger.info(f"    [xgb_qt] τ={tau:.2f} fold {fold_num}: "
+                    f"pinball/VAL={study.best_value:.4f}  s={s:.3f}  n_est={n_est}")
+        return tau, model, bp, study.best_value
+
+    modelos     = {}
+    best_by_tau = {}
+    with ThreadPoolExecutor(max_workers=len(QUANTILES)) as ex:
+        futures = {ex.submit(_optuna_y_train_tau, tau): tau for tau in QUANTILES}
+        for fut in as_completed(futures):
+            tau, model, bp, _ = fut.result()
+            modelos[tau]     = model
+            best_by_tau[tau] = bp
+
     return modelos, best_by_tau.get(0.50, list(best_by_tau.values())[0])
 
 
@@ -1444,13 +1474,15 @@ def evaluar_banco(banco: str):
     if GUARDAR_MODELO_FINAL and modelos_ultimo is not None:
         ultimo = folds[-1]
 
-        # ── Parámetros GARCH del último fold (para producción) ────────────────
-        garch_params_prod = {}
-        try:
-            garch_params_prod = _extraer_garch_params_fold(df, ultimo["train_end"])
-            logger.info(f"  GARCH producción extraído: {list(garch_params_prod.keys())}")
-        except Exception as _eg:
-            logger.warning(f"  No se pudieron extraer GARCH params: {_eg}")
+        # Reusar GARCH del último fold ya calculado en el manifest (evita 3ª estimación)
+        garch_params_prod = folds_manifest[-1]["garch"] if folds_manifest else {}
+        if garch_params_prod:
+            logger.info(f"  GARCH producción (del manifest): {list(garch_params_prod.keys())}")
+        else:
+            try:
+                garch_params_prod = _extraer_garch_params_fold(df, ultimo["train_end"])
+            except Exception as _eg:
+                logger.warning(f"  No se pudieron extraer GARCH params: {_eg}")
 
         for tau, model in modelos_ultimo.items():
             sfx = "lgbm_wfcv_v3" if MODELO_CV == "lgbm" else f"{MODELO_CV}_wfcv_v3"
