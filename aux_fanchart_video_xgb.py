@@ -53,6 +53,11 @@ _CV_VENTANAS    = "511"         # f"{TRAIN}{VAL}{TEST}" en años
 DIR_MODELOS_CV  = (BASE_SISTEMA / "2. Output" / "step005_wfcv_v3" /
                    f"xgb_{_CV_MODO}_{_CV_VENTANAS}" / "modelos")
 
+# MODO_HISTORICO = True  → para cada fecha_origen usa el fold cuyo TEST la cubre
+#                          (predicción genuinamente OOS, sin lookahead del modelo)
+# MODO_HISTORICO = False → siempre usa el último fold (modo producción)
+MODO_HISTORICO = True
+
 # ── Parámetros del video ──────────────────────────────────────────────────────
 PASO_FECHAS = 1    # 1 = todos los días hábiles válidos; 2 = cada 2, etc.
 FPS         = 2    # frames por segundo
@@ -103,7 +108,49 @@ def cargar_modelos(banco: str, dir_modelos: Path):
         gp = meta["garch_produccion"]
         print(f"  GARCH producción: train_end={gp['train_end']}  "
               f"series={list(gp.get('series', {}).keys())}")
+    n_folds_manifest = len(meta.get("folds_manifest", []))
+    if n_folds_manifest:
+        print(f"  folds_manifest: {n_folds_manifest} folds disponibles para modo histórico")
     return modelos, cols_feat, quantiles, meta
+
+
+# ── 1b. Carga de un fold específico para modo histórico ───────────────────────
+_cache_modelos_fold: dict[int, dict] = {}   # {fold_num: {tau: Booster}}
+
+def cargar_modelo_fold(fold_info: dict, dir_modelos: Path, banco: str) -> dict:
+    """
+    Carga los modelos del fold indicado desde dir_modelos.
+    Usa caché para no recargar el mismo fold múltiples veces.
+    """
+    fold_num = fold_info["fold"]
+    if fold_num in _cache_modelos_fold:
+        return _cache_modelos_fold[fold_num]
+
+    fecha = fold_info["fecha_hoy"]
+    modelos_fold = {}
+    for tau_key in [1, 5, 50, 95, 99]:
+        ruta = dir_modelos / f"xgb_wfcv_v3_{banco}_fold{fold_num:02d}_q{tau_key:02d}_{fecha}.json"
+        if not ruta.exists():
+            raise FileNotFoundError(f"Modelo fold {fold_num} no encontrado: {ruta}")
+        b = xgb.Booster()
+        b.load_model(str(ruta))
+        modelos_fold[tau_key / 100] = b
+
+    _cache_modelos_fold[fold_num] = modelos_fold
+    print(f"  [fold {fold_num}] modelos cargados  "
+          f"(test {fold_info['test_start']} → {fold_info['test_end']})")
+    return modelos_fold
+
+
+def seleccionar_fold(fecha_origen: pd.Timestamp, folds_manifest: list) -> dict | None:
+    """
+    Retorna el fold cuyo período TEST cubre fecha_origen.
+    Si la fecha no cae en ningún fold TEST, retorna None (usar último fold).
+    """
+    for fi in folds_manifest:
+        if pd.Timestamp(fi["test_start"]) <= fecha_origen <= pd.Timestamp(fi["test_end"]):
+            return fi
+    return None
 
 
 # ── 2a. GARCH consistente con el fold de entrenamiento ────────────────────────
@@ -160,7 +207,31 @@ def aplicar_garch_cv(df: pd.DataFrame, meta: dict) -> pd.DataFrame:
     return df
 
 
-# ── 2b. Datos ─────────────────────────────────────────────────────────────────
+# ── 2b. GARCH para un fold específico (modo histórico) ────────────────────────
+_cache_df_garch: dict[int, pd.DataFrame] = {}   # {fold_num: df con GARCH del fold}
+
+def obtener_df_fold(df_base: pd.DataFrame, fold_info: dict) -> pd.DataFrame:
+    """
+    Retorna df con GARCH re-propagado usando los params del fold indicado.
+    Usa caché para no recomputar el mismo fold.
+    """
+    fold_num = fold_info["fold"]
+    if fold_num in _cache_df_garch:
+        return _cache_df_garch[fold_num]
+
+    garch_params = fold_info.get("garch", {})
+    if garch_params:
+        meta_fold = {"garch_produccion": {"series": garch_params,
+                                          "train_end": fold_info["train_end"]}}
+        df_fold = aplicar_garch_cv(df_base.copy(), meta_fold)
+    else:
+        df_fold = df_base.copy()
+
+    _cache_df_garch[fold_num] = df_fold
+    return df_fold
+
+
+# ── 2c. Datos ─────────────────────────────────────────────────────────────────
 def cargar_datos(banco: str, cols_feat: list[str], meta: dict = None):
     """
     Carga parquet, aplica GARCH del CV y calcula medianas con train_end del fold.
@@ -216,15 +287,52 @@ def predecir_fecha(df, fecha_origen, medianas, cols_num, cols_feat, modelos):
 
 
 # ── 4. Pre-computar todos los resultados ──────────────────────────────────────
-def precomputar(df, medianas, cols_num, cols_feat, modelos, fechas_validas):
-    fechas_sel = fechas_validas[::PASO_FECHAS]
-    total      = len(fechas_sel)
-    print(f"\nPre-computando {total} fechas...")
-    frames = []
+def precomputar(df, medianas, cols_num, cols_feat, modelos, fechas_validas,
+                meta=None, dir_modelos=None, banco=None):
+    fechas_sel      = fechas_validas[::PASO_FECHAS]
+    total           = len(fechas_sel)
+    folds_manifest  = (meta or {}).get("folds_manifest", []) if MODO_HISTORICO else []
+    usar_historico  = MODO_HISTORICO and bool(folds_manifest)
+
+    if usar_historico:
+        print(f"\nPre-computando {total} fechas [MODO HISTÓRICO — fold por fecha]...")
+    else:
+        print(f"\nPre-computando {total} fechas [modo producción — último fold]...")
+
+    frames          = []
+    fold_activo_num = None
 
     for i, f in enumerate(fechas_sel, 1):
         fecha_origen = pd.Timestamp(f)
-        res  = predecir_fecha(df, fecha_origen, medianas, cols_num, cols_feat, modelos)
+
+        if usar_historico:
+            fold_info = seleccionar_fold(fecha_origen, folds_manifest)
+            if fold_info is None:
+                # Fecha fuera de cualquier TEST: usar último fold (producción)
+                modelos_frame = modelos
+                df_frame      = df
+                medianas_frame = medianas
+            else:
+                fn = fold_info["fold"]
+                if fn != fold_activo_num:
+                    fold_activo_num = fn
+                try:
+                    modelos_frame = cargar_modelo_fold(fold_info, dir_modelos, banco)
+                except FileNotFoundError as e:
+                    print(f"  ⚠ {e} — usando último fold")
+                    modelos_frame = modelos
+                # GARCH y medianas del fold
+                df_frame = obtener_df_fold(df, fold_info)
+                train_end_fold = pd.Timestamp(fold_info["train_end"])
+                df_tr_fold = df_frame[df_frame["fecha_t"] <= train_end_fold]
+                medianas_frame = df_tr_fold[cols_num].median()
+        else:
+            modelos_frame  = modelos
+            df_frame       = df
+            medianas_frame = medianas
+
+        res  = predecir_fecha(df_frame, fecha_origen, medianas_frame,
+                              cols_num, cols_feat, modelos_frame)
         hs   = res["h"].values
         real = res["target"].values / 1e6
         mask = ~np.isnan(real)
@@ -250,7 +358,9 @@ def precomputar(df, medianas, cols_num, cols_feat, modelos, fechas_validas):
             "cum_q95": cum_q95, "cum_q99": cum_q99, "cum_r": cum_r,
         })
         if i % 5 == 0 or i == total:
-            print(f"  {i}/{total}  {fecha_origen.date()}")
+            fold_tag = (f" [fold {fold_activo_num}]" if usar_historico and fold_activo_num
+                        else "")
+            print(f"  {i}/{total}  {fecha_origen.date()}{fold_tag}")
 
     return frames
 
@@ -398,7 +508,8 @@ if __name__ == "__main__":
     modelos, cols_feat, _, meta = cargar_modelos(BANCO, _dir_mod)
     df, medianas, cols_num, fechas_validas = cargar_datos(BANCO, cols_feat, meta)
 
-    frames = precomputar(df, medianas, cols_num, cols_feat, modelos, fechas_validas)
+    frames = precomputar(df, medianas, cols_num, cols_feat, modelos, fechas_validas,
+                         meta=meta, dir_modelos=_dir_mod, banco=BANCO)
     _, ylim3 = rangos_globales(frames)
     ylim1 = (-3000, 3000)  # límite fijo flujo diario (MM USD)
 

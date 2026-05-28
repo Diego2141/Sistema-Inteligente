@@ -106,9 +106,12 @@ S_MIN_FACTOR     = 0.01
 S_MAX_FACTOR     = 1.0
 
 # ── Opciones de salida ────────────────────────────────────────────────────────
-BANCOS_A_EVALUAR     = ["SISTEMA"]
-GUARDAR_MODELO_FINAL = True
-COLS_EXCLUIR         = {"fecha_t", "banco", "target"}
+BANCOS_A_EVALUAR          = ["SISTEMA"]
+GUARDAR_MODELO_FINAL      = True
+# True  → guarda modelos de TODOS los folds (permite fan chart histórico sin lookahead)
+# False → solo guarda el último fold (comportamiento anterior)
+GUARDAR_MODELOS_TODOS_FOLDS = True
+COLS_EXCLUIR              = {"fecha_t", "banco", "target"}
 
 # ── Selector de modelo ────────────────────────────────────────────────────────
 MODELO_CV = "xgb"
@@ -1259,6 +1262,8 @@ def evaluar_banco(banco: str):
     importancias_folds = []
     modelos_ultimo    = None
     params_ultimo     = None
+    folds_manifest    = []   # registro de todos los folds para fan chart histórico
+    fecha_hoy         = pd.Timestamp.today().strftime("%Y%m%d")
 
     for fold in folds:
         t_fold = time.time()
@@ -1353,6 +1358,36 @@ def evaluar_banco(banco: str):
 
         modelos_ultimo = modelos
         params_ultimo  = best_params
+
+        # ── Guardar modelo del fold + manifest ───────────────────────────────
+        sfx = "lgbm_wfcv_v3" if MODELO_CV == "lgbm" else f"{MODELO_CV}_wfcv_v3"
+        ext = ".txt" if MODELO_CV == "lgbm" else ".json"
+        fold_num = fold["fold"]
+
+        # GARCH params de este fold para reproducción histórica
+        garch_fold = {}
+        try:
+            garch_fold = _extraer_garch_params_fold(df, fold["train_end"])
+        except Exception as _eg:
+            logger.warning(f"  Fold {fold_num}: no se pudo extraer GARCH — {_eg}")
+
+        if GUARDAR_MODELOS_TODOS_FOLDS:
+            for tau, model in modelos.items():
+                ruta_f = (DIR_MODELOS /
+                          f"{sfx}_{banco}_fold{fold_num:02d}_q{int(tau*100):02d}_{fecha_hoy}{ext}")
+                model.save_model(str(ruta_f))
+            logger.info(f"    Modelos fold {fold_num} guardados en {DIR_MODELOS.name}/")
+
+        folds_manifest.append({
+            "fold"       : fold_num,
+            "train_start": str(fold["train_start"].date()),
+            "train_end"  : str(fold["train_end"].date()),
+            "test_start" : str(fold["test_start"].date()),
+            "test_end"   : str(fold["test_end"].date()),
+            "fecha_hoy"  : fecha_hoy,
+            "garch"      : garch_fold,
+        })
+
         del X_train, y_train, X_val, y_val, X_test, y_test
         gc.collect()
 
@@ -1364,8 +1399,7 @@ def evaluar_banco(banco: str):
     df_val_m   = pd.DataFrame(resultados_val)
     df_por_h_t = pd.concat(por_h_test, ignore_index=True) if por_h_test else pd.DataFrame()
     df_por_h_v = pd.concat(por_h_val,  ignore_index=True) if por_h_val  else pd.DataFrame()
-
-    fecha_hoy = pd.Timestamp.today().strftime("%Y%m%d")
+    # fecha_hoy ya fue definido antes del loop para consistencia en nombres de archivo
 
     def _save(df, nombre):
         ruta = DIR_MODO / nombre
@@ -1446,6 +1480,8 @@ def evaluar_banco(banco: str):
             },
             "n_folds": len(folds), "quantiles": QUANTILES,
             "features": cols_feat, "best_params_ultimo_fold": params_ultimo,
+            "folds_manifest": folds_manifest,
+            "guardar_todos_folds": GUARDAR_MODELOS_TODOS_FOLDS,
         }
         ruta_meta = DIR_MODELOS / f"metadata_{MODELO_CV}_wfcv_v3_{banco}_{fecha_hoy}.json"
         with open(ruta_meta, "w", encoding="utf-8") as fh:
