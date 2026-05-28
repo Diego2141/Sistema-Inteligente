@@ -113,6 +113,12 @@ GUARDAR_MODELO_FINAL      = True
 GUARDAR_MODELOS_TODOS_FOLDS = True
 COLS_EXCLUIR              = {"fecha_t", "banco", "target"}
 
+# ── Límite de folds ───────────────────────────────────────────────────────────
+# None → usa todos los folds generados
+# N    → usa solo los primeros N folds (los más antiguos); deja el resto como OOS
+# Con expanding 511 y datos desde ~2012, N_MAX_FOLDS=8 deja 2023+ fuera de muestra
+N_MAX_FOLDS = 8
+
 # ── Selector de modelo ────────────────────────────────────────────────────────
 MODELO_CV = "xgb"
 # Opciones: "xgb" | "lgbm" | "xgb_qt"
@@ -1244,6 +1250,12 @@ def evaluar_banco(banco: str):
     if not folds:
         logger.error(f"  [{banco}] No se generaron folds")
         return None
+
+    if N_MAX_FOLDS is not None and len(folds) > N_MAX_FOLDS:
+        logger.info(f"  [{banco}] Limitando a {N_MAX_FOLDS} folds "
+                    f"(de {len(folds)} disponibles) — "
+                    f"datos desde {folds[N_MAX_FOLDS]['test_start'].date()} quedan OOS")
+        folds = folds[:N_MAX_FOLDS]
 
     logger.info(f"  [{banco}] {len(folds)} folds generados:")
     for f in folds:
