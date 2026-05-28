@@ -490,9 +490,14 @@ def entrenar_quantiles(X_tr, y_tr, best_params, quantiles, std_y):
 def predecir_y_corregir(modelos, X):
     dmat      = xgb.DMatrix(X)
     preds_raw = {tau: m.predict(dmat) for tau, m in modelos.items()}
+    # "mean" key is not a quantile — exclude from crossing correction
+    mean_pred = preds_raw.pop("mean", None)
     taus      = sorted(preds_raw)
     matrix    = np.sort(np.column_stack([preds_raw[t] for t in taus]), axis=1)
-    return {t: matrix[:, i] for i, t in enumerate(taus)}
+    result    = {t: matrix[:, i] for i, t in enumerate(taus)}
+    if mean_pred is not None:
+        result["mean"] = mean_pred
+    return result
 
 
 # ── LightGBM ──────────────────────────────────────────────────────────────────
@@ -627,6 +632,20 @@ def _entrenar_fold_xgb_qt(X_tr, y_tr, X_va, y_va, std_y, n_trials, fold_num):
             modelos[tau]     = model
             best_by_tau[tau] = bp
 
+    # Mean model — reg:squarederror with best Q50 hyperparameters as base
+    bp_mean = best_by_tau.get(0.50, list(best_by_tau.values())[0])
+    params_mean = {k: v for k, v in bp_mean.items() if k not in ("s", "n_estimators")}
+    params_mean.update({"objective": "reg:squarederror",
+                        "tree_method": "hist",
+                        "nthread": _XGB_NTHREAD,
+                        "seed": 42})
+    dtrain_mean = xgb.DMatrix(X_tr, label=y_tr)
+    modelos["mean"] = xgb.train(params_mean, dtrain_mean,
+                                num_boost_round=bp_mean["n_estimators"],
+                                verbose_eval=False)
+    logger.info(f"    [xgb_qt] mean fold {fold_num}: reg:squarederror "
+                f"(n_est={bp_mean['n_estimators']})")
+
     return modelos, best_by_tau.get(0.50, list(best_by_tau.values())[0])
 
 
@@ -740,13 +759,14 @@ def calcular_metricas_fold(preds, y_true, fold, periodo="test"):
         "periodo_metricas": periodo,
         "expanding"       : EXPANDING,
     }
-    for tau in sorted(preds.keys()):
+    q_preds = {t: v for t, v in preds.items() if t != "mean"}
+    for tau in sorted(q_preds.keys()):
         row[f"pinball_q{int(tau*100):02d}"] = round(
-            pinball_loss(y_true, preds[tau], tau), 2)
-    if {0.05, 0.95}.issubset(preds):
-        row["coverage_90"] = round(coverage(y_true, preds[0.05], preds[0.95]), 4)
-        row["winkler_90"]  = round(winkler_score(y_true, preds[0.05], preds[0.95]), 2)
-    row["crps_approx"] = round(crps_approx(y_true, preds), 2)
+            pinball_loss(y_true, q_preds[tau], tau), 2)
+    if {0.05, 0.95}.issubset(q_preds):
+        row["coverage_90"] = round(coverage(y_true, q_preds[0.05], q_preds[0.95]), 4)
+        row["winkler_90"]  = round(winkler_score(y_true, q_preds[0.05], q_preds[0.95]), 2)
+    row["crps_approx"] = round(crps_approx(y_true, q_preds), 2)
     return row
 
 
@@ -757,12 +777,13 @@ def calcular_metricas_por_h(preds, y_true, h_arr, fold_num):
         if mask.sum() < 5:
             continue
         row = {"fold": fold_num, "h": int(h)}
-        for tau in sorted(preds.keys()):
+        q_preds = {t: v for t, v in preds.items() if t != "mean"}
+        for tau in sorted(q_preds.keys()):
             row[f"pinball_q{int(tau*100):02d}"] = round(
-                pinball_loss(y_true[mask], preds[tau][mask], tau), 2)
-        if {0.05, 0.95}.issubset(preds):
+                pinball_loss(y_true[mask], q_preds[tau][mask], tau), 2)
+        if {0.05, 0.95}.issubset(q_preds):
             row["coverage_90"] = round(
-                coverage(y_true[mask], preds[0.05][mask], preds[0.95][mask]), 4)
+                coverage(y_true[mask], q_preds[0.05][mask], q_preds[0.95][mask]), 4)
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -1417,8 +1438,12 @@ def evaluar_banco(banco: str):
 
         if GUARDAR_MODELOS_TODOS_FOLDS:
             for tau, model in modelos.items():
-                ruta_f = (DIR_MODELOS /
-                          f"{sfx}_{banco}_fold{fold_num:02d}_q{int(tau*100):02d}_{fecha_hoy}{ext}")
+                if tau == "mean":
+                    ruta_f = (DIR_MODELOS /
+                              f"{sfx}_{banco}_fold{fold_num:02d}_mean_{fecha_hoy}{ext}")
+                else:
+                    ruta_f = (DIR_MODELOS /
+                              f"{sfx}_{banco}_fold{fold_num:02d}_q{int(tau*100):02d}_{fecha_hoy}{ext}")
                 model.save_model(str(ruta_f))
             logger.info(f"    Modelos fold {fold_num} guardados en {DIR_MODELOS.name}/")
 
@@ -1489,7 +1514,10 @@ def evaluar_banco(banco: str):
         for tau, model in modelos_ultimo.items():
             sfx = "lgbm_wfcv_v3" if MODELO_CV == "lgbm" else f"{MODELO_CV}_wfcv_v3"
             ext = ".txt" if MODELO_CV == "lgbm" else ".json"
-            ruta_m = DIR_MODELOS / f"{sfx}_{banco}_q{int(tau*100):02d}_{fecha_hoy}{ext}"
+            if tau == "mean":
+                ruta_m = DIR_MODELOS / f"{sfx}_{banco}_mean_{fecha_hoy}{ext}"
+            else:
+                ruta_m = DIR_MODELOS / f"{sfx}_{banco}_q{int(tau*100):02d}_{fecha_hoy}{ext}"
             model.save_model(str(ruta_m))
         metadata = {
             "banco": banco, "modelo": f"{MODELO_CV}_wfcv_v3",

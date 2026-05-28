@@ -109,8 +109,20 @@ def cargar_modelos(banco: str, dir_modelos: Path):
         booster.load_model(str(ruta))
         modelos[tau] = booster
 
+    # Mean model (optional — present only for xgb_qt runs with mean training)
+    if cv_naming:
+        ruta_mean = dir_modelos / f"xgb_qt_wfcv_v3_{banco}_mean_{fecha}.json"
+    else:
+        ruta_mean = dir_modelos / f"xgb_qt_{banco}_mean_{fecha}.json"
+    if ruta_mean.exists():
+        b_mean = xgb.Booster()
+        b_mean.load_model(str(ruta_mean))
+        modelos["mean"] = b_mean
+
     conv = "CV (wfcv_v3)" if cv_naming else "legacy"
-    print(f"Modelo XGBoost QT cargado [{conv}]: {metas[0].name}  ({len(cols_feat)} features)")
+    has_mean = "mean" in modelos
+    print(f"Modelo XGBoost QT cargado [{conv}]: {metas[0].name}  ({len(cols_feat)} features)"
+          f"{'  (+ media)' if has_mean else ''}")
     if "garch_produccion" in meta:
         gp = meta["garch_produccion"]
         print(f"  GARCH producción: train_end={gp['train_end']}  "
@@ -143,8 +155,16 @@ def cargar_modelo_fold(fold_info: dict, dir_modelos: Path, banco: str) -> dict:
         b.load_model(str(ruta))
         modelos_fold[tau_key / 100] = b
 
+    # Mean model (optional — may not exist for older runs)
+    ruta_mean = dir_modelos / f"xgb_qt_wfcv_v3_{banco}_fold{fold_num:02d}_mean_{fecha}.json"
+    if ruta_mean.exists():
+        b_mean = xgb.Booster()
+        b_mean.load_model(str(ruta_mean))
+        modelos_fold["mean"] = b_mean
+
     _cache_modelos_fold[fold_num] = modelos_fold
-    print(f"  [fold {fold_num}] modelos QT cargados  "
+    has_mean = "mean" in modelos_fold
+    print(f"  [fold {fold_num}] modelos QT cargados{'  (+ media)' if has_mean else ''}  "
           f"(test {fold_info['test_start']} → {fold_info['test_end']})")
     return modelos_fold
 
@@ -291,9 +311,14 @@ def predecir_fecha(df, fecha_origen, medianas, cols_num, cols_feat, modelos):
     dmat   = xgb.DMatrix(df_f[cols_x].copy())
 
     res = df_f[["h", "target"]].copy().reset_index(drop=True)
+    mean_booster = modelos.get("mean", None)
     for tau, booster in modelos.items():
-        res[f"q{int(tau*100):02d}"] = booster.predict(dmat)
+        if tau == "mean":
+            res["mean"] = booster.predict(dmat)
+        else:
+            res[f"q{int(tau*100):02d}"] = booster.predict(dmat)
 
+    # Enforce quantile non-crossing (mean excluded)
     q_cols = sorted([c for c in res.columns if c.startswith("q")])
     res[q_cols] = np.sort(res[q_cols].values, axis=1)
     return res
@@ -357,7 +382,7 @@ def precomputar(df, medianas, cols_num, cols_feat, modelos, fechas_validas,
         cum_r   = np.where(mask, np.nancumsum(np.where(mask, real, 0)), np.nan)
         cum_r[~mask] = np.nan
 
-        frames.append({
+        frame_data = {
             "fecha": fecha_origen,
             "hs": hs, "real": real, "mask": mask, "h_max_r": h_max_r,
             "q01": res["q01"].values / 1e6,
@@ -367,7 +392,11 @@ def precomputar(df, medianas, cols_num, cols_feat, modelos, fechas_validas,
             "q99": res["q99"].values / 1e6,
             "cum_q01": cum_q01, "cum_q05": cum_q05, "cum_q50": cum_q50,
             "cum_q95": cum_q95, "cum_q99": cum_q99, "cum_r": cum_r,
-        })
+        }
+        if "mean" in res.columns:
+            frame_data["mean"]     = res["mean"].values / 1e6
+            frame_data["cum_mean"] = np.cumsum(res["mean"].values / 1e6)
+        frames.append(frame_data)
         if i % 5 == 0 or i == total:
             fold_tag = (f" [fold {fold_activo_num}]" if usar_historico and fold_activo_num
                         else "")
@@ -412,20 +441,40 @@ def animar(frames, ylim1, ylim3, banco):
     ax3.set_ylabel("Flujo neto acumulado (MM USD)", fontsize=11)
     ax3.set_xlabel("Horizonte h (días hábiles desde t)", fontsize=11)
 
-    legend_diario = [
-        Patch(facecolor=COLOR, alpha=0.12, label="Q01–Q99 (98%)"),
-        Patch(facecolor=COLOR, alpha=0.40, label="Q05–Q95 (90%)"),
-        Line2D([0], [0], color="crimson", lw=2,   label="Mediana Q50"),
-        Line2D([0], [0], color="black",   lw=2,   label="Realizado (D−R)"),
-        Line2D([0], [0], color="red",     lw=1.2, ls="--", alpha=0.7,
-               label="Último dato realizado"),
-    ]
-    legend_acum = [
-        Patch(facecolor=COLOR, alpha=0.12, label="Q01–Q99 acum."),
-        Patch(facecolor=COLOR, alpha=0.40, label="Q05–Q95 acum."),
-        Line2D([0], [0], color="crimson", lw=2, label="Mediana acumulada Q50"),
-        Line2D([0], [0], color="black",   lw=2, label="Realizado acumulado"),
-    ]
+    has_mean = "mean" in frames[0]
+
+    if has_mean:
+        legend_diario = [
+            Patch(facecolor=COLOR, alpha=0.12, label="Q01–Q99 (98%)"),
+            Patch(facecolor=COLOR, alpha=0.40, label="Q05–Q95 (90%)"),
+            Line2D([0], [0], color="crimson", lw=2,   ls="--", label="Mediana Q50"),
+            Line2D([0], [0], color="darkred", lw=2.5, label="Media proyectada"),
+            Line2D([0], [0], color="black",   lw=2,   label="Realizado (D−R)"),
+            Line2D([0], [0], color="red",     lw=1.2, ls="--", alpha=0.7,
+                   label="Último dato realizado"),
+        ]
+        legend_acum = [
+            Patch(facecolor=COLOR, alpha=0.12, label="Q01–Q99 acum."),
+            Patch(facecolor=COLOR, alpha=0.40, label="Q05–Q95 acum."),
+            Line2D([0], [0], color="crimson", lw=2,   ls="--", label="Mediana acum. Q50"),
+            Line2D([0], [0], color="darkred", lw=2.5, label="Media acumulada"),
+            Line2D([0], [0], color="black",   lw=2,   label="Realizado acumulado"),
+        ]
+    else:
+        legend_diario = [
+            Patch(facecolor=COLOR, alpha=0.12, label="Q01–Q99 (98%)"),
+            Patch(facecolor=COLOR, alpha=0.40, label="Q05–Q95 (90%)"),
+            Line2D([0], [0], color="crimson", lw=2,   label="Mediana Q50"),
+            Line2D([0], [0], color="black",   lw=2,   label="Realizado (D−R)"),
+            Line2D([0], [0], color="red",     lw=1.2, ls="--", alpha=0.7,
+                   label="Último dato realizado"),
+        ]
+        legend_acum = [
+            Patch(facecolor=COLOR, alpha=0.12, label="Q01–Q99 acum."),
+            Patch(facecolor=COLOR, alpha=0.40, label="Q05–Q95 acum."),
+            Line2D([0], [0], color="crimson", lw=2, label="Mediana acumulada Q50"),
+            Line2D([0], [0], color="black",   lw=2, label="Realizado acumulado"),
+        ]
 
     title = fig.suptitle("", fontsize=12, fontweight="bold", y=0.995)
 
@@ -448,10 +497,14 @@ def animar(frames, ylim1, ylim3, banco):
         ax1.fill_between(hs, f["q05"], f["q95"], alpha=0.28, color=COLOR)
         ax1.plot(hs, f["q05"], color=COLOR, lw=1.0, ls=":", alpha=0.7)
         ax1.plot(hs, f["q95"], color=COLOR, lw=1.0, ls=":", alpha=0.7)
-        ax1.plot(hs, f["q50"], color="crimson", lw=2.0, zorder=5)
+        if has_mean and "mean" in f:
+            ax1.plot(hs, f["q50"], color="crimson", lw=1.5, ls="--", zorder=5, alpha=0.8)
+            ax1.plot(hs, f["mean"], color="darkred", lw=2.5, zorder=6)
+        else:
+            ax1.plot(hs, f["q50"], color="crimson", lw=2.0, zorder=5)
         if f["mask"].any():
-            ax1.plot(hs[f["mask"]], f["real"][f["mask"]], color="black", lw=2, zorder=6)
-            ax1.scatter(hs[f["mask"]], f["real"][f["mask"]], color="black", s=18, zorder=7)
+            ax1.plot(hs[f["mask"]], f["real"][f["mask"]], color="black", lw=2, zorder=7)
+            ax1.scatter(hs[f["mask"]], f["real"][f["mask"]], color="black", s=18, zorder=8)
         if f["h_max_r"] > 0:
             ax1.axvline(f["h_max_r"], color="red", lw=1.2, ls="--", alpha=0.7)
         ax1.legend(handles=legend_diario, loc="upper right", fontsize=9, framealpha=0.9)
@@ -461,10 +514,14 @@ def animar(frames, ylim1, ylim3, banco):
         ax3.fill_between(hs, f["cum_q05"], f["cum_q95"], alpha=0.28, color=COLOR)
         ax3.plot(hs, f["cum_q05"], color=COLOR, lw=1.0, ls=":", alpha=0.7)
         ax3.plot(hs, f["cum_q95"], color=COLOR, lw=1.0, ls=":", alpha=0.7)
-        ax3.plot(hs, f["cum_q50"], color="crimson", lw=2.0, zorder=5)
+        if has_mean and "cum_mean" in f:
+            ax3.plot(hs, f["cum_q50"], color="crimson", lw=1.5, ls="--", zorder=5, alpha=0.8)
+            ax3.plot(hs, f["cum_mean"], color="darkred", lw=2.5, zorder=6)
+        else:
+            ax3.plot(hs, f["cum_q50"], color="crimson", lw=2.0, zorder=5)
         if f["mask"].any():
-            ax3.plot(hs[f["mask"]], f["cum_r"][f["mask"]], color="black", lw=2, zorder=6)
-            ax3.scatter(hs[f["mask"]], f["cum_r"][f["mask"]], color="black", s=18, zorder=7)
+            ax3.plot(hs[f["mask"]], f["cum_r"][f["mask"]], color="black", lw=2, zorder=7)
+            ax3.scatter(hs[f["mask"]], f["cum_r"][f["mask"]], color="black", s=18, zorder=8)
         if f["h_max_r"] > 0:
             ax3.axvline(f["h_max_r"], color="red", lw=1.2, ls="--", alpha=0.7)
         ax3.legend(handles=legend_acum, loc="upper left", fontsize=9, framealpha=0.9)
