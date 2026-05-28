@@ -125,7 +125,8 @@ FANCHART_N_SNAPSHOTS = 4   # 1 cada ~3 meses para TEST de 1 año
 
 # ── Rutas de salida ───────────────────────────────────────────────────────────
 _modo           = "expanding" if EXPANDING else "rolling"
-DIR_MODO        = DIR_OUTPUT / f"{MODELO_CV}_{_modo}"
+_ventanas       = f"{VENTANA_TRAIN_AÑOS}{VENTANA_VAL_AÑOS}{VENTANA_TEST_AÑOS}"
+DIR_MODO        = DIR_OUTPUT / f"{MODELO_CV}_{_modo}_{_ventanas}"
 DIR_MODELOS     = DIR_MODO / "modelos"
 DIR_PLOTS       = DIR_MODO / "plots"
 DIR_FANCHARTS   = DIR_MODO / "fancharts_test"
@@ -850,6 +851,177 @@ def graficar_hiperparametros_wfcv(df_test_m, banco):
     logger.info(f"  Gráfico hiperparámetros: {nombre}")
 
 
+def _extraer_importancias(modelos, cols_feat):
+    """
+    Devuelve {feature: gain_promedio_entre_cuantiles} para XGBoost o LightGBM.
+    Los features sin importancia en algún cuantil reciben gain=0.
+    """
+    acum = {f: 0.0 for f in cols_feat}
+    n    = 0
+    for tau, model in modelos.items():
+        if MODELO_CV == "lgbm" and _LGBM_OK:
+            names  = model.feature_name()
+            gains  = model.feature_importance(importance_type="gain")
+            imp    = dict(zip(names, gains.astype(float)))
+        else:
+            # xgb.Booster: solo devuelve features con importancia > 0
+            imp = model.get_score(importance_type="gain")
+
+        for feat in cols_feat:
+            acum[feat] = acum[feat] + float(imp.get(feat, 0.0))
+        n += 1
+
+    if n > 0:
+        acum = {f: v / n for f, v in acum.items()}
+    return acum
+
+
+def graficar_importancia_por_fold(
+    importancias_folds: list,
+    cols_feat: list,
+    banco: str,
+):
+    """
+    Genera dos gráficos a partir de la lista de importancias por fold:
+
+    1. Heatmap (Features × Folds) — ganancia normalizada por fold.
+       Verde intenso = feature dominante en ese fold; blanco/amarillo = marginal.
+       Útil para detectar features consistentes vs. régimen-dependientes.
+
+    2. Rank-stability (Top-10) — muestra cómo cambia el ranking de las features
+       más importantes entre folds.  Línea plana = feature robusto;
+       línea con saltos grandes = feature régimen-dependiente.
+
+    También guarda un CSV con las ganancias brutas por fold.
+    """
+    if not importancias_folds:
+        return
+
+    # ── Pivot: filas = feature, columnas = fold ───────────────────────────────
+    registros = []
+    for item in importancias_folds:
+        fold_id = item["fold"]
+        imp     = item["importancias"]
+        total   = sum(imp.values()) or 1.0
+        for feat, gain in imp.items():
+            registros.append({
+                "fold"     : fold_id,
+                "feature"  : feat,
+                "gain_norm": gain / total,
+                "gain_raw" : gain,
+            })
+
+    df_imp = pd.DataFrame(registros)
+    if df_imp.empty:
+        return
+
+    pivot_norm = df_imp.pivot_table(
+        index="feature", columns="fold", values="gain_norm", aggfunc="mean"
+    ).fillna(0.0)
+    pivot_raw  = df_imp.pivot_table(
+        index="feature", columns="fold", values="gain_raw",  aggfunc="mean"
+    ).fillna(0.0)
+
+    # Ordenar por importancia media descendente
+    pivot_norm["_mean"] = pivot_norm.mean(axis=1)
+    pivot_norm = pivot_norm.sort_values("_mean", ascending=False).drop(columns=["_mean"])
+    pivot_raw  = pivot_raw.loc[pivot_norm.index]  # mismo orden
+
+    TOP_N  = min(25, len(pivot_norm))
+    modo   = "EXPANDING" if EXPANDING else "ROLLING"
+    folds  = sorted(pivot_norm.columns.tolist())
+
+    # ── Gráfico 1: Heatmap ────────────────────────────────────────────────────
+    top_feats_h = pivot_norm.iloc[:TOP_N]
+    fig_h, ax_h = plt.subplots(
+        figsize=(max(8, len(folds) * 1.2), max(6, TOP_N * 0.45))
+    )
+
+    im = ax_h.imshow(
+        top_feats_h.values, aspect="auto", cmap="YlOrRd",
+        vmin=0.0, vmax=max(top_feats_h.values.max() * 1.05, 1e-9),
+        interpolation="nearest",
+    )
+    plt.colorbar(im, ax=ax_h, label="Ganancia normalizada por fold")
+
+    ax_h.set_yticks(range(TOP_N))
+    ax_h.set_yticklabels(top_feats_h.index.tolist(), fontsize=8)
+    ax_h.set_xticks(range(len(folds)))
+    ax_h.set_xticklabels([f"F{c}" for c in folds], fontsize=9)
+    ax_h.set_xlabel("Fold", fontsize=10)
+    ax_h.set_ylabel("Feature", fontsize=10)
+    ax_h.set_title(
+        f"Importancia de features por fold — {banco} [{modo}]\n"
+        f"Top {TOP_N} features · ganancia XGBoost normalizada por fold "
+        f"(TRAIN {VENTANA_TRAIN_AÑOS}yr / VAL {VENTANA_VAL_AÑOS}yr / TEST {VENTANA_TEST_AÑOS}yr)",
+        fontweight="bold", fontsize=11,
+    )
+
+    # Anotar valores en celdas cuando la tabla es pequeña
+    if TOP_N <= 20 and len(folds) <= 12:
+        for i in range(TOP_N):
+            for j in range(len(folds)):
+                val = top_feats_h.values[i, j]
+                ax_h.text(
+                    j, i, f"{val:.3f}", ha="center", va="center",
+                    fontsize=6.5,
+                    color="white" if val > top_feats_h.values.max() * 0.6 else "black",
+                )
+
+    plt.tight_layout()
+    nombre_h = DIR_PLOTS / f"wfcv_v3_importancia_heatmap_{banco}.png"
+    plt.savefig(nombre_h, dpi=150, bbox_inches="tight")
+    plt.close(fig_h)
+    logger.info(f"  Heatmap importancia: {nombre_h.name}")
+
+    # ── Gráfico 2: Rank-stability ─────────────────────────────────────────────
+    TOP_RANK   = min(10, len(pivot_norm))
+    top_feats_r = pivot_norm.iloc[:TOP_RANK].index.tolist()
+
+    # Rango en cada fold (1 = mayor ganancia) sobre TODOS los features
+    rank_data = {feat: [] for feat in top_feats_r}
+    for fold_id in folds:
+        col_vals = pivot_norm[fold_id]
+        ranked   = col_vals.rank(ascending=False, method="min")
+        for feat in top_feats_r:
+            rank_data[feat].append(int(ranked.get(feat, len(pivot_norm) + 1)))
+
+    fig_r, ax_r = plt.subplots(figsize=(max(7, len(folds) * 1.2), 5))
+    cmap_r = plt.cm.tab10
+    for i, feat in enumerate(top_feats_r):
+        ax_r.plot(
+            folds, rank_data[feat], "o-",
+            lw=2, ms=7, color=cmap_r(i / max(TOP_RANK, 1)),
+            label=feat, alpha=0.85,
+        )
+
+    ax_r.invert_yaxis()   # rango 1 arriba
+    ax_r.yaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+    ax_r.set_xticks(folds)
+    ax_r.set_xticklabels([f"Fold {f}" for f in folds], fontsize=9)
+    ax_r.set_xlabel("Fold", fontsize=10)
+    ax_r.set_ylabel("Ranking (1 = mayor ganancia)", fontsize=10)
+    ax_r.set_title(
+        f"Estabilidad de ranking — Top {TOP_RANK} features — {banco} [{modo}]\n"
+        f"Línea plana = feature robusto · saltos grandes = régimen-dependiente",
+        fontweight="bold", fontsize=10,
+    )
+    ax_r.legend(fontsize=8, bbox_to_anchor=(1.01, 1), loc="upper left", framealpha=0.85)
+    ax_r.grid(True, alpha=0.25)
+    plt.tight_layout()
+    nombre_r = DIR_PLOTS / f"wfcv_v3_importancia_ranking_{banco}.png"
+    plt.savefig(nombre_r, dpi=150, bbox_inches="tight")
+    plt.close(fig_r)
+    logger.info(f"  Ranking importancia: {nombre_r.name}")
+
+    # ── CSV importancias brutas ────────────────────────────────────────────────
+    df_csv = pivot_raw.copy().reset_index()
+    df_csv.columns.name = None
+    ruta_csv = DIR_MODO / f"wfcv_v3_importancias_{banco}.csv"
+    df_csv.to_csv(ruta_csv, index=False)
+    logger.info(f"  CSV importancias: {ruta_csv.name}")
+
+
 def graficar_fanchart_test_fold(
     preds_test: dict,
     y_test: np.ndarray,
@@ -1021,12 +1193,13 @@ def evaluar_banco(banco: str):
             f"TEST {f['test_start'].date()} → {f['test_end'].date()}"
         )
 
-    resultados_test  = []
-    resultados_val   = []
-    por_h_test       = []
-    por_h_val        = []
-    modelos_ultimo   = None
-    params_ultimo    = None
+    resultados_test   = []
+    resultados_val    = []
+    por_h_test        = []
+    por_h_val         = []
+    importancias_folds = []
+    modelos_ultimo    = None
+    params_ultimo     = None
 
     for fold in folds:
         t_fold = time.time()
@@ -1054,6 +1227,13 @@ def evaluar_banco(banco: str):
             X_train, y_train, X_val, y_val, std_y,
             N_TRIALS_OPTUNA, fold["fold"]
         )
+
+        # Importancia de features (promedio entre cuantiles)
+        try:
+            imp = _extraer_importancias(modelos, cols_feat)
+            importancias_folds.append({"fold": fold["fold"], "importancias": imp})
+        except Exception as _e_imp:
+            logger.warning(f"    Importancia fold {fold['fold']}: {_e_imp}")
 
         preds_test = predecir_fold(modelos, X_test)
         preds_val  = predecir_fold(modelos, X_val)
@@ -1154,6 +1334,7 @@ def evaluar_banco(banco: str):
     graficar_cobertura_por_h(df_por_h_t, tag, "test")
     graficar_cobertura_por_h(df_por_h_v, tag, "val")
     graficar_hiperparametros_wfcv(df_test_m, tag)
+    graficar_importancia_por_fold(importancias_folds, cols_feat, tag)
 
     if GUARDAR_MODELO_FINAL and modelos_ultimo is not None:
         ultimo = folds[-1]
