@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from __future__ import annotations
 import os
 os.environ["PATH"] += r";H:\DPINV\CARPETAS PERSONALES\DIEGO\2. Python\Paquetes python\ffmpeg-8.1.1-essentials_build\ffmpeg-8.1.1-essentials_build\bin"
 """
