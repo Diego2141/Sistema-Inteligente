@@ -122,8 +122,9 @@ COLS_EXCLUIR              = {"fecha_t", "banco", "target"}
 # ── Límite de folds ───────────────────────────────────────────────────────────
 # None → usa todos los folds generados
 # N    → usa solo los primeros N folds (los más antiguos); deja el resto como OOS
-# Con expanding 511 y datos desde ~2012, N_MAX_FOLDS=8 deja 2023+ fuera de muestra
-N_MAX_FOLDS = 8
+# Expanding=True: 9 folds (fold 9 incluye test 2023+)
+# Expanding=False (rolling): 8 folds
+N_MAX_FOLDS = 9 if EXPANDING else 8
 
 # ── Selector de modelo ────────────────────────────────────────────────────────
 MODELO_CV = "xgb"
