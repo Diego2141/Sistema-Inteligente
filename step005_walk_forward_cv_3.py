@@ -95,7 +95,7 @@ EXPANDING = True
 # ── Tamaños de ventana ────────────────────────────────────────────────────────
 # EXPANDING=True : VENTANA_TRAIN_AÑOS es el mínimo inicial; crece PASO_AÑOS/fold
 # EXPANDING=False: VENTANA_TRAIN_AÑOS es el tamaño fijo (igual a v2)
-VENTANA_TRAIN_AÑOS  = 5.5    # años de TRAIN iniciales — con datos desde 2010-01 y PASO=1yr, fold 8 queda train_end=2022-07 (idéntico a step004)
+VENTANA_TRAIN_AÑOS  = 5      # años de TRAIN iniciales / fijos
 VENTANA_VAL_AÑOS    = 0.5    # años de VAL (solo Optuna) — 6 meses, igual que step004
 VENTANA_TEST_AÑOS   = 1      # años de TEST (solo métricas OOS)
 PASO_AÑOS           = 1      # desplazamiento / crecimiento entre folds
@@ -178,11 +178,13 @@ SOLO_FOLDS_MANUALES = False
 _modo           = "expanding" if EXPANDING else "rolling"
 _ventanas       = f"{VENTANA_TRAIN_AÑOS}{VENTANA_VAL_AÑOS}{VENTANA_TEST_AÑOS}"
 DIR_MODO        = DIR_OUTPUT / f"{MODELO_CV}_{_modo}_{_ventanas}"
-DIR_MODELOS     = DIR_MODO / "modelos"
-DIR_PLOTS       = DIR_MODO / "plots"
-DIR_FANCHARTS   = DIR_MODO / "fancharts_test"
+DIR_MODELOS            = DIR_MODO / "modelos"
+DIR_PLOTS              = DIR_MODO / "plots"
+DIR_FANCHARTS          = DIR_MODO / "fancharts_test"
+DIR_FANCHARTS_MANUALES = DIR_MODO / "fancharts_manuales"   # plots de FOLDS_MANUALES
 
-for _d in (DIR_OUTPUT, DIR_MODO, DIR_MODELOS, DIR_PLOTS, DIR_FANCHARTS):
+for _d in (DIR_OUTPUT, DIR_MODO, DIR_MODELOS, DIR_PLOTS,
+           DIR_FANCHARTS, DIR_FANCHARTS_MANUALES):
     _d.mkdir(parents=True, exist_ok=True)
 
 
@@ -1234,6 +1236,7 @@ def graficar_fanchart_test_fold(
     fold: dict,
     banco: str,
     preds_overlay: dict | None = None,   # step004 predictions para comparación
+    dir_out: Path | None = None,         # carpeta de salida; None → DIR_FANCHARTS
 ):
     """
     Fan chart TEST out-of-sample para un fold.
@@ -1360,7 +1363,8 @@ def graficar_fanchart_test_fold(
         ax.set_visible(False)
 
     plt.tight_layout()
-    nombre = DIR_FANCHARTS / f"fanchart_test_fold{fold['fold']:02d}_{banco}.png"
+    _dir = dir_out if dir_out is not None else DIR_FANCHARTS
+    nombre = _dir / f"fanchart_test_fold{fold['fold']:02d}_{banco}.png"
     plt.savefig(nombre, dpi=150, bbox_inches="tight")
     plt.close(fig)
     logger.info(f"  Fan chart TEST fold {fold['fold']}: {nombre.name}")
@@ -1656,12 +1660,13 @@ def evaluar_banco(banco: str):
                 f"({row_test['tiempo_min']} min)"
             )
 
-        # Fan charts TEST (una figura por fold con N snapshots)
-        # Predicciones step004 para comparación (usa mismas X_test, GARCH distinto)
-        preds_s4 = predecir_y_corregir(modelos_s4, X_test) if modelos_s4 is not None else None
+        # Fan charts TEST — folds manuales van a carpeta separada
+        preds_s4  = predecir_y_corregir(modelos_s4, X_test) if modelos_s4 is not None else None
+        _fanchart_dir = DIR_FANCHARTS_MANUALES if fold.get("_manual") else None
         graficar_fanchart_test_fold(
             preds_test, y_test.values, h_test, fechas_t_test, fold, banco,
             preds_overlay=preds_s4,
+            dir_out=_fanchart_dir,
         )
 
         modelos_ultimo = modelos
