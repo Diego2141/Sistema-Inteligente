@@ -95,7 +95,7 @@ EXPANDING = True
 # ── Tamaños de ventana ────────────────────────────────────────────────────────
 # EXPANDING=True : VENTANA_TRAIN_AÑOS es el mínimo inicial; crece PASO_AÑOS/fold
 # EXPANDING=False: VENTANA_TRAIN_AÑOS es el tamaño fijo (igual a v2)
-VENTANA_TRAIN_AÑOS  = 5      # años de TRAIN iniciales / fijos
+VENTANA_TRAIN_AÑOS  = 5.5    # años de TRAIN iniciales — con datos desde 2010-01 y PASO=1yr, fold 8 queda train_end=2022-07 (idéntico a step004)
 VENTANA_VAL_AÑOS    = 0.5    # años de VAL (solo Optuna) — 6 meses, igual que step004
 VENTANA_TEST_AÑOS   = 1      # años de TEST (solo métricas OOS)
 PASO_AÑOS           = 1      # desplazamiento / crecimiento entre folds
