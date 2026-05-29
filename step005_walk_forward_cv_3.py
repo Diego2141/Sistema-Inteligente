@@ -154,6 +154,26 @@ _s4_carpeta, _s4_subcarpeta, _s4_prefijo = _STEP004_SUFIJO.get(
 )
 DIR_MODELOS_STEP004 = BASE_SISTEMA / "2. Output" / _s4_carpeta / _s4_subcarpeta
 
+# ── Folds manuales — comparación directa con step004 ─────────────────────────
+# Lista de folds con fechas exactas, añadidos a (o reemplazando) los folds auto.
+# Permite replicar el split de step004 sin embargo entre TRAIN y VAL.
+# Descomentar el ejemplo para activar el fold equivalente a step004:
+FOLDS_MANUALES: list[dict] = []
+# FOLDS_MANUALES = [
+#     {
+#         "train_start": "2015-01-02",   # inicio real de los datos
+#         "train_end"  : "2022-06-30",   # mismo corte que step004 (CORTE_VAL − 1d)
+#         "val_start"  : "2022-07-01",   # sin embargo, igual que step004
+#         "val_end"    : "2023-01-02",   # CORTE_TEST − 1d
+#         "test_start" : "2023-01-03",   # mismo CORTE_TEST que step004
+#         "test_end"   : "2024-06-30",   # hasta donde haya datos
+#     }
+# ]
+
+# True  → corre SOLO los folds manuales (omite los generados automáticamente)
+# False → añade los folds manuales al final de los generados
+SOLO_FOLDS_MANUALES = False
+
 # ── Rutas de salida ───────────────────────────────────────────────────────────
 _modo           = "expanding" if EXPANDING else "rolling"
 _ventanas       = f"{VENTANA_TRAIN_AÑOS}{VENTANA_VAL_AÑOS}{VENTANA_TEST_AÑOS}"
@@ -415,6 +435,49 @@ def generar_folds(
         })
         fold_idx += 1
 
+    return folds
+
+
+def resolver_folds_manuales(
+    folds_cfg: list[dict],
+    fechas_disponibles,
+    n_folds_previos: int,
+) -> list[dict]:
+    """
+    Convierte la lista FOLDS_MANUALES en dicts compatibles con el pipeline.
+
+    Cada entrada de folds_cfg debe tener:
+      train_start, train_end, val_start, val_end, test_start, test_end  (str o Timestamp)
+
+    Los fold numbers se asignan como n_folds_previos+1, +2, ...
+    El campo "_manual": True permite identificarlos en los logs.
+    """
+    folds = []
+    for i, cfg in enumerate(folds_cfg):
+        ts = pd.Timestamp(cfg["train_start"])
+        te = pd.Timestamp(cfg["train_end"])
+        vs = pd.Timestamp(cfg["val_start"])
+        ve = pd.Timestamp(cfg["val_end"])
+        xs = pd.Timestamp(cfg["test_start"])
+        xe = pd.Timestamp(cfg["test_end"])
+
+        n_train = int(((fechas_disponibles >= ts) & (fechas_disponibles <= te)).sum())
+        n_val   = int(((fechas_disponibles >= vs) & (fechas_disponibles <  xs)).sum())
+        n_test  = int(((fechas_disponibles >= xs) & (fechas_disponibles <= xe)).sum())
+
+        folds.append({
+            "fold"           : n_folds_previos + i + 1,
+            "train_start"    : ts,
+            "train_end"      : te,
+            "val_start"      : vs,
+            "val_end"        : ve,
+            "test_start"     : xs,
+            "test_end"       : xe,
+            "n_train_fechas" : n_train,
+            "n_val_fechas"   : n_val,
+            "n_test_fechas"  : n_test,
+            "_manual"        : True,
+        })
     return folds
 
 
@@ -1443,11 +1506,24 @@ def evaluar_banco(banco: str):
                     f"datos desde {folds[N_MAX_FOLDS]['test_start'].date()} quedan OOS")
         folds = folds[:N_MAX_FOLDS]
 
+    # Folds manuales (p.ej. réplica exacta del split de step004)
+    if FOLDS_MANUALES:
+        n_previos = 0 if SOLO_FOLDS_MANUALES else len(folds)
+        folds_man = resolver_folds_manuales(FOLDS_MANUALES, fechas, n_previos)
+        if SOLO_FOLDS_MANUALES:
+            folds = folds_man
+            logger.info(f"  [{banco}] Modo SOLO_FOLDS_MANUALES — "
+                        f"{len(folds_man)} fold(s) manual(es) en lugar de los automáticos")
+        else:
+            folds = folds + folds_man
+            logger.info(f"  [{banco}] +{len(folds_man)} fold(s) manual(es) añadido(s)")
+
     logger.info(f"  [{banco}] {len(folds)} folds generados:")
     for f in folds:
         n_train_yr = round(f["n_train_fechas"] / 252, 1)
+        tag = " [MANUAL]" if f.get("_manual") else ""
         logger.info(
-            f"    Fold {f['fold']:2d} | TRAIN {f['train_start'].date()} → "
+            f"    Fold {f['fold']:2d}{tag} | TRAIN {f['train_start'].date()} → "
             f"{f['train_end'].date()} ({n_train_yr}yr, {f['n_train_fechas']}dh) | "
             f"VAL  {f['val_start'].date()} → {f['val_end'].date()} | "
             f"TEST {f['test_start'].date()} → {f['test_end'].date()}"
