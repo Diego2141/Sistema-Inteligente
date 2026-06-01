@@ -312,31 +312,20 @@ def load_manual_data(params):
     except Exception as e:
         logger.warning(f"  No se pudo cargar datos bancarios: {params['ruta_datos_bancarios']} | {e}")
 
-    # Confirmados
-    try:
-        df = pd.read_excel(params["ruta_confirmados"])
-        if df.empty:
-            logger.warning(f"  Archivo confirmados vacío: {params['ruta_confirmados']}")
-        else:
-            resultado["confirmados"] = df
-            logger.info(f"  Datos confirmados cargados: {df.shape}")
-    except Exception as e:
-        logger.warning(f"  No se pudo cargar confirmados: {params['ruta_confirmados']} | {e}")
-
-    # Intervención cambiaria
-    try:
-        df = pd.read_excel(params["ruta_intervencion"])
-        if df.empty:
-            logger.warning(f"  Archivo intervención vacío: {params['ruta_intervencion']}")
-        else:
-            fecha_col = df.columns[0]
-            val_col = df.columns[1]
-            serie = df.set_index(fecha_col)[val_col]
-            serie.index = pd.to_datetime(serie.index)
-            resultado["intervencion"] = serie.sort_index()
-            logger.info(f"  Intervención cambiaria cargada: {len(serie)} observaciones")
-    except Exception as e:
-        logger.warning(f"  No se pudo cargar intervención: {params['ruta_intervencion']} | {e}")
+    # Confirmados (proxy histórico: valores realizados en t+1/t+2)
+    ruta_conf = params.get("ruta_confirmados", "")
+    if ruta_conf and ruta_conf != r"RUTA\confirmados.xlsx":
+        try:
+            df = pd.read_excel(ruta_conf)
+            if df.empty:
+                logger.warning(f"  Archivo confirmados vacío: {ruta_conf}")
+            else:
+                resultado["confirmados"] = df
+                logger.info(f"  Datos confirmados cargados: {df.shape}")
+        except Exception as e:
+            logger.warning(f"  No se pudo cargar confirmados: {ruta_conf} | {e}")
+    else:
+        logger.info("  Confirmados: usando proxy histórico (D_t+1, R_t+2 realizados).")
 
     logger.info("  Carga de datos manuales completada.")
     return resultado
