@@ -1567,8 +1567,8 @@ if __name__ == "__main__":
         fechas_elecciones=fechas_elecciones,
     )
 
-    if not matriz.empty:
-        ruta_out = Path(PARAMS.get("ruta_output", "matriz_features.parquet"))
+    ruta_out = Path(PARAMS.get("ruta_output", "matriz_features.parquet"))
+    if ruta_out.exists() and ruta_out.stat().st_size > 0:
         print(f"\nMatriz generada correctamente → {ruta_out}")
     else:
         print("\nMatriz vacía. Verifique la configuración de PARAMS y los archivos de datos.")
