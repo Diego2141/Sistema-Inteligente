@@ -15,7 +15,7 @@ RUTA_OUTPUT  = (r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente"
                 r"\2. Output\matriz_SISTEMA.xlsx")
 
 BANCO        = "SISTEMA"
-H_FILTRO     = None   # None = todos los horizontes; o un entero, ej: 1 = solo h=1
+H_FILTRO     = 1      # None = todos los horizontes; entero = un solo h (ej: 1)
 
 # ─────────────────────────────────────────────────────────────────────────────
 print("Leyendo parquet...")
