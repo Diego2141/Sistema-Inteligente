@@ -13,12 +13,25 @@ import os
 import time
 import logging
 import warnings
+import getpass
 import numpy as np
 import pandas as pd
 from pathlib import Path
 from datetime import datetime
 
 warnings.filterwarnings("ignore")
+
+# ---------------------------------------------------------------------------
+# Proxy corporativo: lee credenciales de variable de entorno o las pide
+# ---------------------------------------------------------------------------
+if not os.environ.get("BCRP_PROXY"):
+    print("=" * 60)
+    print("  Configuración de proxy corporativo BCRP")
+    print("=" * 60)
+    _usuario = input("  Usuario de red (ej: 2579): ").strip()
+    _password = getpass.getpass("  Contraseña: ")
+    os.environ["BCRP_PROXY"] = f"http://{_usuario}:{_password}@bcrproxy:8080"
+    print("  Proxy configurado correctamente.\n")
 
 # ---------------------------------------------------------------------------
 # Logging con timestamps
