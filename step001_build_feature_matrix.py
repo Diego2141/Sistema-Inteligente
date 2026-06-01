@@ -95,7 +95,7 @@ PARAMS = {
 
     # APIs externas
     "fred_api_key": "96fa168ee9a9a4c1fcf323983db5ba64",
-    "proxy": "http://2577:fgh1103.@bcrproxy:8080",
+    "proxy": os.environ.get("BCRP_PROXY", "http://bcrproxy:8080"),
 
     # Códigos BCRP (solo como referencia; la lectura es desde archivo)
     "bcrp_embi": "PD04709XD",      # Spread EMBIG Perú (pbs) — diaria
