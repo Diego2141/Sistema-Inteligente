@@ -2,20 +2,24 @@
 """
 aux_fanchart_media_trapezoidal.py
 
-Fan charts con media trapezoidal (E[X] integrada desde cuantiles).
+Fan charts con media via spline + integración sobre grilla fina (199 pts).
 
 Configuración fija:
   EXPANDING=False (ROLLING), VENTANA_TRAIN=5yr, VENTANA_VAL=1yr,
   VENTANA_TEST=1yr, N_TRIALS=60, MODELO_CV="xgb_qt",
-  QUANTILES=[0.01, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99]
+  QUANTILES = 20 cuantiles: 0.01, 0.05, 0.10…0.90 (paso 5pp), 0.95, 0.99
 
-La media trapezoidal aproxima:
-  E[X] = ∫₀¹ Q(p) dp  ≈  Σ (Q_i + Q_{i+1})/2 × (p_{i+1} - p_i)
+Método:
+  1. Se estiman 20 modelos xgb_qt (Optuna independiente por cuantil).
+  2. Con las predicciones de los 20 cuantiles se ajusta un spline PCHIP
+     (monotónico) sobre la función cuantil Q(p) de cada observación.
+  3. Se evalúa el spline en una grilla fina de 199 puntos en [0.01, 0.99]
+     y se integra con np.trapz → E[X] ≈ ∫₀.₀₁⁰·⁹⁹ Q(p) dp.
 
 Tres curvas de tendencia central en el fan chart:
   · Q50          (azul discontinuo) — mediana, suavizada
-  · Media XGB    (navy)             — reg:squarederror separado
-  · Media Trap.  (firebrick)        — integral trapezoidal de 9 cuantiles
+  · Media XGB    (navy)             — modelo reg:squarederror separado
+  · Media Spline (firebrick)        — E[X] vía spline sobre 20 cuantiles
 """
 
 from __future__ import annotations
@@ -35,6 +39,7 @@ import optuna
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 from scipy.optimize import minimize
+from scipy.interpolate import PchipInterpolator
 
 warnings.filterwarnings("ignore", category=UserWarning)
 optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -69,7 +74,18 @@ EMBARGO_DIAS_HAB    = 90   # anti-leakage rolling
 N_TRIALS_OPTUNA = 60
 S_MIN_FACTOR    = 0.01
 S_MAX_FACTOR    = 1.0
-QUANTILES       = [0.01, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99]
+
+# 20 cuantiles: tails (0.01, 0.05) + centro uniforme 5pp (0.10…0.90) + (0.95, 0.99)
+QUANTILES = [
+    0.01, 0.05,
+    0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45,
+    0.50,
+    0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90,
+    0.95, 0.99,
+]  # 21 cuantiles (5pp uniforme en centro, colas en 0.01/0.05/0.95/0.99)
+
+# Grilla fina para la integral del spline
+N_GRID_SPLINE = 199
 
 # ── N_MAX_FOLDS=None → usa todos los folds disponibles ───────────────────────
 N_MAX_FOLDS          = None
@@ -98,22 +114,39 @@ def coverage(y_true, q_lo, q_hi):
 
 
 ###############################################################################
-# MEDIA TRAPEZOIDAL
+# MEDIA VÍA SPLINE (E[X] = ∫ Q(p) dp sobre grilla fina)
 ###############################################################################
 
-def media_trapezoidal(preds: dict) -> np.ndarray:
-    """
-    Aproxima E[X] = ∫₀¹ Q(p) dp con la regla trapezoidal.
+# Grilla fina de probabilidades sobre la que se evalúa el spline
+_P_GRID = np.linspace(0.01, 0.99, N_GRID_SPLINE)
 
-    preds: {tau: array_1d}  con tau en QUANTILES
-    Retorna array_1d con la media para cada observación.
+
+def media_spline(preds: dict) -> np.ndarray:
+    """
+    Aproxima E[X] = ∫₀.₀₁⁰·⁹⁹ Q(p) dp.
+
+    Pasos por observación:
+      1. Ajusta spline PCHIP (monotónico) sobre los 21 cuantiles estimados.
+      2. Evalúa el spline en una grilla fina de N_GRID_SPLINE puntos.
+      3. Integra con la regla trapezoidal (np.trapz).
+
+    Con 21 cuantiles a 5pp y 199 puntos de grilla, el error de
+    discretización es O((0.005)²) — despreciable frente al error
+    de estimación del modelo.
+
+    preds: {tau: array_1d}
+    Retorna: array_1d de medias (una por observación).
     """
     q_sorted = sorted(q for q in preds if isinstance(q, float))
     vals = np.column_stack([preds[q] for q in q_sorted])   # (n_obs, n_q)
-    media = np.zeros(vals.shape[0])
-    for i in range(len(q_sorted) - 1):
-        dp = q_sorted[i + 1] - q_sorted[i]
-        media += (vals[:, i] + vals[:, i + 1]) / 2.0 * dp
+    p_arr = np.array(q_sorted)
+    media = np.empty(vals.shape[0])
+
+    for i in range(vals.shape[0]):
+        spline   = PchipInterpolator(p_arr, vals[i])   # Q(p) monotónica
+        q_grid   = spline(_P_GRID)
+        media[i] = np.trapz(q_grid, _P_GRID)
+
     return media
 
 
@@ -360,8 +393,8 @@ def predecir(modelos, X):
     # Media XGB
     if "mean_xgb" in modelos:
         result["mean_xgb"] = modelos["mean_xgb"].predict(dmat)
-    # Media trapezoidal (calculada post-hoc)
-    result["mean_trap"] = media_trapezoidal({t: result[t] for t in taus})
+    # Media vía spline (calculada post-hoc sobre los cuantiles predichos)
+    result["mean_trap"] = media_spline({t: result[t] for t in taus})
     return result
 
 
@@ -446,7 +479,7 @@ def graficar_fanchart(preds, y_test, h_test, fechas_t_test, fold):
         f"Fan chart TEST OOS — Fold {fold['fold']} — {BANCO} [ROLLING]\n"
         f"TEST: {fold['test_start'].date()} → {fold['test_end'].date()}  |  "
         f"TRAIN hasta: {fold['train_end'].date()}\n"
-        f"Azul discontinuo=Q50  ·  Navy=Media XGB  ·  Firebrick=Media Trapezoidal",
+        f"Azul discontinuo=Q50  ·  Navy=Media XGB  ·  Firebrick=Media Spline (21 cuantiles)",
         fontweight="bold", fontsize=10,
     )
 
@@ -486,7 +519,7 @@ def graficar_fanchart(preds, y_test, h_test, fechas_t_test, fold):
         # Media Trapezoidal — nueva
         if "mean_trap" in p_s:
             ax.plot(h_s, p_s["mean_trap"] / 1e6, color="firebrick", lw=2.2,
-                    zorder=5, label="Media Trap. (E[X] cuantiles)")
+                    zorder=5, label="Media Spline (E[X] 21 cuantiles)")
 
         # Realizados
         q_lo   = p_s.get(0.05, np.full_like(y_s, -np.inf))
