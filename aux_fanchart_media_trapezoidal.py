@@ -88,7 +88,7 @@ QUANTILES = [
 N_GRID_SPLINE = 199
 
 # ── N_MAX_FOLDS=None → usa todos los folds disponibles ───────────────────────
-N_MAX_FOLDS          = None
+N_MAX_FOLDS          = 1     # ← cambiar a None para el run completo
 FANCHART_N_SNAPSHOTS = 4
 COLS_EXCLUIR         = {"fecha_t", "banco", "target"}
 
