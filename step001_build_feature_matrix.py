@@ -122,6 +122,23 @@ PARAMS = {
 
     # Código FRED
     "fred_fedfunds": "DFF",            # Daily Federal Funds Effective Rate (diaria)
+
+    # ── Features a excluir del parquet final ─────────────────────────────────
+    # Agregar aquí los nombres de columnas que se quieran eliminar del modelo.
+    # El script las calculará internamente (necesarias para derivar otras) y
+    # luego las descartará antes de guardar. No afecta features identidad ni target.
+    # Criterio de la lista inicial: redundancias matemáticas confirmadas.
+    "features_excluir": [
+        "log_h",              # = ln(h): relación determinista con h
+        "ma_R_5d",            # = media(R_t0…R_t-4): redundante si están los rezagos
+        "ma_D_5d",            # = media(D_t0…D_t-4): ídem para depósitos
+        "delta_R",            # = R_t0 - R_t-1: combinación lineal exacta
+        "delta_D",            # = D_t0 - D_t-1: combinación lineal exacta
+        "VIX_ma22",           # = media(VIX últimos 22d): XGBoost aprende esto solo
+        "diferencial_tasas",  # = TASA_REF_BCRP - FED_FUNDS: multicolinealidad exacta
+        "dias_desde_cierre_mes",  # ≈ total_bdays_mes - dias_al_cierre_mes: redundante
+        "pos_en_mes",         # información similar a dias_al_cierre_mes
+    ],
 }
 
 
@@ -1217,8 +1234,16 @@ def build_feature_matrix(
     float_cols = df.select_dtypes(include="float64").columns
     df[float_cols] = df[float_cols].astype("float32")
 
+    # ── Excluir features configurados en PARAMS["features_excluir"] ─────────
+    excluir = [c for c in params.get("features_excluir", [])
+               if c not in ("fecha_t", "banco", "h", "target")]   # protege identidad
+    if excluir:
+        df = df.drop(columns=[c for c in excluir if c in df.columns], errors="ignore")
+        logger.info(f"  {banco}: {len(excluir)} features excluidos → "
+                    f"{df.shape[1]} columnas finales")
+
     # ── Reordenar columnas ───────────────────────────────────────────────────
-    cols_id = ["fecha_t", "banco", "h", "log_h"]
+    cols_id    = [c for c in ["fecha_t", "banco", "h", "log_h"] if c in df.columns]
     cols_resto = [c for c in df.columns if c not in cols_id + ["fecha_th"]]
     df = df[cols_id + cols_resto].drop(columns=["fecha_th"], errors="ignore")
 
