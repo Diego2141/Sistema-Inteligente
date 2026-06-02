@@ -55,6 +55,29 @@ logger = logging.getLogger(__name__)
 _hoy = pd.Timestamp.today().normalize()
 _fin_historico = (_hoy - pd.offsets.BDay(1)).strftime("%Y-%m-%d")
 
+# ─────────────────────────────────────────────────────────────────────────────
+# FEATURES A EXCLUIR
+# Columnas que se descartan del parquet final antes de guardarlo.
+# Se calculan internamente (pueden ser necesarias para derivar otras) y luego
+# se eliminan. Para agregar más tras revisar el heatmap de step005, añadir
+# el nombre aquí. Las columnas identidad (fecha_t, banco, h, target) están
+# protegidas y no pueden eliminarse desde aquí.
+#
+# Lista inicial: redundancias matemáticas confirmadas por análisis de
+# multicolinealidad (ver aux_depuracion_features.py → hoja "Recomendación").
+# ─────────────────────────────────────────────────────────────────────────────
+FEATURES_EXCLUIR = [
+    "log_h",               # = ln(h): relación determinista con h; XGBoost no lo necesita
+    "ma_R_5d",             # = media(R_t0…R_t-4): redundante si están los rezagos cortos
+    "ma_D_5d",             # = media(D_t0…D_t-4): ídem para depósitos
+    "delta_R",             # = R_t0 - R_t-1: combinación lineal exacta de dos features ya presentes
+    "delta_D",             # = D_t0 - D_t-1: ídem para depósitos
+    "VIX_ma22",            # = media(VIX últimos 22d): XGBoost aprende la tendencia con VIX solo
+    "diferencial_tasas",   # = TASA_REF_BCRP - FED_FUNDS: multicolinealidad exacta con ambas tasas
+    "dias_desde_cierre_mes",  # ≈ total_bdays_mes - dias_al_cierre_mes: casi redundante
+    "pos_en_mes",          # información equivalente a dias_al_cierre_mes medida desde el inicio
+]
+
 PARAMS = {
     # Fechas
     "fecha_inicio_historico": "2010-01-01",
@@ -122,23 +145,6 @@ PARAMS = {
 
     # Código FRED
     "fred_fedfunds": "DFF",            # Daily Federal Funds Effective Rate (diaria)
-
-    # ── Features a excluir del parquet final ─────────────────────────────────
-    # Agregar aquí los nombres de columnas que se quieran eliminar del modelo.
-    # El script las calculará internamente (necesarias para derivar otras) y
-    # luego las descartará antes de guardar. No afecta features identidad ni target.
-    # Criterio de la lista inicial: redundancias matemáticas confirmadas.
-    "features_excluir": [
-        "log_h",              # = ln(h): relación determinista con h
-        "ma_R_5d",            # = media(R_t0…R_t-4): redundante si están los rezagos
-        "ma_D_5d",            # = media(D_t0…D_t-4): ídem para depósitos
-        "delta_R",            # = R_t0 - R_t-1: combinación lineal exacta
-        "delta_D",            # = D_t0 - D_t-1: combinación lineal exacta
-        "VIX_ma22",           # = media(VIX últimos 22d): XGBoost aprende esto solo
-        "diferencial_tasas",  # = TASA_REF_BCRP - FED_FUNDS: multicolinealidad exacta
-        "dias_desde_cierre_mes",  # ≈ total_bdays_mes - dias_al_cierre_mes: redundante
-        "pos_en_mes",         # información similar a dias_al_cierre_mes
-    ],
 }
 
 
@@ -1234,8 +1240,8 @@ def build_feature_matrix(
     float_cols = df.select_dtypes(include="float64").columns
     df[float_cols] = df[float_cols].astype("float32")
 
-    # ── Excluir features configurados en PARAMS["features_excluir"] ─────────
-    excluir = [c for c in params.get("features_excluir", [])
+    # ── Excluir features definidos en FEATURES_EXCLUIR ──────────────────────
+    excluir = [c for c in FEATURES_EXCLUIR
                if c not in ("fecha_t", "banco", "h", "target")]   # protege identidad
     if excluir:
         df = df.drop(columns=[c for c in excluir if c in df.columns], errors="ignore")
