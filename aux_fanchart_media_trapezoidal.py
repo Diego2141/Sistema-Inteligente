@@ -557,8 +557,101 @@ def graficar_fanchart(preds, y_test, h_test, fechas_t_test, fold):
 
 
 ###############################################################################
-# PIPELINE PRINCIPAL
+# PLOT DETALLADO — todos los cuantiles en el primer snapshot (Fold 1)
 ###############################################################################
+
+def graficar_cuantiles_detalle(preds, y_test, h_test, fechas_t_test, fold):
+    """
+    Plot de líneas individuales para cada cuantil, primer snapshot del fold.
+
+    Muestra la evolución de todos los cuantiles estimados con el horizonte h,
+    coloreados por nivel de probabilidad (azul=bajo → rojo=alto).
+    Superpone Q50, Media XGB y Media Spline como líneas destacadas.
+    """
+    fechas_unicas = pd.DatetimeIndex(sorted(set(fechas_t_test)))
+    if len(fechas_unicas) == 0:
+        return
+
+    # Primer snapshot: la fecha de origen más cercana al inicio del TEST
+    t0_snap = fechas_unicas[0]
+
+    mask  = np.array([pd.Timestamp(f) == t0_snap for f in fechas_t_test])
+    if mask.sum() == 0:
+        return
+
+    h_s   = h_test[mask]
+    y_s   = y_test[mask]
+    p_s   = {k: arr[mask] for k, arr in preds.items()}
+    order = np.argsort(h_s)
+    h_s   = h_s[order]
+    y_s   = y_s[order]
+    p_s   = {k: arr[order] for k, arr in p_s.items()}
+
+    q_keys = sorted(q for q in p_s if isinstance(q, float))
+
+    fig, ax = plt.subplots(figsize=(13, 6))
+
+    # ── Líneas de cuantiles — gradiente RdBu_r (azul=bajo, rojo=alto) ─────────
+    cmap   = plt.cm.RdBu_r
+    n_q    = len(q_keys)
+    for i, tau in enumerate(q_keys):
+        color   = cmap(i / (n_q - 1))
+        is_tail = tau in (0.01, 0.05, 0.95, 0.99)
+        is_med  = tau == 0.50
+        lw      = 1.8 if is_med else (1.2 if is_tail else 0.8)
+        ls      = "--" if is_med else "-"
+        alpha   = 1.0 if (is_tail or is_med) else 0.65
+        label   = f"Q{int(tau*100):02d}"
+        ax.plot(h_s, p_s[tau] / 1e6, color=color, lw=lw, ls=ls,
+                alpha=alpha, zorder=3, label=label)
+
+    # ── Relleno entre Q10 y Q90 (zona de alta probabilidad) ───────────────────
+    if {0.10, 0.90}.issubset(p_s):
+        ax.fill_between(h_s, p_s[0.10] / 1e6, p_s[0.90] / 1e6,
+                        alpha=0.08, color="steelblue")
+
+    # ── Estimadores de tendencia central ──────────────────────────────────────
+    if "mean_xgb" in p_s:
+        ax.plot(h_s, p_s["mean_xgb"] / 1e6, color="navy", lw=2.5,
+                zorder=6, label="Media XGB")
+    if "mean_trap" in p_s:
+        ax.plot(h_s, p_s["mean_trap"] / 1e6, color="firebrick", lw=2.5,
+                zorder=7, label="Media Spline")
+
+    # ── Realizados ────────────────────────────────────────────────────────────
+    ax.plot(h_s, y_s / 1e6, color="black", lw=1.4, ls="--",
+            zorder=8, alpha=0.85, label="Realizado")
+
+    ax.axhline(0, color="black", lw=0.5, alpha=0.3, ls="--")
+    ax.set_xlabel("Horizonte h (días hábiles)", fontsize=10)
+    ax.set_ylabel("Flujo D-R (MM USD)", fontsize=10)
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:,.0f}"))
+    ax.grid(True, alpha=0.20)
+
+    ax.set_title(
+        f"Detalle cuantiles — Fold {fold['fold']} — {BANCO} [ROLLING]\n"
+        f"Origen: {t0_snap.strftime('%Y-%m-%d')}  |  "
+        f"TRAIN hasta: {fold['train_end'].date()}  |  "
+        f"{n_q} cuantiles  (azul=bajo → rojo=alto)",
+        fontweight="bold", fontsize=10,
+    )
+
+    # Leyenda en dos columnas: cuantiles a la izquierda, estimadores a la derecha
+    handles, labels = ax.get_legend_handles_labels()
+    ax.legend(handles, labels, fontsize=7, ncol=4,
+              loc="upper right", framealpha=0.85)
+
+    # Barra de color lateral como referencia de cuantiles
+    sm = plt.cm.ScalarMappable(cmap=cmap,
+                                norm=plt.Normalize(vmin=q_keys[0], vmax=q_keys[-1]))
+    sm.set_array([])
+    plt.colorbar(sm, ax=ax, label="Nivel de cuantil", pad=0.01)
+
+    plt.tight_layout()
+    nombre = DIR_OUTPUT / f"cuantiles_detalle_fold{fold['fold']:02d}_{BANCO}.png"
+    plt.savefig(nombre, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    logger.info(f"  Plot detalle cuantiles: {nombre.name}")
 
 def main():
     logger.info("=" * 65)
@@ -640,6 +733,7 @@ def main():
         )
 
         graficar_fanchart(preds_te, y_te.values, h_te, fechas_te, fold)
+        graficar_cuantiles_detalle(preds_te, y_te.values, h_te, fechas_te, fold)
 
         del X_tr, y_tr, X_va, y_va, X_te, y_te, modelos
         gc.collect()
