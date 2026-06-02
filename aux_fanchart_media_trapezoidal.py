@@ -27,6 +27,7 @@ from __future__ import annotations
 import gc
 import logging
 import os
+import pickle
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -91,6 +92,10 @@ N_GRID_SPLINE = 199
 N_MAX_FOLDS          = 1     # ← cambiar a None para el run completo
 FANCHART_N_SNAPSHOTS = 4
 COLS_EXCLUIR         = {"fecha_t", "banco", "target"}
+
+# True  → salta entrenamiento, carga predicciones guardadas y regenera plots
+# False → entrenamiento completo (comportamiento normal)
+SOLO_REGENERAR_PLOTS = False
 
 # Threads por modelo (N cuantiles en paralelo)
 _N_Q_PAR    = len(QUANTILES)
@@ -557,6 +562,42 @@ def graficar_fanchart(preds, y_test, h_test, fechas_t_test, fold):
 
 
 ###############################################################################
+# GUARDAR / CARGAR PREDICCIONES
+###############################################################################
+
+def _ruta_preds(fold_num: int) -> Path:
+    return DIR_OUTPUT / f"preds_fold{fold_num:02d}_{BANCO}.pkl"
+
+
+def guardar_preds(fold_num, preds, y_test, h_test, fechas_t_test, fold):
+    payload = {
+        "preds"         : preds,
+        "y_test"        : y_test,
+        "h_test"        : h_test,
+        "fechas_t_test" : fechas_t_test,
+        "fold"          : fold,
+    }
+    ruta = _ruta_preds(fold_num)
+    with open(ruta, "wb") as fh:
+        pickle.dump(payload, fh, protocol=4)
+    logger.info(f"  Predicciones guardadas: {ruta.name}")
+
+
+def cargar_preds(fold_num):
+    ruta = _ruta_preds(fold_num)
+    if not ruta.exists():
+        raise FileNotFoundError(
+            f"No se encontraron predicciones para fold {fold_num}: {ruta}\n"
+            f"Ejecuta primero con SOLO_REGENERAR_PLOTS=False"
+        )
+    with open(ruta, "rb") as fh:
+        payload = pickle.load(fh)
+    logger.info(f"  [REPLOT] Predicciones cargadas: {ruta.name}")
+    return (payload["preds"], payload["y_test"],
+            payload["h_test"], payload["fechas_t_test"], payload["fold"])
+
+
+###############################################################################
 # PLOT DETALLADO — todos los cuantiles en el primer snapshot (Fold 1)
 ###############################################################################
 
@@ -697,6 +738,18 @@ def main():
         t_fold = time.time()
         logger.info(f"\n  ── Fold {fold['fold']}/{len(folds)} ──────────────────────")
 
+        if SOLO_REGENERAR_PLOTS:
+            # ── Modo replot: carga predicciones del disco, salta entrenamiento ─
+            try:
+                preds_te, y_te_arr, h_te, fechas_te, fold = cargar_preds(fold["fold"])
+            except FileNotFoundError as e:
+                logger.error(str(e))
+                continue
+            graficar_fanchart(preds_te, y_te_arr, h_te, fechas_te, fold)
+            graficar_cuantiles_detalle(preds_te, y_te_arr, h_te, fechas_te, fold)
+            continue
+
+        # ── Modo normal: entrenamiento completo ───────────────────────────────
         try:
             (X_tr, y_tr, X_va, y_va,
              X_te, y_te, h_te, fechas_te) = preparar_fold_data(df, fold, cols_feat)
@@ -712,18 +765,15 @@ def main():
         logger.info(f"    X_train={len(X_tr):,} | X_val={len(X_va):,} | "
                     f"X_test={len(X_te):,} | std_y={std_y:,.0f}")
 
-        modelos   = entrenar_fold_xgb_qt(X_tr, y_tr, X_va, y_va, std_y, fold["fold"])
-        preds_te  = predecir(modelos, X_te)
+        modelos  = entrenar_fold_xgb_qt(X_tr, y_tr, X_va, y_va, std_y, fold["fold"])
+        preds_te = predecir(modelos, X_te)
 
-        # Log cobertura y diferencias entre estimadores
         q_lo = preds_te.get(0.05, np.full(len(y_te), -np.inf))
         q_hi = preds_te.get(0.95, np.full(len(y_te),  np.inf))
         cov  = coverage(y_te.values, q_lo, q_hi)
-
-        q50_mean  = float(preds_te[0.50].mean())        if 0.50 in preds_te         else float("nan")
-        xgb_mean  = float(preds_te["mean_xgb"].mean()) if "mean_xgb" in preds_te    else float("nan")
-        trap_mean = float(preds_te["mean_trap"].mean()) if "mean_trap" in preds_te   else float("nan")
-
+        q50_mean  = float(preds_te[0.50].mean())        if 0.50 in preds_te      else float("nan")
+        xgb_mean  = float(preds_te["mean_xgb"].mean()) if "mean_xgb" in preds_te else float("nan")
+        trap_mean = float(preds_te["mean_trap"].mean()) if "mean_trap" in preds_te else float("nan")
         logger.info(
             f"    coverage_90={cov:.1%}  |  "
             f"media Q50={q50_mean/1e6:+.1f}MM  "
@@ -732,6 +782,7 @@ def main():
             f"({(time.time()-t_fold)/60:.1f} min)"
         )
 
+        guardar_preds(fold["fold"], preds_te, y_te.values, h_te, fechas_te, fold)
         graficar_fanchart(preds_te, y_te.values, h_te, fechas_te, fold)
         graficar_cuantiles_detalle(preds_te, y_te.values, h_te, fechas_te, fold)
 
