@@ -1505,8 +1505,10 @@ def build_data_dictionary(params):
 
     df_dict = pd.DataFrame(registros)
 
-    # Excluir del diccionario las variables que se eliminan del parquet final
-    df_dict = df_dict[~df_dict["variable"].isin(FEATURES_EXCLUIR)].reset_index(drop=True)
+    # Marcar si la variable está activa en el parquet o fue excluida
+    df_dict["en_modelo"] = df_dict["variable"].apply(
+        lambda v: "No" if v in FEATURES_EXCLUIR else "Sí"
+    )
 
     return df_dict
 
@@ -1623,17 +1625,37 @@ if __name__ == "__main__":
 
     # Diccionario de variables
     data_dict = build_data_dictionary(PARAMS)
-    print(f"\n{'='*70}")
-    print("  DICCIONARIO DE VARIABLES")
-    print(f"{'='*70}")
-    print(data_dict.to_string(index=False))
-    print(f"\nTotal variables: {len(data_dict)}")
+    df_activas  = data_dict[data_dict["en_modelo"] == "Sí"].drop(columns="en_modelo").reset_index(drop=True)
+    df_excluidas = data_dict[data_dict["en_modelo"] == "No"].drop(columns="en_modelo").reset_index(drop=True)
 
-    # Exportar diccionario a Excel en 1. Data/Clean/
+    print(f"\n{'='*70}")
+    print("  DICCIONARIO DE VARIABLES — en modelo")
+    print(f"{'='*70}")
+    print(df_activas.to_string(index=False))
+    print(f"\nTotal en modelo: {len(df_activas)}  |  Excluidas: {len(df_excluidas)}")
+
+    if len(df_excluidas):
+        print(f"\n  Variables excluidas (FEATURES_EXCLUIR): "
+              + ", ".join(df_excluidas["variable"].tolist()))
+
+    # Exportar diccionario a Excel: dos pestañas
     ruta_dict = Path(PARAMS.get("ruta_diccionario", r"1. Data\Clean\diccionario_variables.xlsx"))
     try:
         ruta_dict.parent.mkdir(parents=True, exist_ok=True)
-        data_dict.to_excel(ruta_dict, index=False, sheet_name="Diccionario")
-        logger.info(f"  Diccionario exportado a: {ruta_dict}")
+        with pd.ExcelWriter(ruta_dict, engine="openpyxl") as writer:
+            df_activas.to_excel(writer, index=False, sheet_name="Variables_modelo")
+            df_excluidas.to_excel(writer, index=False, sheet_name="Variables_excluidas")
+
+            # Resaltar pestaña de excluidas con fondo naranja en celdas de datos
+            from openpyxl.styles import PatternFill
+            fill_naranja = PatternFill(start_color="FFD580", end_color="FFD580", fill_type="solid")
+            ws = writer.sheets["Variables_excluidas"]
+            for row in ws.iter_rows(min_row=2, max_row=ws.max_row, max_col=ws.max_column):
+                for cell in row:
+                    cell.fill = fill_naranja
+
+        logger.info(f"  Diccionario exportado a: {ruta_dict} "
+                    f"(2 pestañas: Variables_modelo={len(df_activas)}, "
+                    f"Variables_excluidas={len(df_excluidas)})")
     except Exception as e:
         logger.warning(f"  No se pudo exportar diccionario: {e}")
