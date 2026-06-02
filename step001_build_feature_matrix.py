@@ -795,7 +795,7 @@ def build_bank_features(df_banco, lags_cortos, lag_semana, lag_mes, ventanas_vol
             + ["R_conf_t1", "R_conf_t2", "D_conf_t1"]
             + [f"sigma_flujo_{v}d" for v in VENTANAS_FLUJO]
             + [f"ma_flujo_{v}d"    for v in VENTANAS_FLUJO]
-            + ["garch_vol"]
+            + ["garch_vol", "flujo_neto_acum_mes"]
         )
         return pd.DataFrame(columns=cols)
 
@@ -831,6 +831,13 @@ def build_bank_features(df_banco, lags_cortos, lag_semana, lag_mes, ventanas_vol
         resultado[f"ma_flujo_{v}d"]    = flujo.rolling(v).mean()
 
     resultado["garch_vol"] = _garch_vol(flujo)
+
+    # Acumulado del flujo neto (D−R) desde el primer día hábil del mes hasta t.
+    # Lógica: una acumulación de depósitos netos a lo largo del mes anticipa
+    # mayores retiros en los últimos días, y viceversa.
+    resultado["flujo_neto_acum_mes"] = (
+        flujo.groupby(flujo.index.to_period("M")).cumsum()
+    )
 
     return resultado
 
@@ -1413,6 +1420,10 @@ def build_data_dictionary(params):
             f"Media móvil {v}d del flujo neto D−R (nivel reciente del flujo)", None, None)
     add("garch_vol", "Datos bancarios",
         "Volatilidad condicional GARCH(1,1) del flujo neto D−R (puro NumPy, sin arch)", None, None)
+    add("flujo_neto_acum_mes", "Datos bancarios",
+        "Acumulado del flujo neto D−R desde el primer día hábil del mes hasta t. "
+        "Captura la lógica de reversión intramensual: acumulación de depósitos netos "
+        "anticipa mayores retiros en cierre de mes, y viceversa.", 0, None)
 
     # ── Confirmados futuros ───────────────────────────────────────────────────
     # Entrenamiento: proxy histórico = valor realizado en t+1/t+2 (shift negativo)
