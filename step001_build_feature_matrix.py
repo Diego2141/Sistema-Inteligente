@@ -1504,6 +1504,10 @@ def build_data_dictionary(params):
     add("target", "Datos bancarios", "Flujo neto = D(b, t+h) - R(b, t+h). NaN si no hay datos.", None, "t+h")
 
     df_dict = pd.DataFrame(registros)
+
+    # Excluir del diccionario las variables que se eliminan del parquet final
+    df_dict = df_dict[~df_dict["variable"].isin(FEATURES_EXCLUIR)].reset_index(drop=True)
+
     return df_dict
 
 
