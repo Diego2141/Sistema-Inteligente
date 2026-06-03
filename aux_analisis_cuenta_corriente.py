@@ -36,7 +36,10 @@ DIR_OUT   = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\2. 
 # Ejemplos visibles en el archivo: "BCP", "INTERBANK", "CITIBANK", "BBVA", etc.
 # Para analizar el sistema completo, dejar como None → se agrega todos los bancos.
 BANCO_FOCO = "BCP"
-H_FOCO     = 2           # horizonte para correlaciones (h=2 = next business day)
+
+# h=1 y h=2 tienen datos confirmados (R_conf, D_conf) → no aportan señal incremental.
+# El interés real de la CC está en h=3 en adelante.
+H_EVALUAR = [3, 5, 10, 22, 45, 90]
 
 DIR_OUT.mkdir(parents=True, exist_ok=True)
 
@@ -204,43 +207,71 @@ except Exception as e:
     tiene_parquet = False
     print(f"    Parquet no disponible ({e}) — usando flujo_neto_cc como proxy")
 
+FEATURES_CC = ["cc", "cc_lag1", "cc_vs_prom_mes", "cc_ratio_inicio",
+               "flujo_acum_cc_mes", "cc_vol_5d"]
+
 resultados_corr = []
 
 for banco, grp in df_feat.groupby("banco"):
     grp = grp.sort_values("fecha").copy()
 
-    if tiene_parquet:
-        # Cruzar con flujo neto real del parquet (h=H_FOCO)
-        pq_banco = df_parquet[
-            (df_parquet["banco"] == banco) & (df_parquet["h"] == H_FOCO)
-        ][["fecha_t", "target"]].rename(columns={"fecha_t": "fecha", "target": "flujo_real"})
-        grp = grp.merge(pq_banco, on="fecha", how="left")
-        col_flujo = "flujo_real"
-    else:
-        col_flujo = "flujo_neto_cc"
+    for h in H_EVALUAR:
+        if not tiene_parquet:
+            grp[f"flujo_h{h}"] = grp["flujo_neto_cc"].shift(-h)
+        else:
+            pq_banco = df_parquet[
+                (df_parquet["banco"] == banco) & (df_parquet["h"] == h)
+            ][["fecha_t", "target"]].rename(columns={"fecha_t": "fecha", "target": f"flujo_h{h}"})
+            grp = grp.merge(pq_banco, on="fecha", how="left")
 
-    grp["flujo_next1"] = grp[col_flujo].shift(-1)
-    grp["flujo_next2"] = grp[col_flujo].shift(-2)
-
-    for feat_col in ["cc", "cc_lag1", "cc_ratio_inicio", "cc_vs_prom_mes",
-                     "flujo_acum_cc_mes", "cc_vol_5d"]:
-        if feat_col not in grp.columns:
-            continue
-        sub = grp[[feat_col, "flujo_next1", "flujo_next2"]].dropna()
-        if len(sub) < 30:
-            continue
-        r1 = sub[feat_col].corr(sub["flujo_next1"])
-        r2 = sub[feat_col].corr(sub["flujo_next2"])
-        resultados_corr.append({
-            "banco": banco, "feature": feat_col,
-            "corr_flujo_t+1": round(r1, 3),
-            "corr_flujo_t+2": round(r2, 3),
-        })
+        for feat_col in FEATURES_CC:
+            if feat_col not in grp.columns:
+                continue
+            sub = grp[[feat_col, f"flujo_h{h}"]].dropna()
+            if len(sub) < 30:
+                continue
+            r = sub[feat_col].corr(sub[f"flujo_h{h}"])
+            resultados_corr.append({
+                "banco": banco, "feature": feat_col,
+                "h": h, "correlacion": round(r, 3),
+            })
 
 df_corr = pd.DataFrame(resultados_corr)
+
 if not df_corr.empty:
-    print("\n    Correlaciones (Pearson) con flujo neto futuro:")
-    print(df_corr.to_string(index=False))
+    pivot = df_corr.pivot_table(
+        index=["banco", "feature"], columns="h", values="correlacion"
+    ).rename(columns={h: f"h={h}" for h in H_EVALUAR})
+    print("\n    Correlaciones por horizonte (h=1,2 omitidos — datos confirmados disponibles):")
+    print(pivot.to_string())
+
+    # Gráfico: evolución de correlación por horizonte
+    bancos_unicos = df_corr["banco"].unique()
+    fig, axes = plt.subplots(1, len(bancos_unicos),
+                             figsize=(5 * len(bancos_unicos), 5), sharey=True)
+    if len(bancos_unicos) == 1:
+        axes = [axes]
+    for ax, banco_n in zip(axes, bancos_unicos):
+        sub_b = df_corr[df_corr["banco"] == banco_n]
+        for feat_col, sub_f in sub_b.groupby("feature"):
+            sub_f = sub_f.sort_values("h")
+            ax.plot(sub_f["h"], sub_f["correlacion"], marker="o", lw=1.5, label=feat_col)
+        ax.axhline(0, color="black", lw=0.7, ls="--")
+        ax.set_title(f"{banco_n}", fontweight="bold")
+        ax.set_xlabel("Horizonte h (días hábiles)")
+        ax.set_ylabel("Correlación con flujo neto")
+        ax.grid(True, alpha=0.25)
+        ax.legend(fontsize=7)
+    plt.suptitle(
+        "Correlación features CC → flujo neto por horizonte\n"
+        "(h≤2 omitidos — datos confirmados disponibles para esos horizontes)",
+        fontweight="bold"
+    )
+    plt.tight_layout()
+    ruta_fig3 = DIR_OUT / "03_correlacion_por_horizonte.png"
+    plt.savefig(ruta_fig3, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"\n    Guardado: {ruta_fig3.name}")
 
 ###############################################################################
 # 5. EVOLUCIÓN TEMPORAL DE CC Y FLUJO NETO
@@ -310,17 +341,20 @@ print("  RESUMEN — ¿Agregar features de CC a la matriz?")
 print(f"{'='*65}")
 
 if not df_corr.empty:
-    max_corr = df_corr[["corr_flujo_t+1", "corr_flujo_t+2"]].abs().max().max()
+    max_corr = df_corr["correlacion"].abs().max()
     umbral   = 0.10
 
-    print(f"\n  Correlación máxima encontrada: {max_corr:.3f}")
+    print(f"\n  Correlación máxima encontrada: {max_corr:.3f}  "
+          f"(en h={df_corr.loc[df_corr['correlacion'].abs().idxmax(), 'h']})")
     if max_corr >= umbral:
         print(f"  → RECOMENDACIÓN: SÍ agregar a step001.")
-        print(f"    Los features de CC tienen correlación >{umbral:.0%} con el flujo futuro.")
-        print(f"    Features candidatos:")
-        top = df_corr[df_corr[["corr_flujo_t+1","corr_flujo_t+2"]].abs().max(axis=1) >= umbral]
+        print(f"    Features candidatos (|corr| > {umbral:.0%} en algún horizonte):")
+        top = df_corr.groupby(["banco","feature"])["correlacion"].apply(
+            lambda x: x.abs().max()
+        ).reset_index(name="max_abs_corr")
+        top = top[top["max_abs_corr"] >= umbral].sort_values("max_abs_corr", ascending=False)
         for _, r in top.iterrows():
-            print(f"      · {r['feature']:<25} corr t+1={r['corr_flujo_t+1']:+.3f}  t+2={r['corr_flujo_t+2']:+.3f}")
+            print(f"      · {r['banco']:<12} {r['feature']:<25} max|corr|={r['max_abs_corr']:.3f}")
     else:
         print(f"  → RECOMENDACIÓN: EVALUAR. Correlación lineal baja (<{umbral:.0%}).")
         print(f"    XGBoost puede capturar relaciones no lineales — revisar los plots.")
