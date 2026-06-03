@@ -32,7 +32,10 @@ RUTA_CC   = r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\
 RUTA_PARQUET = r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Clean\matriz_features.parquet"
 DIR_OUT   = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\2. Output\analisis_cc")
 
-BANCO_FOCO = "SISTEMA"   # banco a analizar en detalle (debe coincidir con nombre en parquet)
+# Banco a analizar en detalle. Debe coincidir con "Nombre Entidad" del Excel CC.
+# Ejemplos visibles en el archivo: "BCP", "INTERBANK", "CITIBANK", "BBVA", etc.
+# Para analizar el sistema completo, dejar como None → se agrega todos los bancos.
+BANCO_FOCO = "BCP"
 H_FOCO     = 2           # horizonte para correlaciones (h=2 = next business day)
 
 DIR_OUT.mkdir(parents=True, exist_ok=True)
@@ -47,44 +50,36 @@ print("=" * 65)
 
 print("\n[1] Leyendo archivo de CC...")
 try:
-    df_cc_raw = pd.read_excel(RUTA_CC)
-    print(f"    Filas: {len(df_cc_raw):,}  |  Columnas: {list(df_cc_raw.columns)}")
+    df_cc_raw = pd.read_excel(RUTA_CC, sheet_name="datos", header=0)
+    print(f"    Filas: {len(df_cc_raw):,}  |  Columnas totales: {df_cc_raw.shape[1]}")
 except FileNotFoundError:
     raise FileNotFoundError(
         f"No se encontró el archivo:\n  {RUTA_CC}\n"
         "Verifica que el nombre y ruta sean correctos."
     )
 
-# Detectar automáticamente columnas de fecha, banco y saldo
-# Intenta nombres comunes; ajustar si el Excel tiene otro formato
-def _detectar_col(df, candidatos):
-    for c in candidatos:
-        matches = [col for col in df.columns if c.lower() in col.lower()]
-        if matches:
-            return matches[0]
-    return None
+# Estructura: col A = "Codigo Entidad", col B = "Nombre Entidad",
+# col C en adelante = fechas (2018-01-01, 2018-01-02, ...)
+# → convertir de formato wide a largo con melt
 
-col_fecha = _detectar_col(df_cc_raw, ["fecha", "date", "día", "dia"])
-col_banco = _detectar_col(df_cc_raw, ["banco", "broker", "entidad", "institución"])
-col_saldo = _detectar_col(df_cc_raw, ["saldo", "cc", "ovn", "balance", "monto", "importe"])
+col_codigo = df_cc_raw.columns[0]   # "Codigo Entidad"
+col_nombre = df_cc_raw.columns[1]   # "Nombre Entidad"
+cols_fechas = df_cc_raw.columns[2:] # fechas como strings o datetime
 
-if not all([col_fecha, col_banco, col_saldo]):
-    print("\n  *** No se detectaron columnas automáticamente. ***")
-    print(f"  Columnas disponibles: {list(df_cc_raw.columns)}")
-    print("  Ajusta col_fecha, col_banco y col_saldo manualmente en el script.")
-    raise ValueError("No se pudieron detectar las columnas del archivo CC.")
-
-print(f"    Columnas detectadas → fecha: '{col_fecha}' | banco: '{col_banco}' | saldo: '{col_saldo}'")
-
-df_cc = df_cc_raw[[col_fecha, col_banco, col_saldo]].copy()
-df_cc.columns = ["fecha", "banco", "cc"]
-df_cc["fecha"] = pd.to_datetime(df_cc["fecha"])
+df_cc = df_cc_raw.melt(
+    id_vars=[col_codigo, col_nombre],
+    value_vars=cols_fechas,
+    var_name="fecha",
+    value_name="cc",
+)
+df_cc = df_cc.rename(columns={col_nombre: "banco"})
+df_cc["fecha"] = pd.to_datetime(df_cc["fecha"], errors="coerce")
 df_cc["cc"]    = pd.to_numeric(df_cc["cc"], errors="coerce")
 df_cc = df_cc.dropna(subset=["fecha", "cc"]).sort_values(["banco", "fecha"])
 
 bancos_cc = sorted(df_cc["banco"].unique())
-print(f"    Bancos: {bancos_cc}")
-print(f"    Rango: {df_cc['fecha'].min().date()} → {df_cc['fecha'].max().date()}")
+print(f"    Bancos encontrados ({len(bancos_cc)}): {bancos_cc}")
+print(f"    Rango de fechas: {df_cc['fecha'].min().date()} → {df_cc['fecha'].max().date()}")
 
 ###############################################################################
 # 2. FEATURES DERIVADOS DE LA CC
