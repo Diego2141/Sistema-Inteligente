@@ -979,6 +979,123 @@ def graficar_comparacion_val_test(df_val_m, df_test_m, banco):
     logger.info(f"  Comparación VAL vs TEST: {nombre}")
 
 
+def graficar_fanchart_acum_test_fold(
+    preds_test: dict,
+    y_test: np.ndarray,
+    h_test: np.ndarray,
+    fechas_t_test,
+    fold: dict,
+    banco: str,
+    dir_out: Path | None = None,
+):
+    """
+    Fan chart de flujo neto ACUMULADO (cumsum sobre h) para un fold TEST.
+    Mismas fechas de origen que graficar_fanchart_test_fold; cada cuantil
+    se acumula con np.cumsum → banda de incertidumbre del total acumulado.
+    """
+    fechas_unicas = pd.DatetimeIndex(sorted(set(fechas_t_test)))
+    if len(fechas_unicas) == 0:
+        return
+
+    test_start = fold["test_start"]
+    n_snap     = FANCHART_N_SNAPSHOTS
+    meses_paso = 12.0 / n_snap
+
+    origenes = []
+    for i in range(n_snap):
+        target  = test_start + pd.DateOffset(months=int(round(i * meses_paso)))
+        diffs   = np.abs((fechas_unicas - target).total_seconds())
+        nearest = fechas_unicas[np.argmin(diffs)]
+        if nearest not in origenes:
+            origenes.append(nearest)
+
+    if not origenes:
+        return
+
+    ncols = 2
+    nrows = int(np.ceil(len(origenes) / ncols))
+    modo  = "EXPANDING" if EXPANDING else "ROLLING"
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 7, nrows * 5), sharey=False)
+    axes_flat = axes.flatten() if len(origenes) > 1 else [axes]
+
+    fig.suptitle(
+        f"Fan chart ACUMULADO TEST OOS — Fold {fold['fold']} — {banco} [{modo}]\n"
+        f"TEST: {fold['test_start'].date()} → {fold['test_end'].date()}  |  "
+        f"TRAIN hasta: {fold['train_end'].date()}",
+        fontweight="bold", fontsize=11,
+    )
+
+    for ax, t0 in zip(axes_flat, origenes):
+        mask = np.array([pd.Timestamp(f) == t0 for f in fechas_t_test])
+        if mask.sum() == 0:
+            ax.set_visible(False)
+            continue
+
+        h_s = h_test[mask]
+        y_s = y_test[mask]
+        p_s = {tau: arr[mask] for tau, arr in preds_test.items()}
+
+        order = np.argsort(h_s)
+        h_s   = h_s[order]
+        y_s   = y_s[order]
+        p_s   = {tau: arr[order] for tau, arr in p_s.items()}
+
+        # Acumular con cumsum
+        y_cum = np.cumsum(y_s)
+        p_cum = {tau: np.cumsum(arr) for tau, arr in p_s.items()}
+
+        if {0.01, 0.99}.issubset(p_cum):
+            ax.fill_between(h_s, p_cum[0.01] / 1e6, p_cum[0.99] / 1e6,
+                            alpha=0.12, color="steelblue", label="Q01-Q99 (CV)")
+        if {0.05, 0.95}.issubset(p_cum):
+            ax.fill_between(h_s, p_cum[0.05] / 1e6, p_cum[0.95] / 1e6,
+                            alpha=0.28, color="steelblue", label="Q05-Q95 (CV)")
+        if 0.50 in p_cum:
+            lw_q50 = 1.4 if "mean" in p_cum else 1.8
+            ls_q50 = "--" if "mean" in p_cum else "-"
+            ax.plot(h_s, p_cum[0.50] / 1e6, color="steelblue", lw=lw_q50,
+                    ls=ls_q50, zorder=3, label="Q50 (CV)")
+        if "mean" in p_cum:
+            ax.plot(h_s, p_cum["mean"] / 1e6, color="navy", lw=2.2,
+                    zorder=4, label="Media (CV)")
+
+        q_lo_cum   = p_cum.get(0.05, np.full_like(y_cum, -np.inf))
+        q_hi_cum   = p_cum.get(0.95, np.full_like(y_cum,  np.inf))
+        dentro_cum = (y_cum >= q_lo_cum) & (y_cum <= q_hi_cum)
+
+        ax.plot(h_s, y_cum / 1e6, color="dimgray", lw=1.0, ls="--",
+                zorder=4, alpha=0.75, label="Realizado acum.")
+        ax.scatter(h_s[dentro_cum],  y_cum[dentro_cum]  / 1e6, color="seagreen", s=20,
+                   zorder=5, label="Dentro Q05-Q95")
+        ax.scatter(h_s[~dentro_cum], y_cum[~dentro_cum] / 1e6, color="crimson",  s=20,
+                   zorder=5, label="Fuera Q05-Q95")
+
+        cov_snap = float(dentro_cum.mean())
+        ax.set_title(
+            f"Origen: {t0.strftime('%Y-%m-%d')}\nCoverage 90% acum.: {cov_snap:.1%}",
+            fontsize=9, fontweight="bold",
+        )
+        ax.set_xlabel("Horizonte h (días hábiles)", fontsize=8)
+        ax.set_ylabel("Flujo acumulado D-R (MM USD)", fontsize=8)
+        ax.axhline(0, color="black", lw=0.5, alpha=0.3, ls="--")
+        ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:,.0f}"))
+        ax.grid(True, alpha=0.25)
+
+    handles, labels = axes_flat[0].get_legend_handles_labels()
+    if handles:
+        axes_flat[0].legend(handles, labels, fontsize=7, loc="best")
+    for ax in axes_flat[len(origenes):]:
+        ax.set_visible(False)
+
+    plt.tight_layout()
+    _dir = dir_out if dir_out is not None else DIR_FANCHARTS
+    nombre = _dir / f"fanchart_acum_test_fold{fold['fold']:02d}_{banco}.png"
+    plt.savefig(nombre, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    logger.info(f"  Fan chart ACUMULADO TEST fold {fold['fold']}: {nombre.name}")
+
+
 def graficar_cobertura_por_h(df_por_h, banco, sufijo="test"):
     if df_por_h.empty or "coverage_90" not in df_por_h.columns:
         return
@@ -1681,6 +1798,10 @@ def evaluar_banco(banco: str):
         graficar_fanchart_test_fold(
             preds_test, y_test.values, h_test, fechas_t_test, fold, banco,
             preds_overlay=preds_s4,
+            dir_out=_fanchart_dir,
+        )
+        graficar_fanchart_acum_test_fold(
+            preds_test, y_test.values, h_test, fechas_t_test, fold, banco,
             dir_out=_fanchart_dir,
         )
 
