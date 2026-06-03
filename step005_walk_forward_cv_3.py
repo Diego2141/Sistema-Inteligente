@@ -50,7 +50,7 @@ import logging
 import os
 import time
 import warnings
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -225,10 +225,11 @@ def crps_approx(y_true, preds):
 # PARTE 2 — GARCH por fold
 ###############################################################################
 
-# Número de threads por modelo XGBoost cuando se entrenan en paralelo.
-# Si hay N cuantiles en paralelo, cada uno usa cpu_count/N threads → sin over-subscription.
+# Número de procesos paralelos (uno por cuantil) y threads XGBoost por proceso.
+# Con ProcessPoolExecutor cada proceso tiene su propio GIL → paralelismo real.
+# Reparto óptimo: 5 procesos × (cpu_count // 5) threads = ~cpu_count cores activos.
 _N_QUANTILES_PARALLEL = len([0.01, 0.05, 0.50, 0.95, 0.99])  # = 5
-_XGB_NTHREAD = max(1, (os.cpu_count() or 4) // _N_QUANTILES_PARALLEL)
+_XGB_NTHREAD = max(2, (os.cpu_count() or 10) // _N_QUANTILES_PARALLEL)
 
 # Cache de parámetros GARCH por fecha de corte de TRAIN — evita re-estimación en el
 # mismo fold y para el guardado de metadata (antes se estimaba 2-3 veces por fold).
@@ -679,44 +680,57 @@ def _objetivo_optuna_xgb_qt_tau(trial, tau, X_tr, y_tr, X_va, y_va, std_y):
     return pinball_loss(y_va.values, model.predict(dval), tau)
 
 
+def _worker_optuna_tau(args):
+    """
+    Función de módulo (picklable) para ProcessPoolExecutor.
+    Cada proceso hijo corre Optuna + entrenamiento final para un cuantil.
+    """
+    tau, X_tr, y_tr, X_va, y_va, std_y, n_trials, fold_num = args
+    study = optuna.create_study(
+        direction="minimize",
+        sampler=optuna.samplers.TPESampler(seed=42 + fold_num + int(tau * 100)),
+    )
+    study.optimize(
+        lambda t: _objetivo_optuna_xgb_qt_tau(t, tau, X_tr, y_tr, X_va, y_va, std_y),
+        n_trials=n_trials, show_progress_bar=False,
+    )
+    bp    = study.best_params
+    s     = bp["s"]
+    n_est = bp["n_estimators"]
+    params = {k: v for k, v in bp.items() if k not in ("s", "n_estimators")}
+    params.update({"tree_method": "hist", "seed": 42, "nthread": _XGB_NTHREAD})
+    dtrain = xgb.DMatrix(X_tr, label=y_tr)
+    model  = xgb.train(
+        params, dtrain, num_boost_round=n_est,
+        obj=make_quantile_objective(tau, s, std_y),
+        verbose_eval=False,
+    )
+    return tau, model, bp, study.best_value
+
+
 def _entrenar_fold_xgb_qt(X_tr, y_tr, X_va, y_va, std_y, n_trials, fold_num):
     """
     Entrena un modelo por cuantil con Optuna independiente para cada uno.
-    Los 5 estudios corren en paralelo (ThreadPoolExecutor); cada XGBoost usa
-    _XGB_NTHREAD threads para evitar over-subscription de CPU.
+    Los estudios corren en paralelo con ProcessPoolExecutor (un proceso por
+    cuantil, GIL independiente) → paralelismo real en múltiples núcleos.
+    Cada XGBoost usa _XGB_NTHREAD threads → sin over-subscription de CPU.
     """
-    def _optuna_y_train_tau(tau):
-        study = optuna.create_study(
-            direction="minimize",
-            sampler=optuna.samplers.TPESampler(seed=42 + fold_num + int(tau * 100)),
-        )
-        study.optimize(
-            lambda t: _objetivo_optuna_xgb_qt_tau(t, tau, X_tr, y_tr, X_va, y_va, std_y),
-            n_trials=n_trials, show_progress_bar=False,
-        )
-        bp     = study.best_params
-        s      = bp["s"]
-        n_est  = bp["n_estimators"]
-        params = {k: v for k, v in bp.items() if k not in ("s", "n_estimators")}
-        params.update({"tree_method": "hist", "seed": 42, "nthread": _XGB_NTHREAD})
-        dtrain = xgb.DMatrix(X_tr, label=y_tr)
-        model  = xgb.train(
-            params, dtrain, num_boost_round=n_est,
-            obj=make_quantile_objective(tau, s, std_y),
-            verbose_eval=False,
-        )
-        logger.info(f"    [xgb_qt] τ={tau:.2f} fold {fold_num}: "
-                    f"pinball/VAL={study.best_value:.4f}  s={s:.3f}  n_est={n_est}")
-        return tau, model, bp, study.best_value
+    worker_args = [
+        (tau, X_tr, y_tr, X_va, y_va, std_y, n_trials, fold_num)
+        for tau in QUANTILES
+    ]
 
     modelos     = {}
     best_by_tau = {}
-    with ThreadPoolExecutor(max_workers=len(QUANTILES)) as ex:
-        futures = {ex.submit(_optuna_y_train_tau, tau): tau for tau in QUANTILES}
+    with ProcessPoolExecutor(max_workers=_N_QUANTILES_PARALLEL) as ex:
+        futures = {ex.submit(_worker_optuna_tau, args): args[0] for args in worker_args}
         for fut in as_completed(futures):
-            tau, model, bp, _ = fut.result()
+            tau, model, bp, best_val = fut.result()
             modelos[tau]     = model
             best_by_tau[tau] = bp
+            logger.info(f"    [xgb_qt] τ={tau:.2f} fold {fold_num}: "
+                        f"pinball/VAL={best_val:.4f}  s={bp['s']:.3f}  "
+                        f"n_est={bp['n_estimators']}")
 
     # Mean model — reg:squarederror with best Q50 hyperparameters as base
     bp_mean = best_by_tau.get(0.50, list(best_by_tau.values())[0])
