@@ -125,6 +125,12 @@ def calcular_features_cc(df_banco_cc: pd.DataFrame) -> pd.DataFrame:
     df["cc_vol_5d"]  = df["cc"].rolling(5).std()
     df["cc_vol_22d"] = df["cc"].rolling(22).std()
 
+    # Acumulado rolling (CC(t) - CC(t-N)): variación neta sin depender del mes
+    # Positivo → banco ha acumulado → probable retiro próximo
+    # Negativo → banco ha retirado → probable depósito próximo
+    for n in [5, 10, 22]:
+        df[f"flujo_acum_roll_{n}d"] = df["cc"] - df["cc"].shift(n)
+
     return df.reset_index()
 
 frames = []
@@ -208,7 +214,8 @@ except Exception as e:
     print(f"    Parquet no disponible ({e}) — usando flujo_neto_cc como proxy")
 
 FEATURES_CC = ["cc", "cc_lag1", "cc_vs_prom_mes", "cc_ratio_inicio",
-               "flujo_acum_cc_mes", "cc_vol_5d"]
+               "flujo_acum_cc_mes", "cc_vol_5d",
+               "flujo_acum_roll_5d", "flujo_acum_roll_10d", "flujo_acum_roll_22d"]
 
 resultados_corr = []
 
@@ -276,6 +283,45 @@ if not df_corr.empty:
 ###############################################################################
 # 5. EVOLUCIÓN TEMPORAL DE CC Y FLUJO NETO
 ###############################################################################
+
+print("\n[4b] Graficando evolución de acumulados rolling por banco...")
+
+BANCOS_PLOT = [b for b in ["BBVA", "SCOTIABANK", "INTERBANK", "CITIBANK"]
+               if b in df_feat["banco"].unique()]
+ROLLS = ["flujo_acum_roll_5d", "flujo_acum_roll_10d", "flujo_acum_roll_22d"]
+COLORES_ROLL = {"flujo_acum_roll_5d": "steelblue",
+                "flujo_acum_roll_10d": "darkorange",
+                "flujo_acum_roll_22d": "seagreen"}
+
+fig, axes = plt.subplots(len(BANCOS_PLOT), 1,
+                         figsize=(15, 4 * len(BANCOS_PLOT)), sharex=True)
+if len(BANCOS_PLOT) == 1:
+    axes = [axes]
+
+for ax, banco_n in zip(axes, BANCOS_PLOT):
+    df_b = df_feat[df_feat["banco"] == banco_n].sort_values("fecha")
+    for roll_col in ROLLS:
+        if roll_col not in df_b.columns:
+            continue
+        n = roll_col.split("_")[-1]   # "5d", "10d", "22d"
+        ax.plot(df_b["fecha"], df_b[roll_col] / 1e6,
+                color=COLORES_ROLL[roll_col], lw=1.0, alpha=0.85, label=f"Roll {n}")
+    ax.axhline(0, color="black", lw=0.7, ls="--", alpha=0.4)
+    ax.set_title(f"{banco_n} — CC(t) − CC(t−N): variación neta rolling",
+                 fontweight="bold", fontsize=9)
+    ax.set_ylabel("MM USD")
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:,.0f}"))
+    ax.grid(True, alpha=0.2)
+    ax.legend(fontsize=8, loc="upper left")
+
+plt.suptitle("Acumulado rolling de CC sin depender del inicio de mes\n"
+             "Positivo → banco acumuló → probable retiro próximo",
+             fontweight="bold")
+plt.tight_layout()
+ruta_fig4 = DIR_OUT / "04_acumulado_rolling_por_banco.png"
+plt.savefig(ruta_fig4, dpi=150, bbox_inches="tight")
+plt.close()
+print(f"    Guardado: {ruta_fig4.name}")
 
 print("\n[5] Graficando evolución temporal...")
 
