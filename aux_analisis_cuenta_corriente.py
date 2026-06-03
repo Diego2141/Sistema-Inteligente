@@ -142,6 +142,21 @@ for banco, grp in df_cc.groupby("banco"):
 df_feat = pd.concat(frames, ignore_index=True)
 print(f"    Features calculados: {[c for c in df_feat.columns if c not in ['fecha','banco']]}")
 
+# ── Agregar SISTEMA: suma de todas las entidades ──────────────────────────────
+# "SISTEMA" en el parquet = agregado de los 63 bancos → sumar CC de todos ellos
+print("\n[2b] Construyendo CC_SISTEMA (suma de las 63 entidades)...")
+df_cc_sistema = (
+    df_cc.groupby("fecha")["cc"]
+    .sum()
+    .reset_index()
+)
+print(f"     Rango: {df_cc_sistema['fecha'].min().date()} → "
+      f"{df_cc_sistema['fecha'].max().date()}  |  {len(df_cc_sistema):,} obs")
+
+feat_sistema = calcular_features_cc(df_cc_sistema[["fecha", "cc"]].copy())
+feat_sistema["banco"] = "SISTEMA"
+df_feat = pd.concat([df_feat, feat_sistema], ignore_index=True)
+
 ###############################################################################
 # 3. PERFIL INTRAMONTH DE CC — ¿SE CUMPLE LA HIPÓTESIS DEL ENCAJE?
 ###############################################################################
@@ -252,6 +267,17 @@ if not df_corr.empty:
     print("\n    Correlaciones por horizonte (h=1,2 omitidos — datos confirmados disponibles):")
     print(pivot.to_string())
 
+    # ── Tabla separada solo para SISTEMA ────────────────────────────────────
+    df_corr_sis = df_corr[df_corr["banco"] == "SISTEMA"]
+    if not df_corr_sis.empty:
+        print("\n    ── SISTEMA (suma 63 entidades) ──────────────────────────────")
+        pivot_sis = df_corr_sis.pivot_table(
+            index="feature", columns="h", values="correlacion"
+        ).rename(columns={h: f"h={h}" for h in H_EVALUAR})
+        print(pivot_sis.to_string())
+    else:
+        print("\n    SISTEMA no encontrado en parquet — verifica que 'banco'=='SISTEMA' exista.")
+
     # Gráfico: evolución de correlación por horizonte
     bancos_unicos = df_corr["banco"].unique()
     fig, axes = plt.subplots(1, len(bancos_unicos),
@@ -322,6 +348,58 @@ ruta_fig4 = DIR_OUT / "04_acumulado_rolling_por_banco.png"
 plt.savefig(ruta_fig4, dpi=150, bbox_inches="tight")
 plt.close()
 print(f"    Guardado: {ruta_fig4.name}")
+
+###############################################################################
+# 5b. EVOLUCIÓN TEMPORAL DE CC_SISTEMA
+###############################################################################
+
+print("\n[4c] Graficando CC del SISTEMA (suma 63 entidades)...")
+
+df_sis_plot = df_feat[df_feat["banco"] == "SISTEMA"].sort_values("fecha")
+
+if not df_sis_plot.empty:
+    fig, axes = plt.subplots(3, 1, figsize=(15, 12), sharex=True)
+
+    ax = axes[0]
+    ax.plot(df_sis_plot["fecha"], df_sis_plot["cc"] / 1e6,
+            color="steelblue", lw=1.2)
+    ax.set_ylabel("Saldo CC (MM USD)")
+    ax.set_title("CC del SISTEMA — suma de las 63 entidades", fontweight="bold")
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:,.0f}"))
+    ax.grid(True, alpha=0.2)
+
+    ax = axes[1]
+    colores_sis = ["seagreen" if v >= 0 else "crimson"
+                   for v in df_sis_plot["flujo_neto_cc"].fillna(0)]
+    ax.bar(df_sis_plot["fecha"], df_sis_plot["flujo_neto_cc"].fillna(0) / 1e6,
+           color=colores_sis, alpha=0.7, width=1)
+    ax.axhline(0, color="black", lw=0.7)
+    ax.set_ylabel("ΔCC_SISTEMA (MM USD)")
+    ax.set_title("Flujo neto SISTEMA = ΔCC (target del modelo para banco=SISTEMA)",
+                 fontweight="bold")
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:,.0f}"))
+    ax.grid(True, alpha=0.2, axis="y")
+
+    ax = axes[2]
+    for roll_col, color in [("flujo_acum_roll_5d", "steelblue"),
+                             ("flujo_acum_roll_10d", "darkorange"),
+                             ("flujo_acum_roll_22d", "seagreen")]:
+        if roll_col in df_sis_plot.columns:
+            n = roll_col.split("_")[-1]
+            ax.plot(df_sis_plot["fecha"], df_sis_plot[roll_col] / 1e6,
+                    color=color, lw=1.0, alpha=0.85, label=f"Roll {n}")
+    ax.axhline(0, color="black", lw=0.7, ls="--", alpha=0.4)
+    ax.set_ylabel("CC(t)−CC(t−N) (MM USD)")
+    ax.set_title("Acumulado rolling SISTEMA: CC(t)−CC(t−N)", fontweight="bold")
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:,.0f}"))
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.2)
+
+    plt.tight_layout()
+    ruta_fig5 = DIR_OUT / "05_cc_sistema_evolucion.png"
+    plt.savefig(ruta_fig5, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"    Guardado: {ruta_fig5.name}")
 
 print("\n[5] Graficando evolución temporal...")
 
@@ -408,7 +486,10 @@ else:
     print("\n  No se pudo calcular correlaciones. Revisa los plots generados.")
 
 print(f"\n  Plots generados en: {DIR_OUT}")
-print(f"  · 01_perfil_intramonth_cc.png  — hipótesis del encaje")
-print(f"  · 02_evolucion_temporal_cc.png — serie histórica + flujo + acumulado")
-print(f"  · features_cc_derivados.xlsx   — tabla completa de features")
+print(f"  · 01_perfil_intramonth_cc.png      — hipótesis del encaje ({BANCO_FOCO})")
+print(f"  · 02_evolucion_temporal_cc.png     — serie histórica + flujo + acumulado ({BANCO_FOCO})")
+print(f"  · 03_correlacion_por_horizonte.png — correlación CC → flujo neto por banco")
+print(f"  · 04_acumulado_rolling_por_banco.png — rolling 5d/10d/22d por banco")
+print(f"  · 05_cc_sistema_evolucion.png      — CC agregada SISTEMA (63 entidades)")
+print(f"  · features_cc_derivados.xlsx       — tabla completa incluye SISTEMA")
 print()
