@@ -95,10 +95,35 @@ if corr >= 0.85:
 else:
     print("  ✗ Validación ALERTA — correlación por debajo de 0.85, revisar datos")
 
+# ── Validación de magnitud ────────────────────────────────────────────────────
+neto_m    = df_comp["neto"] / 1e6          # flujo neto en millones
+delta_sf  = df_comp["delta_DepSF"]         # delta DepSF ya en millones
+
+mae       = (neto_m - delta_sf).abs().mean()
+rmse      = np.sqrt(((neto_m - delta_sf) ** 2).mean())
+std_ratio = neto_m.std() / delta_sf.std()
+# Ratio diario: evitar divisiones por cero
+mask_nz   = delta_sf.abs() > 1
+ratio_ser = (neto_m[mask_nz] / delta_sf[mask_nz])
+ratio_med = ratio_ser.median()
+ratio_p25 = ratio_ser.quantile(0.25)
+ratio_p75 = ratio_ser.quantile(0.75)
+
+print(f"\n── Validación de magnitud ──────────────────────────────")
+print(f"  MAE  (millones USD/día)     : {mae:,.1f}")
+print(f"  RMSE (millones USD/día)     : {rmse:,.1f}")
+print(f"  Ratio std  (neto/delta_SF)  : {std_ratio:.3f}  (ideal=1.0)")
+print(f"  Ratio diario median         : {ratio_med:.3f}  (ideal=1.0)")
+print(f"  Ratio diario P25-P75        : [{ratio_p25:.3f}, {ratio_p75:.3f}]")
+if abs(std_ratio - 1) < 0.10:
+    print("  ✓ Escala OK — ratio de desviaciones estándar dentro del ±10%")
+else:
+    print(f"  ✗ Diferencia de escala — ratio std = {std_ratio:.3f}, revisar unidades")
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. Gráficos
 # ─────────────────────────────────────────────────────────────────────────────
-fig, axes = plt.subplots(3, 1, figsize=(14, 13))
+fig, axes = plt.subplots(5, 1, figsize=(14, 21))
 
 # Panel 1: Nivel DepSF_Total
 ax1 = axes[0]
@@ -146,9 +171,48 @@ ax3.axvline(0, color="black", lw=0.4)
 ax3.legend(fontsize=9)
 ax3.grid(True, alpha=0.3)
 
+# Panel 4: Ratio rolling (flujo_neto / delta_DepSF) en el tiempo
+ax4 = axes[3]
+roll_ratio = ratio_ser.rolling(22, min_periods=10).median()
+ax4.plot(roll_ratio.index, roll_ratio, color="steelblue", lw=1.0,
+         label="Ratio rolling 22d (mediana)")
+ax4.axhline(1.0, color="black", lw=0.8, ls="--", label="Ideal = 1.0")
+ax4.axhline(ratio_med, color="darkorange", lw=1.0, ls=":",
+            label=f"Mediana global = {ratio_med:.3f}")
+ax4.fill_between(roll_ratio.index, 0.85, 1.15, alpha=0.08,
+                 color="seagreen", label="Banda ±15%")
+ax4.set_ylim(-1, 3)
+ax4.set_title("Ratio de magnitud rolling: Flujo Neto / Δ Depósitos SF\n"
+              "(ratio=1 → escala perfecta; ratio>1 → flujo neto mayor que delta DepSF)",
+              fontweight="bold")
+ax4.set_ylabel("Ratio")
+ax4.legend(fontsize=8)
+ax4.xaxis.set_major_locator(mdates.YearLocator(2))
+ax4.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+ax4.tick_params(axis="x", rotation=45)
+ax4.grid(True, alpha=0.3)
+
+# Panel 5: Distribución comparada (histograma superpuesto)
+ax5 = axes[4]
+lim = float(np.percentile(np.abs(neto_m.dropna()), 99))
+bins = np.linspace(-lim, lim, 80)
+ax5.hist(neto_m.clip(-lim, lim), bins=bins, alpha=0.55,
+         color="darkorange", label="Flujo Neto D−R (Transacciones)", density=True)
+ax5.hist(delta_sf.clip(-lim, lim), bins=bins, alpha=0.55,
+         color="steelblue", label="Δ Depósitos SF BCRP", density=True)
+ax5.set_title(f"Distribución comparada de magnitudes\n"
+              f"std Neto={neto_m.std():,.0f}  |  std ΔDepSF={delta_sf.std():,.0f}  "
+              f"|  Ratio stds={std_ratio:.3f}",
+              fontweight="bold")
+ax5.set_xlabel("Millones USD")
+ax5.set_ylabel("Densidad")
+ax5.legend(fontsize=9)
+ax5.grid(True, alpha=0.3)
+
 plt.suptitle(
     f"Validación cruzada — Transacciones Banca Local vs DepositosSF BCRP\n"
-    f"Correlación = {corr:.3f}  |  Slope = {slope:.3f}",
+    f"Correlación = {corr:.3f}  |  Slope = {slope:.3f}  |  "
+    f"MAE = {mae:,.0f} MM/día  |  Ratio std = {std_ratio:.3f}",
     fontsize=12, fontweight="bold", y=1.01
 )
 plt.tight_layout()
