@@ -285,6 +285,19 @@ if _VIF_OK:
                 for v in vif_vals
             ],
         })
+
+        # Para VIF > 10: top 3 features más correlacionados
+        def _top_corr_partners(feat, n=3):
+            if feat not in corr_matrix.columns:
+                return ""
+            serie = corr_matrix[feat].drop(feat).abs().sort_values(ascending=False)
+            top = serie.head(n)
+            return "  |  ".join(f"{f} ({corr_matrix.loc[feat,f]:+.2f})" for f in top.index)
+
+        df_vif["top_corr"] = df_vif.apply(
+            lambda r: _top_corr_partners(r["feature"]) if r["VIF"] > UMBRAL_VIF else "",
+            axis=1
+        )
     else:
         print("    [VIF] Datos insuficientes para calcular VIF")
 
@@ -549,9 +562,12 @@ df_h1 = df_stat_res[[
     "n_pares_altos", "estado_multicol",
 ]].copy()
 if not df_vif.empty:
-    df_h1 = df_h1.merge(df_vif[["feature", "VIF", "estado_vif"]], on="feature", how="left")
+    vif_cols = ["feature", "VIF", "estado_vif"]
+    if "top_corr" in df_vif.columns:
+        vif_cols.append("top_corr")
+    df_h1 = df_h1.merge(df_vif[vif_cols], on="feature", how="left")
 else:
-    df_h1["VIF"] = "—"; df_h1["estado_vif"] = "—"
+    df_h1["VIF"] = "—"; df_h1["estado_vif"] = "—"; df_h1["top_corr"] = ""
 
 df_h1["ya_excluido"] = df_h1["feature"].apply(
     lambda f: "Sí" if f in FEATURES_YA_EXCLUIDOS else "No"
@@ -595,7 +611,7 @@ ws1 = wb["1_Estadistica"]
 _write_header_row(ws1, [c.value for c in ws1[1]])
 _set_col_widths(ws1, {"A": 28, "B": 8, "C": 10, "D": 9, "E": 12, "F": 10,
                        "G": 8, "H": 9, "I": 14, "J": 13, "K": 12, "L": 14,
-                       "M": 8, "N": 12, "O": 10})
+                       "M": 8, "N": 12, "O": 10, "P": 60})
 # Índice de columnas por nombre
 h1_cols = {c.value: get_column_letter(c.column) for c in ws1[1]}
 
@@ -616,6 +632,14 @@ for row_idx in range(2, ws1.max_row + 1):
             cell.fill = PatternFill("solid", fgColor=_color_semaforo(val))
             cell.font = Font(bold=True, size=9, color="000000")
             cell.alignment = Alignment(horizontal="center", vertical="center")
+        elif col_name == "top_corr":
+            cell = ws1[f"{col_letter}{row_idx}"]
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+            cell.font = Font(size=8, color="000000", italic=True)
+            # Fondo naranja claro si tiene contenido (VIF > 10)
+            if cell.value:
+                cell.fill = PatternFill("solid", fgColor="FFF2CC")
+    ws1.row_dimensions[row_idx].height = 28
 
 ws1.freeze_panes = "A2"
 
