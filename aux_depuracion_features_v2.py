@@ -377,10 +377,10 @@ else:
 if RUTA_CSV_IMPORTANCIAS is not None:
     ruta_imp_usar = Path(RUTA_CSV_IMPORTANCIAS)
     if ruta_imp_usar.is_dir():
-        # Es una carpeta → buscar el CSV más reciente dentro de ella
-        candidatos_dir = sorted(ruta_imp_usar.glob(f"*importancias*{BANCO_REF}*.csv"), reverse=True)
+        # Es una carpeta → buscar recursivamente el CSV más reciente dentro de ella
+        candidatos_dir = sorted(ruta_imp_usar.rglob(f"*importancias*{BANCO_REF}*.csv"), reverse=True)
         if not candidatos_dir:
-            candidatos_dir = sorted(ruta_imp_usar.glob("*importancias*.csv"), reverse=True)
+            candidatos_dir = sorted(ruta_imp_usar.rglob("*importancias*.csv"), reverse=True)
         if candidatos_dir:
             ruta_imp_usar = candidatos_dir[0]
             print(f"    Carpeta indicada → usando: {ruta_imp_usar.name}")
