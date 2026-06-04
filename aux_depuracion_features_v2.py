@@ -286,16 +286,23 @@ if _VIF_OK:
             ],
         })
 
-        # Para VIF > 10: top 3 features más correlacionados
-        def _top_corr_partners(feat, n=3):
+        # Para VIF > 10: todos los features con |corr| >= 0.70 (pueden ser 2, 3 o más)
+        UMBRAL_CORR_VIF = 0.70
+
+        def _corr_partners_significativos(feat):
             if feat not in corr_matrix.columns:
                 return ""
-            serie = corr_matrix[feat].drop(feat).abs().sort_values(ascending=False)
-            top = serie.head(n)
-            return "  |  ".join(f"{f} ({corr_matrix.loc[feat,f]:+.2f})" for f in top.index)
+            serie = corr_matrix[feat].drop(feat)
+            signif = serie[serie.abs() >= UMBRAL_CORR_VIF].abs().sort_values(ascending=False)
+            if signif.empty:
+                # Si ninguno supera 0.70, mostrar el top 3 igual
+                signif = serie.abs().sort_values(ascending=False).head(3)
+            return "  |  ".join(
+                f"{f} ({corr_matrix.loc[feat, f]:+.2f})" for f in signif.index
+            )
 
         df_vif["top_corr"] = df_vif.apply(
-            lambda r: _top_corr_partners(r["feature"]) if r["VIF"] > UMBRAL_VIF else "",
+            lambda r: _corr_partners_significativos(r["feature"]) if r["VIF"] > UMBRAL_VIF else "",
             axis=1
         )
     else:
