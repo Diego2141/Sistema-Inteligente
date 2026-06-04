@@ -105,15 +105,17 @@ std_ratio = neto_m.std() / delta_sf.std()
 # Ratio diario: evitar divisiones por cero
 mask_nz   = delta_sf.abs() > 1
 ratio_ser = (neto_m[mask_nz] / delta_sf[mask_nz])
-ratio_med = ratio_ser.median()
-ratio_p25 = ratio_ser.quantile(0.25)
-ratio_p75 = ratio_ser.quantile(0.75)
+ratio_med  = ratio_ser.median()
+ratio_mean = ratio_ser.mean()
+ratio_p25  = ratio_ser.quantile(0.25)
+ratio_p75  = ratio_ser.quantile(0.75)
 
 print(f"\n── Validación de magnitud ──────────────────────────────")
 print(f"  MAE  (millones USD/día)     : {mae:,.1f}")
 print(f"  RMSE (millones USD/día)     : {rmse:,.1f}")
 print(f"  Ratio std  (neto/delta_SF)  : {std_ratio:.3f}  (ideal=1.0)")
-print(f"  Ratio diario median         : {ratio_med:.3f}  (ideal=1.0)")
+print(f"  Ratio diario media          : {ratio_mean:.3f}  (ideal=1.0)")
+print(f"  Ratio diario mediana        : {ratio_med:.3f}  (ideal=1.0)")
 print(f"  Ratio diario P25-P75        : [{ratio_p25:.3f}, {ratio_p75:.3f}]")
 if abs(std_ratio - 1) < 0.10:
     print("  ✓ Escala OK — ratio de desviaciones estándar dentro del ±10%")
@@ -173,12 +175,17 @@ ax3.grid(True, alpha=0.3)
 
 # Panel 4: Ratio rolling (flujo_neto / delta_DepSF) en el tiempo
 ax4 = axes[3]
-roll_ratio = ratio_ser.rolling(22, min_periods=10).median()
+roll_ratio      = ratio_ser.rolling(22, min_periods=10).median()
+roll_ratio_mean = ratio_ser.rolling(22, min_periods=10).mean()
 ax4.plot(roll_ratio.index, roll_ratio, color="steelblue", lw=1.0,
          label="Ratio rolling 22d (mediana)")
+ax4.plot(roll_ratio_mean.index, roll_ratio_mean, color="darkorange", lw=1.0,
+         alpha=0.75, label="Ratio rolling 22d (media)")
 ax4.axhline(1.0, color="black", lw=0.8, ls="--", label="Ideal = 1.0")
-ax4.axhline(ratio_med, color="darkorange", lw=1.0, ls=":",
+ax4.axhline(ratio_med, color="steelblue", lw=0.8, ls=":",
             label=f"Mediana global = {ratio_med:.3f}")
+ax4.axhline(ratio_mean, color="darkorange", lw=0.8, ls=":",
+            label=f"Media global = {ratio_mean:.3f}")
 ax4.fill_between(roll_ratio.index, 0.85, 1.15, alpha=0.08,
                  color="seagreen", label="Banda ±15%")
 ax4.set_ylim(-1, 3)
@@ -211,9 +218,9 @@ ax5.grid(True, alpha=0.3)
 
 plt.suptitle(
     f"Validación cruzada — Transacciones Banca Local vs DepositosSF BCRP\n"
-    f"Correlación = {corr:.3f}  |  Slope = {slope:.3f}  |  "
-    f"MAE = {mae:,.0f} MM/día  |  Ratio std = {std_ratio:.3f}",
-    fontsize=12, fontweight="bold", y=1.01
+    f"Correlación = {corr:.3f}  |  Slope = {slope:.3f}  |  MAE = {mae:,.0f} MM/día  |  "
+    f"Ratio std = {std_ratio:.3f}  |  Ratio media = {ratio_mean:.3f}  |  Ratio mediana = {ratio_med:.3f}",
+    fontsize=11, fontweight="bold", y=1.01
 )
 plt.tight_layout()
 plt.savefig(RUTA_OUTPUT_PNG, dpi=150, bbox_inches="tight")
