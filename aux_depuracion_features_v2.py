@@ -56,6 +56,14 @@ DIR_OUTPUT     = BASE / "2. Output" / "aux_depuracion_features_v2"
 RUTA_EXCEL_OUT = DIR_OUTPUT / "aux_depuracion_features_v2.xlsx"
 RUTA_PLOT_OUT  = DIR_OUTPUT / "correlacion_inter_features.png"
 
+# ── Selector de CSV de importancias ───────────────────────────────────────────
+# None  → busca automáticamente el más reciente en DIR_STEP005
+# Ruta  → usa ese CSV exacto (recomendado cuando hay varios modelos)
+# Ejemplos:
+#   RUTA_CSV_IMPORTANCIAS = DIR_STEP005 / "xgb_qt_expanding_5051" / "wfcv_v3_importancias_SISTEMA_20250530.csv"
+#   RUTA_CSV_IMPORTANCIAS = DIR_STEP005 / "xgb_expanding_5051"    / "wfcv_v3_importancias_SISTEMA_20250530.csv"
+RUTA_CSV_IMPORTANCIAS: Path | None = None   # ← cambiar aquí si quieres un modelo específico
+
 # Banco de referencia para los análisis estadísticos (el de mayor volumen)
 BANCO_REF      = "SISTEMA"
 
@@ -352,17 +360,39 @@ print(f"    Heatmap guardado: {RUTA_PLOT_OUT.name}")
 
 print("\n[3] Capa 2 — importancias del modelo (step005)...")
 
-# Buscar CSV de importancias en todas las subcarpetas de step005
-csv_imp_candidates = sorted(DIR_STEP005.rglob(f"*importancias*{BANCO_REF}*.csv"), reverse=True)
-if not csv_imp_candidates:
-    csv_imp_candidates = sorted(DIR_STEP005.rglob("*importancias*.csv"), reverse=True)
+# Listar siempre todos los CSV disponibles para que el usuario sepa qué hay
+csv_todos = sorted(DIR_STEP005.rglob(f"*importancias*{BANCO_REF}*.csv"), reverse=True)
+if not csv_todos:
+    csv_todos = sorted(DIR_STEP005.rglob("*importancias*.csv"), reverse=True)
+
+if csv_todos:
+    print(f"    CSVs de importancias disponibles ({len(csv_todos)}):")
+    for i, p in enumerate(csv_todos):
+        marca = " ← seleccionado" if i == 0 and RUTA_CSV_IMPORTANCIAS is None else ""
+        print(f"      [{i+1}] {p.relative_to(DIR_STEP005)}{marca}")
+else:
+    print(f"    No se encontraron CSVs en {DIR_STEP005}")
+
+# Seleccionar CSV: explícito o el más reciente
+if RUTA_CSV_IMPORTANCIAS is not None:
+    ruta_imp_usar = Path(RUTA_CSV_IMPORTANCIAS)
+    if not ruta_imp_usar.exists():
+        print(f"    [ERROR] RUTA_CSV_IMPORTANCIAS no existe: {ruta_imp_usar}")
+        ruta_imp_usar = None
+    else:
+        print(f"    Usando CSV explícito: {ruta_imp_usar.relative_to(DIR_STEP005)}")
+elif csv_todos:
+    ruta_imp_usar = csv_todos[0]
+    print(f"    Usando el más reciente. Para cambiar, edita RUTA_CSV_IMPORTANCIAS en la config.")
+else:
+    ruta_imp_usar = None
 
 df_imp_res = pd.DataFrame()
 tiene_importancias = False
 
-if csv_imp_candidates:
-    ruta_imp = csv_imp_candidates[0]
-    print(f"    CSV importancias encontrado: {ruta_imp.name}")
+if ruta_imp_usar is not None:
+    ruta_imp = ruta_imp_usar
+    print(f"    CSV seleccionado: {ruta_imp.name}")
     df_imp_raw = pd.read_csv(ruta_imp)
     # Estructura esperada: columnas = feature + fold_1, fold_2, ...
     fold_cols = [c for c in df_imp_raw.columns if c not in ("feature",) and str(c).isdigit()]
