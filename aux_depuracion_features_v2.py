@@ -292,33 +292,36 @@ print(f"    Pares con |corr| ≥ {UMBRAL_CORR_FEAT}: {len(df_pares)}")
 print(f"    Features involucrados en pares altos: {len(feats_multicolm)}")
 
 # ── Plot heatmap de correlación ───────────────────────────────────────────────
+# Limitar a 25 features y dpi bajo para evitar MemoryError en carpetas de red
 print("    Generando heatmap de correlación...")
-top_feat = df_stat_res.nlargest(40, "n_pares_altos")["feature"].tolist()
+top_feat = df_stat_res.nlargest(25, "n_pares_altos")["feature"].tolist()
 if len(top_feat) < 5:
-    top_feat = feat_activos[:40]
+    top_feat = feat_activos[:25]
 corr_sub = corr_matrix.loc[top_feat, top_feat]
+n_f = len(top_feat)
 
-fig, ax = plt.subplots(figsize=(16, 14))
-cmap = mcolors.LinearSegmentedColormap.from_list("rg", ["#1a6b1a", "white", "#8b0000"])
-im = ax.imshow(corr_sub.values, vmin=-1, vmax=1, cmap=cmap, aspect="auto")
+fig, ax = plt.subplots(figsize=(min(n_f * 0.55, 13), min(n_f * 0.50, 12)))
+cmap = plt.cm.RdYlGn   # colormap estándar — evita allocación extra de LinearSegmented
+im = ax.imshow(corr_sub.values, vmin=-1, vmax=1, cmap=cmap, aspect="auto",
+               interpolation="none")
 plt.colorbar(im, ax=ax, shrink=0.7, label="Correlación de Pearson")
-ax.set_xticks(range(len(top_feat)))
-ax.set_yticks(range(len(top_feat)))
+ax.set_xticks(range(n_f))
+ax.set_yticks(range(n_f))
 ax.set_xticklabels(top_feat, rotation=90, fontsize=7)
 ax.set_yticklabels(top_feat, fontsize=7)
 ax.set_title(
-    f"Correlación inter-feature (Top features por n_pares_altos) — {BANCO_REF}\n"
-    f"Datos TRAIN ≤ {TRAIN_CUTOFF}  |  Umbral alerta: |r| ≥ {UMBRAL_CORR_FEAT}",
-    fontweight="bold", fontsize=11,
+    f"Correlación inter-feature (Top {n_f} por n_pares_altos) — {BANCO_REF}\n"
+    f"Datos TRAIN ≤ {TRAIN_CUTOFF}  |  Umbral: |r| ≥ {UMBRAL_CORR_FEAT}",
+    fontweight="bold", fontsize=10,
 )
-for i in range(len(top_feat)):
-    for j in range(len(top_feat)):
+for i in range(n_f):
+    for j in range(n_f):
         v = corr_sub.values[i, j]
         if abs(v) >= UMBRAL_CORR_FEAT and i != j:
             ax.text(j, i, f"{v:.2f}", ha="center", va="center",
-                    fontsize=5.5, color="white" if abs(v) > 0.92 else "black")
+                    fontsize=6, color="black")
 plt.tight_layout()
-plt.savefig(RUTA_PLOT_OUT, dpi=150, bbox_inches="tight")
+plt.savefig(RUTA_PLOT_OUT, dpi=90, bbox_inches="tight")
 plt.close()
 print(f"    Heatmap guardado: {RUTA_PLOT_OUT.name}")
 
