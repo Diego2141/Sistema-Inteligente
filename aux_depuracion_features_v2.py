@@ -62,7 +62,7 @@ RUTA_PLOT_OUT  = DIR_OUTPUT / "correlacion_inter_features.png"
 # Ejemplos:
 #   RUTA_CSV_IMPORTANCIAS = DIR_STEP005 / "xgb_qt_expanding_5051" / "wfcv_v3_importancias_SISTEMA_20250530.csv"
 #   RUTA_CSV_IMPORTANCIAS = DIR_STEP005 / "xgb_expanding_5051"    / "wfcv_v3_importancias_SISTEMA_20250530.csv"
-RUTA_CSV_IMPORTANCIAS: Path | None = DIR_STEP005 / "final"   # busca el CSV dentro de esta carpeta
+RUTA_CSV_IMPORTANCIAS = DIR_STEP005 / "final"   # busca el CSV dentro de esta carpeta
 
 # Banco de referencia para los análisis estadísticos (el de mayor volumen)
 BANCO_REF      = "SISTEMA"
