@@ -62,7 +62,7 @@ RUTA_PLOT_OUT  = DIR_OUTPUT / "correlacion_inter_features.png"
 # Ejemplos:
 #   RUTA_CSV_IMPORTANCIAS = DIR_STEP005 / "xgb_qt_expanding_5051" / "wfcv_v3_importancias_SISTEMA_20250530.csv"
 #   RUTA_CSV_IMPORTANCIAS = DIR_STEP005 / "xgb_expanding_5051"    / "wfcv_v3_importancias_SISTEMA_20250530.csv"
-RUTA_CSV_IMPORTANCIAS: Path | None = None   # ← cambiar aquí si quieres un modelo específico
+RUTA_CSV_IMPORTANCIAS: Path | None = DIR_STEP005 / "final"   # busca el CSV dentro de esta carpeta
 
 # Banco de referencia para los análisis estadísticos (el de mayor volumen)
 BANCO_REF      = "SISTEMA"
@@ -373,10 +373,21 @@ if csv_todos:
 else:
     print(f"    No se encontraron CSVs en {DIR_STEP005}")
 
-# Seleccionar CSV: explícito o el más reciente
+# Seleccionar CSV: explícito, carpeta, o el más reciente
 if RUTA_CSV_IMPORTANCIAS is not None:
     ruta_imp_usar = Path(RUTA_CSV_IMPORTANCIAS)
-    if not ruta_imp_usar.exists():
+    if ruta_imp_usar.is_dir():
+        # Es una carpeta → buscar el CSV más reciente dentro de ella
+        candidatos_dir = sorted(ruta_imp_usar.glob(f"*importancias*{BANCO_REF}*.csv"), reverse=True)
+        if not candidatos_dir:
+            candidatos_dir = sorted(ruta_imp_usar.glob("*importancias*.csv"), reverse=True)
+        if candidatos_dir:
+            ruta_imp_usar = candidatos_dir[0]
+            print(f"    Carpeta indicada → usando: {ruta_imp_usar.name}")
+        else:
+            print(f"    [ERROR] No se encontró CSV de importancias en: {ruta_imp_usar}")
+            ruta_imp_usar = None
+    elif not ruta_imp_usar.exists():
         print(f"    [ERROR] RUTA_CSV_IMPORTANCIAS no existe: {ruta_imp_usar}")
         ruta_imp_usar = None
     else:
