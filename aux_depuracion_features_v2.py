@@ -325,6 +325,8 @@ print("    Generando heatmap de correlación...")
 top_feat = df_stat_res.nlargest(25, "n_pares_altos")["feature"].tolist()
 if len(top_feat) < 5:
     top_feat = feat_activos[:25]
+# Filtrar solo features que existen en corr_matrix (excluidos ya no están en parquet)
+top_feat = [f for f in top_feat if f in corr_matrix.index]
 corr_sub = corr_matrix.loc[top_feat, top_feat]
 n_f = len(top_feat)
 
