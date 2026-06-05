@@ -75,7 +75,7 @@ PARAMS = {
 
     # Modelo
     "h_min": 2,
-    "h_max": 75,
+    "h_max": 90,
     "quantiles": [0.01, 0.05, 0.50, 0.95, 0.99],
 
     # Modo demo (True mientras no lleguen los datos reales)

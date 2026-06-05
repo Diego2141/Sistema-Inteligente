@@ -71,7 +71,7 @@ BANCO_REF      = "SISTEMA"
 TRAIN_CUTOFF   = "2022-12-31"
 
 # Horizontes a evaluar para la correlación feature → target
-H_EVALUAR      = [3, 5, 10, 22, 45, 75]
+H_EVALUAR      = [3, 5, 10, 22, 45, 90]
 
 # Umbrales estadísticos
 UMBRAL_NULOS       = 0.20   # > 20% NaN → señal de alerta
