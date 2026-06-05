@@ -259,6 +259,71 @@ def reemplazar_garch_sin_leakage(df, train_end):
 
 
 ###############################################################################
+# FFD sin leakage  (recalibra d solo sobre TRAIN, mismo patrón que GARCH)
+###############################################################################
+
+_FFD_SERIES_S3 = ["EMBI_PERU", "T10Y", "CDS_PERU_5Y", "VIX"]
+_FFD_THRES_S3  = 1e-4
+_FFD_RANGO_S3  = np.arange(0.0, 1.05, 0.05)
+
+
+def _ffd_pesos_s3(d: float, n: int) -> np.ndarray:
+    w = [1.0]
+    for k in range(1, n):
+        w.append(w[-1] * (k - 1 - d) / k)
+    w = np.array(w[::-1])
+    return w[np.abs(w) > _FFD_THRES_S3]
+
+
+def _ffd_aplicar_s3(serie: pd.Series, d: float) -> pd.Series:
+    s = serie.ffill().dropna()
+    pesos = _ffd_pesos_s3(d, len(s))
+    L = len(pesos)
+    vals = {s.index[i]: float(np.dot(pesos, s.iloc[i - L + 1: i + 1]))
+            for i in range(L - 1, len(s))}
+    return pd.Series(vals, name=serie.name)
+
+
+def _ffd_calibrar_d_s3(serie: pd.Series, train_end) -> float:
+    from statsmodels.tsa.stattools import adfuller
+    s = serie.ffill().dropna()
+    s_tr = s[s.index <= train_end]
+    if len(s_tr) < 50:
+        return 1.0
+    for d in _FFD_RANGO_S3:
+        try:
+            sd = _ffd_aplicar_s3(s_tr, d) if d > 0 else s_tr
+            if len(sd) < 20:
+                continue
+            _, p, *_ = adfuller(sd)
+            if p < 0.05:
+                return float(d)
+        except Exception:
+            continue
+    return 1.0
+
+
+def reemplazar_ffd_sin_leakage(df: pd.DataFrame, train_end) -> pd.DataFrame:
+    """Re-calibra d FFD con datos ≤ train_end y re-aplica FFD a la serie completa."""
+    frac_cols = [f"{s}_frac" for s in _FFD_SERIES_S3 if f"{s}_frac" in df.columns]
+    if not frac_cols:
+        return df
+    df = df.copy()
+    raw_cols = ["fecha_t"] + [s for s in _FFD_SERIES_S3 if s in df.columns]
+    raw = (df[raw_cols].drop_duplicates("fecha_t")
+           .set_index("fecha_t").sort_index())
+    for nombre in _FFD_SERIES_S3:
+        col_frac = f"{nombre}_frac"
+        if col_frac not in df.columns or nombre not in raw.columns:
+            continue
+        d = _ffd_calibrar_d_s3(raw[nombre], train_end)
+        ffd = _ffd_aplicar_s3(raw[nombre].ffill().dropna(), d)
+        df[col_frac] = df["fecha_t"].map(ffd)
+        logger.info(f"    {col_frac:<25} re-calibrado: d={d:.2f}")
+    return df
+
+
+###############################################################################
 # PARTE 3 — Optimización Bayesiana con Optuna
 ###############################################################################
 
@@ -626,6 +691,11 @@ def entrenar_banco(banco: str) -> dict | None:
     if USAR_GARCH_SIN_LEAKAGE:
         logger.info(f"  [{banco}] Re-estimando GARCH sin leakage (TRAIN hasta {CORTE_VAL.date()})...")
         df = reemplazar_garch_sin_leakage(df, CORTE_VAL)
+
+    frac_present = [c for c in df.columns if c.endswith("_frac")]
+    if frac_present:
+        logger.info(f"  [{banco}] Re-calibrando FFD sin leakage (TRAIN hasta {CORTE_VAL.date()})...")
+        df = reemplazar_ffd_sin_leakage(df, CORTE_VAL)
 
     df_train, df_val, df_test = split_walk_forward(df, CORTE_VAL, CORTE_TEST)
 

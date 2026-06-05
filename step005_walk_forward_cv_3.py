@@ -306,6 +306,68 @@ def reemplazar_garch_fold(df_fold, train_end):
     return df_fold
 
 
+# ─── FFD sin leakage por fold (mismo patrón que reemplazar_garch_fold) ────────
+
+_FFD_SERIES_FOLD = ["EMBI_PERU", "T10Y", "CDS_PERU_5Y", "VIX"]
+_FFD_THRES_FOLD  = 1e-4
+_FFD_RANGO_FOLD  = np.arange(0.0, 1.05, 0.05)
+
+
+def _ffd_pesos_fold(d: float, n: int) -> np.ndarray:
+    w = [1.0]
+    for k in range(1, n):
+        w.append(w[-1] * (k - 1 - d) / k)
+    w = np.array(w[::-1])
+    return w[np.abs(w) > _FFD_THRES_FOLD]
+
+
+def _ffd_aplicar_fold(serie: pd.Series, d: float) -> pd.Series:
+    s = serie.ffill().dropna()
+    pesos = _ffd_pesos_fold(d, len(s))
+    L = len(pesos)
+    vals = {s.index[i]: float(np.dot(pesos, s.iloc[i - L + 1: i + 1]))
+            for i in range(L - 1, len(s))}
+    return pd.Series(vals, name=serie.name)
+
+
+def _ffd_calibrar_d_fold(serie: pd.Series, train_end) -> float:
+    from statsmodels.tsa.stattools import adfuller
+    s = serie.ffill().dropna()
+    s_tr = s[s.index <= train_end]
+    if len(s_tr) < 50:
+        return 1.0
+    for d in _FFD_RANGO_FOLD:
+        try:
+            sd = _ffd_aplicar_fold(s_tr, d) if d > 0 else s_tr
+            if len(sd) < 20:
+                continue
+            _, p, *_ = adfuller(sd)
+            if p < 0.05:
+                return float(d)
+        except Exception:
+            continue
+    return 1.0
+
+
+def reemplazar_ffd_fold(df_fold: pd.DataFrame, train_end) -> pd.DataFrame:
+    """Re-calibra d FFD con datos ≤ train_end y re-aplica FFD a la serie completa del fold."""
+    frac_cols = [f"{s}_frac" for s in _FFD_SERIES_FOLD if f"{s}_frac" in df_fold.columns]
+    if not frac_cols:
+        return df_fold
+    df_fold = df_fold.copy()
+    raw_cols = ["fecha_t"] + [s for s in _FFD_SERIES_FOLD if s in df_fold.columns]
+    raw = (df_fold[raw_cols].drop_duplicates("fecha_t")
+           .set_index("fecha_t").sort_index())
+    for nombre in _FFD_SERIES_FOLD:
+        col_frac = f"{nombre}_frac"
+        if col_frac not in df_fold.columns or nombre not in raw.columns:
+            continue
+        d = _ffd_calibrar_d_fold(raw[nombre], train_end)
+        ffd = _ffd_aplicar_fold(raw[nombre].ffill().dropna(), d)
+        df_fold[col_frac] = df_fold["fecha_t"].map(ffd)
+    return df_fold
+
+
 def _extraer_garch_params_fold(df, train_end):
     """
     Estima parámetros GARCH(1,1) usando solo datos de TRAIN (hasta train_end).
@@ -806,6 +868,10 @@ def preparar_fold_data(df, fold, cols_feat):
                   if c in df_fold_all.columns]
     if garch_cols:
         df_fold_all = reemplazar_garch_fold(df_fold_all, train_end)
+
+    frac_cols = [c for c in df_fold_all.columns if c.endswith("_frac")]
+    if frac_cols:
+        df_fold_all = reemplazar_ffd_fold(df_fold_all, train_end)
 
     df_train = df_fold_all[df_fold_all["fecha_t"] <= train_end]
     df_val   = df_fold_all[(df_fold_all["fecha_t"] >= val_start) &

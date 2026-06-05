@@ -791,7 +791,7 @@ def download_external_series(params):
 ###############################################################################
 
 # ─── Diferenciación Fraccional (López de Prado, Cap. 5) ─────────────────────
-_FD_TRAIN_CUTOFF = "2022-12-31"   # calibrar d solo con datos de entrenamiento
+_FD_TRAIN_CUTOFF = "2010-12-31"   # calibrar d antes de cualquier ventana de test rolling
 _FD_THRES        = 1e-4            # truncar pesos con |w| < thres (FFD)
 _FD_RANGO_D      = np.arange(0.0, 1.05, 0.05)
 
@@ -1070,13 +1070,15 @@ def build_macro_features(macro_df):
     resultado["copper_ma22"]  = copper.rolling(22).mean()
 
     # ── Diferenciación Fraccional (López de Prado) ────────────────────────────
-    # Aplicar a series I(1): EMBI_PERU, T10Y, CDS_PERU_5Y, COPPER
-    # d calibrado sobre datos ≤ 2022 para evitar leakage
+    # Aplicar a series I(1): EMBI_PERU, T10Y, CDS_PERU_5Y, COPPER, VIX
+    # d calibrado sobre datos ≤ _FD_TRAIN_CUTOFF para evitar leakage en rolling CV.
+    # step003 y step005 recalibran d por fold vía reemplazar_ffd_*.
     logger.info("  Calculando features de diferenciación fraccional (FFD)...")
     for nombre_raw, col_src in [("EMBI_PERU",   df.get("EMBI_PERU",   pd.Series(dtype=float))),
                                  ("T10Y",        df.get("T10Y",        pd.Series(dtype=float))),
                                  ("CDS_PERU_5Y", df.get("CDS_PERU_5Y", pd.Series(dtype=float))),
-                                 ("COPPER",      df.get("COPPER",      pd.Series(dtype=float)))]:
+                                 ("COPPER",      df.get("COPPER",      pd.Series(dtype=float))),
+                                 ("VIX",         df.get("VIX",         pd.Series(dtype=float)))]:
         fd = _fd_feature(col_src.reindex(df.index), nombre_raw)
         resultado[f"{nombre_raw}_frac"] = fd.reindex(resultado.index)
 
