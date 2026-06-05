@@ -99,7 +99,7 @@ VENTANA_TRAIN_AÑOS  = 5      # años de TRAIN iniciales / fijos
 VENTANA_VAL_AÑOS    = 0.5    # años de VAL (solo Optuna) — 6 meses, igual que step004
 VENTANA_TEST_AÑOS   = 1      # años de TEST (solo métricas OOS)
 PASO_AÑOS           = 1      # desplazamiento / crecimiento entre folds
-EMBARGO_DIAS_HAB    = 1 if EXPANDING else 90  # expanding: 1dh mínimo para evitar overlap train_end en VAL; rolling: 90dh anti-leakage
+EMBARGO_DIAS_HAB    = 1 if EXPANDING else 75  # expanding: 1dh mínimo para evitar overlap train_end en VAL; rolling: 75dh anti-leakage
 
 # ── Modelo ────────────────────────────────────────────────────────────────────
 QUANTILES        = [0.01, 0.05, 0.50, 0.95, 0.99]
