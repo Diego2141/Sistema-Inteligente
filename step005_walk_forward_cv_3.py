@@ -100,21 +100,24 @@ VENTANA_VAL_AÑOS    = 0.5    # años de VAL (solo Optuna) — 6 meses, igual qu
 VENTANA_TEST_AÑOS   = 1      # años de TEST (solo métricas OOS)
 PASO_AÑOS           = 1      # desplazamiento / crecimiento entre folds
 
-# ── Anti-leakage: purga, embargo y burn-in ────────────────────────────────────
+# ── Anti-leakage: purga y burn-in ────────────────────────────────────────────
 #
-#  EXPANDING:
-#  │burn│[TRAIN efectivo 2000──────────T₀]│←75dh→│←22dh→│[  VAL  ]│←75dh→│[TEST]│
-#   22dh                                   purga   embargo           purga
-#                                          labels  features(MA22)    labels
+#  EXPANDING (train_start fijo = primera fecha disponible):
+#  │burn│[TRAIN efectivo 2000──────────T₀]│←── 75 dh ───→│[  VAL  ]│←── 75 dh ───→│[TEST]│
+#   22dh                                   purga (labels    purga VAL→TEST (labels
+#                                           Y features MA22) Y features MA22)
 #
-#  ROLLING:
-#  │burn│[TRAIN efectivo T_s────────T₀]│←75dh→│←22dh→│[  VAL  ]│←75dh→│[TEST]│
-#   22dh  ↑ cambia cada fold           purga   embargo           purga
-#                                      labels  features(MA22)    labels
+#  ROLLING (ventana fija que desliza):
+#  │burn│[TRAIN efectivo T_s────────T₀]│←── 75 dh ───→│[  VAL  ]│←── 75 dh ───→│[TEST]│
+#   22dh  ↑ cambia cada fold            purga (labels    purga VAL→TEST (labels
+#                                        Y features MA22) Y features MA22)
+#
+#  Justificación: purga = h_max = 75 dh >> MA22 = 22 dh → el gap de purga
+#  ya engloba el lookback de todas las features. Embargo adicional = 0.
+#  GARCH y FFD no requieren embargo extra porque se recalibran por fold.
 #
 H_MAX_DIAS_HAB   = 75   # horizonte máximo de predicción (h_max)
-PURGE_DIAS_HAB   = H_MAX_DIAS_HAB   # purga TRAIN→VAL: labels que cruzan val_start
-EMBARGO_DIAS_HAB = 22               # embargo TRAIN→VAL: lookback MA22 post-purga
+PURGE_DIAS_HAB   = H_MAX_DIAS_HAB   # purga TRAIN→VAL: cubre labels Y feature lookback
 PURGE_VAL_TEST   = H_MAX_DIAS_HAB   # purga VAL→TEST: labels de Optuna que cruzan test_start
 BURN_IN_DIAS_HAB = 22               # excluir inicio de df_train (MA22 incompleto)
 
@@ -457,7 +460,6 @@ def generar_folds(
     ventana_test_años,
     paso_años,
     purge_dias_hab,
-    embargo_dias_hab,
     purge_val_test,
     expanding,
 ):
@@ -466,13 +468,14 @@ def generar_folds(
     EXPANDING=False → ventana rodante fija (mismo comportamiento que v2).
 
     Estructura por fold (igual para ambos modos):
-      │burn│[TRAIN efectivo]│←purge→│←embargo→│[VAL]│←purge→│[TEST]│
-       22dh                  75dh     22dh               75dh
+      │burn│[TRAIN efectivo]│←── purge 75dh ──→│[VAL]│←── purge 75dh ──→│[TEST]│
+       22dh                  cubre labels         cubre labels VAL→TEST
+                             Y features (MA22)    Y features (MA22)
 
-    • purge TRAIN→VAL  : gap de h_max días para que ningún label de TRAIN cruce val_start
-    • embargo TRAIN→VAL: gap adicional para que MA22 de VAL no toque TRAIN
-    • purge VAL→TEST   : gap de h_max días para que ningún label de VAL cruce test_start
-    • burn-in           : se aplica en _entrenar_fold al filtrar df_train
+    • purge TRAIN→VAL : h_max días — cubre label overlap Y feature lookback (MA22<75)
+    • purge VAL→TEST  : h_max días — cubre labels de Optuna que cruzan test_start
+    • embargo         : redundante (purga 75dh >> MA22 22dh); GARCH/FFD recalibrados por fold
+    • burn-in         : aplicado en _entrenar_fold sobre df_train
 
     Genera folds mientras test_end ≤ última fecha disponible.
     """
@@ -493,7 +496,7 @@ def generar_folds(
             train_end   = train_start + pd.DateOffset(
                 months=int(round(ventana_train_años * 12)))
 
-        val_start  = train_end   + pd.offsets.BusinessDay(purge_dias_hab + embargo_dias_hab)
+        val_start  = train_end   + pd.offsets.BusinessDay(purge_dias_hab)
         val_end    = val_start   + pd.DateOffset(months=int(round(ventana_val_años * 12)))
         test_start = val_end     + pd.offsets.BusinessDay(purge_val_test)
         test_end   = test_start  + pd.DateOffset(months=int(round(ventana_test_años * 12)))
@@ -1006,7 +1009,7 @@ def graficar_metricas_wfcv(df_test_m, banco):
         f"Walk-forward CV v3 [{modo}] — {banco}  [métricas TEST out-of-sample]\n"
         f"TRAIN {VENTANA_TRAIN_AÑOS}yr{'(min)' if EXPANDING else ''} / "
         f"VAL {VENTANA_VAL_AÑOS}yr (Optuna) / TEST {VENTANA_TEST_AÑOS}yr / "
-        f"paso {PASO_AÑOS}yr / purga {PURGE_DIAS_HAB}dh / embargo {EMBARGO_DIAS_HAB}dh / burn-in {BURN_IN_DIAS_HAB}dh",
+        f"paso {PASO_AÑOS}yr / purga {PURGE_DIAS_HAB}dh / burn-in {BURN_IN_DIAS_HAB}dh",
         fontweight="bold", fontsize=10,
     )
     metricas_config = [
@@ -1703,8 +1706,8 @@ def evaluar_banco(banco: str):
     logger.info(
         f"  TRAIN {VENTANA_TRAIN_AÑOS}yr{'(min)' if EXPANDING else ''} | "
         f"VAL {VENTANA_VAL_AÑOS}yr (Optuna) | TEST {VENTANA_TEST_AÑOS}yr (métricas) | "
-        f"paso {PASO_AÑOS}yr | purga {PURGE_DIAS_HAB}+{PURGE_VAL_TEST}dh | "
-        f"embargo {EMBARGO_DIAS_HAB}dh | burn-in {BURN_IN_DIAS_HAB}dh | trials {N_TRIALS_OPTUNA}"
+        f"paso {PASO_AÑOS}yr | purga {PURGE_DIAS_HAB}dh (TRAIN→VAL) + {PURGE_VAL_TEST}dh (VAL→TEST) | "
+        f"burn-in {BURN_IN_DIAS_HAB}dh | trials {N_TRIALS_OPTUNA}"
     )
 
     t_inicio = time.time()
@@ -1734,7 +1737,6 @@ def evaluar_banco(banco: str):
         ventana_test_años=VENTANA_TEST_AÑOS,
         paso_años=PASO_AÑOS,
         purge_dias_hab=PURGE_DIAS_HAB,
-        embargo_dias_hab=EMBARGO_DIAS_HAB,
         purge_val_test=PURGE_VAL_TEST,
         expanding=EXPANDING,
     )
@@ -2026,17 +2028,17 @@ def evaluar_banco(banco: str):
                 "paso_años"          : PASO_AÑOS,
                 "h_max_dias_hab"     : H_MAX_DIAS_HAB,
                 "purge_dias_hab"     : PURGE_DIAS_HAB,
-                "embargo_dias_hab"   : EMBARGO_DIAS_HAB,
                 "purge_val_test"     : PURGE_VAL_TEST,
                 "burn_in_dias_hab"   : BURN_IN_DIAS_HAB,
                 "n_trials_optuna"    : N_TRIALS_OPTUNA,
             },
             "anti_leakage": {
-                "purge_train_val"  : f"{PURGE_DIAS_HAB} dh (labels TRAIN no cruzan val_start)",
-                "embargo_train_val": f"{EMBARGO_DIAS_HAB} dh (MA22 de VAL no toca TRAIN)",
-                "purge_val_test"   : f"{PURGE_VAL_TEST} dh (labels VAL no cruzan test_start)",
-                "burn_in"          : f"{BURN_IN_DIAS_HAB} dh inicio de TRAIN excluido (MA22 incompleto)",
-                "garch_por_fold"   : "ω/α/β estimados en TRAIN, propagados a VAL+TEST",
+                "purge_train_val": (f"{PURGE_DIAS_HAB} dh — cubre labels TRAIN→VAL "
+                                    f"y feature lookback (MA22={BURN_IN_DIAS_HAB}dh < purga)"),
+                "purge_val_test" : f"{PURGE_VAL_TEST} dh — labels Optuna no cruzan test_start",
+                "burn_in"        : f"{BURN_IN_DIAS_HAB} dh — inicio de TRAIN excluido (MA22 incompleto)",
+                "embargo"        : "0 dh — redundante: purga 75dh >> MA22 22dh",
+                "garch_por_fold" : "ω/α/β estimados en TRAIN, propagados a VAL+TEST",
                 "medianas_por_fold": "calculadas en TRAIN, aplicadas a VAL+TEST",
                 "val_test_sep"     : "VAL=Optuna only / TEST=métricas OOS only",
             },
