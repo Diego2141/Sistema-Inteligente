@@ -16,8 +16,8 @@ Usa el mismo template que ya tienes funcionando. En cada hoja configura:
     End       → hoy
     Period    → D
 
-  Hoja "PETROL":
-    Security  → SPPETIPP Index
+  Hoja "COPPER":
+    Security  → LMCADS03 Comdty
     Field     → PX_LAST
     Start     → 01/01/2000
     End       → hoy
@@ -51,7 +51,7 @@ RUTA_SALIDA  = RUTA_ENTRADA  # sobreescribe el mismo archivo después de limpiar
 
 HOJAS = {
     "CDS":    "CDS_PERU_5Y",   # hoja → nombre de columna en output
-    "PETROL": "PETROLEUM",
+    "COPPER": "COPPER",        # LME Copper 3M (LMCADS03 Comdty)
 }
 
 # Formato Bloomberg con template estándar:
@@ -138,7 +138,7 @@ def _leer_hoja(ruta: Path, hoja: str, nombre: str) -> pd.Series:
 # ─────────────────────────────────────────────────────────────────────────────
 TICKERS_PDBLP = {
     "PERU CDS USD SR 5Y D14 Corp": "CDS_PERU_5Y",
-    "SPPETIPP Index":              "PETROLEUM",
+    "LMCADS03 Comdty":             "COPPER",
 }
 
 def _descargar_via_pdblp() -> pd.DataFrame:

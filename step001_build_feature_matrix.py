@@ -716,10 +716,10 @@ def download_external_series(params):
         logger.warning("  TC_PEN_USD: no se encontraron hojas TC Compra/Venta en series_bcrp.xlsx.")
         series["TC_PEN_USD"] = pd.Series(dtype=float, name="TC_PEN_USD")
 
-    # 4d. Bloomberg — CDS Perú 5Y y Petroleum Index
+    # 4d. Bloomberg — CDS Perú 5Y y Cobre LME 3M
     ruta_bbg = params.get("ruta_bloomberg", "")
     series["CDS_PERU_5Y"] = _leer_bloomberg_excel(ruta_bbg, "CDS_PERU_5Y")
-    series["PETROLEUM"]   = _leer_bloomberg_excel(ruta_bbg, "PETROLEUM")
+    series["COPPER"]      = _leer_bloomberg_excel(ruta_bbg, "COPPER")
 
     # Alinear al índice de fechas del rango
     idx = pd.bdate_range(start=inicio, end=fin)
@@ -733,7 +733,7 @@ def download_external_series(params):
             df[nombre] = np.nan
 
     cols_esperadas = ["VIX", "TC_PEN_USD", "T10Y", "FED_FUNDS", "EMBI_PERU", "TASA_REF_BCRP",
-                      "CDS_PERU_5Y", "PETROLEUM"]
+                      "CDS_PERU_5Y", "COPPER"]
     for c in cols_esperadas:
         if c not in df.columns:
             df[c] = np.nan
@@ -943,12 +943,12 @@ def build_macro_features(macro_df):
     resultado["delta_CDS"]     = cds.diff(1)
     resultado["garch_vol_cds"] = _garch_vol(cds.diff(1))
 
-    # Bloomberg: S&P GSCI Petroleum Index
-    petrol = df.get("PETROLEUM", pd.Series(dtype=float))
-    resultado["PETROLEUM"]        = df.get("PETROLEUM", np.nan)
-    resultado["delta_PETROLEUM"]  = petrol.diff(1)
-    resultado["petroleum_ret"]    = petrol.pct_change()
-    resultado["petroleum_ma22"]   = petrol.rolling(22).mean()
+    # Bloomberg: Cobre LME 3 meses (LMCADS03 Comdty) — USD/TM
+    copper = df.get("COPPER", pd.Series(dtype=float))
+    resultado["COPPER"]       = df.get("COPPER", np.nan)
+    resultado["delta_COPPER"] = copper.diff(1)
+    resultado["copper_ret"]   = copper.pct_change()
+    resultado["copper_ma22"]  = copper.rolling(22).mean()
 
     return resultado
 
@@ -1522,10 +1522,10 @@ def build_data_dictionary(params):
     add("CDS_PERU_5Y",      "Bloomberg",  "CDS soberano Perú 5 años (PX_LAST) — mide riesgo crediticio país",   0, None)
     add("delta_CDS",        "Bloomberg",  "Variación diaria del CDS Perú 5Y",                                   1, None)
     add("garch_vol_cds",    "Bloomberg",  "Volatilidad GARCH(1,1) de los cambios diarios del CDS",              None, None)
-    add("PETROLEUM",        "Bloomberg",  "S&P GSCI Petroleum Index (SPPETIPP) — precio spot de petróleo",      0, None)
-    add("delta_PETROLEUM",  "Bloomberg",  "Variación diaria del índice de petróleo",                            1, None)
-    add("petroleum_ret",    "Bloomberg",  "Retorno diario (%) del índice de petróleo",                          1, None)
-    add("petroleum_ma22",   "Bloomberg",  "Media móvil 22d del índice de petróleo",                             None, None)
+    add("COPPER",       "Bloomberg",  "LME Copper 3M (LMCADS03) — precio cobre USD/TM. Peru es 2do productor mundial", 0, None)
+    add("delta_COPPER", "Bloomberg",  "Variación diaria del precio del cobre",                                         1, None)
+    add("copper_ret",   "Bloomberg",  "Retorno diario (%) del precio del cobre",                                       1, None)
+    add("copper_ma22",  "Bloomberg",  "Media móvil 22d del precio del cobre",                                          None, None)
 
     # ── Features estacionales (en t+h — fecha futura, siempre conocidas) ─────
     add("dias_al_cierre_mes",    "Calendario", "Días hábiles restantes hasta fin de mes en t+h",          None, "t+h")
