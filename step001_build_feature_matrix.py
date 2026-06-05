@@ -641,7 +641,7 @@ def _leer_bcrp_excel(ruta, nombre, hoja=0):
 def _leer_bloomberg_excel(ruta, nombre):
     """
     Lee una columna del archivo bloomberg_series.xlsx generado por
-    aux_download_bloomberg.py (índice=fecha, columnas=CDS_PERU_5Y/PETROLEUM).
+    aux_download_bloomberg.py. Lee la hoja 'datos' (salida limpia).
     """
     if not ruta or not os.path.exists(ruta):
         logger.warning(
@@ -650,7 +650,7 @@ def _leer_bloomberg_excel(ruta, nombre):
         )
         return pd.Series(dtype=float, name=nombre)
     try:
-        df = pd.read_excel(ruta, index_col=0, parse_dates=True)
+        df = pd.read_excel(ruta, sheet_name="datos", index_col=0, parse_dates=True)
         df.index.name = "fecha"
         if nombre not in df.columns:
             logger.warning(f"  Columna '{nombre}' no encontrada en {ruta}. Columnas: {list(df.columns)}")
