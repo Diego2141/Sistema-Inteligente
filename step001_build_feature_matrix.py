@@ -790,6 +790,74 @@ def download_external_series(params):
 # PARTE 5 — Construcción de features
 ###############################################################################
 
+# ─── Diferenciación Fraccional (López de Prado, Cap. 5) ─────────────────────
+_FD_TRAIN_CUTOFF = "2022-12-31"   # calibrar d solo con datos de entrenamiento
+_FD_THRES        = 1e-4            # truncar pesos con |w| < thres (FFD)
+_FD_RANGO_D      = np.arange(0.0, 1.05, 0.05)
+
+
+def _fd_pesos(d: float, n: int) -> np.ndarray:
+    """Pesos binomiales w_0=1, w_k = w_{k-1}*(k-1-d)/k (López de Prado ec. 5.4)."""
+    w = [1.0]
+    for k in range(1, n):
+        w.append(w[-1] * (k - 1 - d) / k)
+    return np.array(w[::-1])
+
+
+def _fd_aplicar(serie: pd.Series, d: float, thres: float = _FD_THRES) -> pd.Series:
+    """Aplica FFD (Fixed-width window Fracdiff) con orden d a una serie limpia."""
+    s = serie.dropna()
+    pesos = _fd_pesos(d, len(s))
+    pesos = pesos[np.abs(pesos) > thres]
+    L = len(pesos)
+    vals = {s.index[i]: float(np.dot(pesos, s.iloc[i - L + 1: i + 1]))
+            for i in range(L - 1, len(s))}
+    return pd.Series(vals, name=serie.name)
+
+
+def _fd_calibrar_d(serie: pd.Series, cutoff: str = _FD_TRAIN_CUTOFF) -> float:
+    """
+    Encuentra el d mínimo que hace estacionaria la serie usando solo datos
+    de entrenamiento (≤ cutoff) para evitar leakage.
+    Retorna d=0 si ya es estacionaria, d=1.0 si no converge.
+    """
+    from statsmodels.tsa.stattools import adfuller
+    s_train = serie.dropna()
+    s_train = s_train[s_train.index <= cutoff]
+    if len(s_train) < 50:
+        return 1.0
+    for d in _FD_RANGO_D:
+        try:
+            if d == 0:
+                _, p, *_ = adfuller(s_train)
+            else:
+                sd = _fd_aplicar(s_train, d)
+                if len(sd) < 20:
+                    continue
+                _, p, *_ = adfuller(sd)
+            if p < 0.05:
+                logger.info(f"    FD calibrado: d={d:.2f} (p={p:.4f}) sobre {len(s_train)} obs ≤ {cutoff}")
+                return float(d)
+        except Exception:
+            continue
+    logger.warning("    FD: no convergió en [0,1] — usando d=1.0")
+    return 1.0
+
+
+def _fd_feature(serie: pd.Series, nombre: str,
+                cutoff: str = _FD_TRAIN_CUTOFF) -> pd.Series:
+    """
+    Calibra d sobre TRAIN y aplica FFD a la serie completa.
+    Retorna Serie con nombre '<nombre>_frac'.
+    """
+    if serie.dropna().empty:
+        return pd.Series(dtype=float, name=f"{nombre}_frac")
+    d = _fd_calibrar_d(serie, cutoff)
+    resultado = _fd_aplicar(serie.dropna(), d)
+    resultado.name = f"{nombre}_frac"
+    return resultado
+
+
 # 5a. Features bancarias
 def _garch_vol(flujo: pd.Series) -> pd.Series:
     """
@@ -1000,6 +1068,17 @@ def build_macro_features(macro_df):
     resultado["delta_COPPER"] = copper.diff(1)
     resultado["copper_ret"]   = copper.pct_change()
     resultado["copper_ma22"]  = copper.rolling(22).mean()
+
+    # ── Diferenciación Fraccional (López de Prado) ────────────────────────────
+    # Aplicar a series I(1): EMBI_PERU, T10Y, CDS_PERU_5Y, COPPER
+    # d calibrado sobre datos ≤ 2022 para evitar leakage
+    logger.info("  Calculando features de diferenciación fraccional (FFD)...")
+    for nombre_raw, col_src in [("EMBI_PERU",   df.get("EMBI_PERU",   pd.Series(dtype=float))),
+                                 ("T10Y",        df.get("T10Y",        pd.Series(dtype=float))),
+                                 ("CDS_PERU_5Y", df.get("CDS_PERU_5Y", pd.Series(dtype=float))),
+                                 ("COPPER",      df.get("COPPER",      pd.Series(dtype=float)))]:
+        fd = _fd_feature(col_src.reindex(df.index), nombre_raw)
+        resultado[f"{nombre_raw}_frac"] = fd.reindex(resultado.index)
 
     return resultado
 
