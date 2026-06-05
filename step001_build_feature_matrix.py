@@ -66,7 +66,7 @@ _fin_historico = (_hoy - pd.offsets.BDay(1)).strftime("%Y-%m-%d")
 # Lista inicial: redundancias matemáticas confirmadas por análisis de
 # multicolinealidad (ver aux_depuracion_features.py → hoja "Recomendación").
 # ─────────────────────────────────────────────────────────────────────────────
-FEATURES_EXCLUIR = []
+FEATURES_EXCLUIR = ["flujo_neto_acum_mes"]
 
 PARAMS = {
     # Fechas

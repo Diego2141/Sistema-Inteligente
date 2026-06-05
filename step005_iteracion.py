@@ -34,7 +34,7 @@ MODELOS_CV   = ["xgb", "xgb_qt"]
 VENTANAS_VAL = [0.5, 1.0]
 EXPANDINGS   = [True, False]
 
-N_TRIALS_FORZADO = 30   # sobreescribe el valor de step005 para todas las corridas
+N_TRIALS_FORZADO = 60   # sobreescribe el valor de step005 para todas las corridas
 BANCOS           = ["SISTEMA"]
 
 
