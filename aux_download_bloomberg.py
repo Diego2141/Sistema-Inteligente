@@ -9,19 +9,11 @@ INSTRUCCIONES — Bloomberg Excel Add-In (en el terminal Bloomberg)
 
 Usa el mismo template que ya tienes funcionando. En cada hoja configura:
 
-  Hoja "CDS":
-    Security  → PERU CDS USD SR 5Y D14 Corp
-    Field     → PX_LAST
-    Start     → 01/01/2000
-    End       → hoy
-    Period    → D
+  Archivo: DataBBG.xlsx  (en 1. Data\Raw\)
 
-  Hoja "COPPER":
-    Security  → LMCADS03 Comdty
-    Field     → PX_LAST
-    Start     → 01/01/2000
-    End       → hoy
-    Period    → D
+  Hoja "BVL":   MXNUPEGE Index       — Bolsa de Valores de Lima
+  Hoja "CDS":   CPERU1U5 CBIN Curncy — CDS Perú 5Y
+  Hoja "Cobre": HG1 COMB Comdty      — Cobre COMEX (USD/lb)
 
 El script reconoce automáticamente el formato estándar Bloomberg:
   Fila 1: Security   | <ticker>
@@ -46,12 +38,13 @@ import numpy as np
 # CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 BASE_SISTEMA = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente")
-RUTA_ENTRADA = BASE_SISTEMA / "1. Data" / "Raw" / "bloomberg_series.xlsx"
-RUTA_SALIDA  = RUTA_ENTRADA  # sobreescribe el mismo archivo después de limpiar
+RUTA_ENTRADA = BASE_SISTEMA / "1. Data" / "Raw" / "DataBBG.xlsx"
+RUTA_SALIDA  = BASE_SISTEMA / "1. Data" / "Raw" / "bloomberg_series.xlsx"
 
 HOJAS = {
-    "CDS":    "CDS_PERU_5Y",   # hoja → nombre de columna en output
-    "COPPER": "COPPER",        # LME Copper 3M (LMCADS03 Comdty)
+    "BVL":   "BVL",         # MXNUPEGE Index — Bolsa de Valores de Lima
+    "CDS":   "CDS_PERU_5Y", # CPERU1U5 CBIN Curncy — CDS Perú 5Y
+    "Cobre": "COPPER",      # HG1 COMB Comdty — Cobre COMEX (USD/lb)
 }
 
 # Formato Bloomberg con template estándar:
@@ -137,8 +130,9 @@ def _leer_hoja(ruta: Path, hoja: str, nombre: str) -> pd.Series:
 # DESCARGA VÍA pdblp (cuando Bloomberg está en la misma máquina)
 # ─────────────────────────────────────────────────────────────────────────────
 TICKERS_PDBLP = {
-    "PERU CDS USD SR 5Y D14 Corp": "CDS_PERU_5Y",
-    "LMCADS03 Comdty":             "COPPER",
+    "MXNUPEGE Index":      "BVL",
+    "CPERU1U5 CBIN Curncy": "CDS_PERU_5Y",
+    "HG1 COMB Comdty":     "COPPER",
 }
 
 def _descargar_via_pdblp() -> pd.DataFrame:

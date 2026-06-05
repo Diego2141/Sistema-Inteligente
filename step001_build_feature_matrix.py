@@ -119,7 +119,7 @@ PARAMS = {
     "hoja_bcrp_tc_compra": "TC Compra", # hoja con TC compra BCRP
     "hoja_bcrp_tc_venta":  "TC Venta",  # hoja con TC venta BCRP
 
-    # Series Bloomberg — generadas con aux_download_bloomberg.py (campo PX_LAST)
+    # Series Bloomberg — generadas con aux_download_bloomberg.py desde DataBBG.xlsx
     "ruta_bloomberg": r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Raw\bloomberg_series.xlsx",
 
     # APIs externas
@@ -716,8 +716,9 @@ def download_external_series(params):
         logger.warning("  TC_PEN_USD: no se encontraron hojas TC Compra/Venta en series_bcrp.xlsx.")
         series["TC_PEN_USD"] = pd.Series(dtype=float, name="TC_PEN_USD")
 
-    # 4d. Bloomberg — CDS Perú 5Y y Cobre LME 3M
+    # 4d. Bloomberg — BVL, CDS Perú 5Y, Cobre COMEX
     ruta_bbg = params.get("ruta_bloomberg", "")
+    series["BVL"]         = _leer_bloomberg_excel(ruta_bbg, "BVL")
     series["CDS_PERU_5Y"] = _leer_bloomberg_excel(ruta_bbg, "CDS_PERU_5Y")
     series["COPPER"]      = _leer_bloomberg_excel(ruta_bbg, "COPPER")
 
@@ -733,7 +734,7 @@ def download_external_series(params):
             df[nombre] = np.nan
 
     cols_esperadas = ["VIX", "TC_PEN_USD", "T10Y", "FED_FUNDS", "EMBI_PERU", "TASA_REF_BCRP",
-                      "CDS_PERU_5Y", "COPPER"]
+                      "BVL", "CDS_PERU_5Y", "COPPER"]
     for c in cols_esperadas:
         if c not in df.columns:
             df[c] = np.nan
@@ -936,6 +937,13 @@ def build_macro_features(macro_df):
         resultado["diferencial_tasas"] = np.nan
 
     resultado["T10Y"] = df.get("T10Y", np.nan)
+
+    # Bloomberg: BVL (Bolsa de Valores de Lima — MXNUPEGE Index)
+    bvl = df.get("BVL", pd.Series(dtype=float))
+    resultado["BVL"]        = df.get("BVL", np.nan)
+    resultado["delta_BVL"]  = bvl.diff(1)
+    resultado["bvl_ret"]    = bvl.pct_change()
+    resultado["bvl_vol_22d"] = bvl.pct_change().rolling(22).std()
 
     # Bloomberg: CDS Perú 5Y
     cds = df.get("CDS_PERU_5Y", pd.Series(dtype=float))
@@ -1519,7 +1527,11 @@ def build_data_dictionary(params):
     add("T10Y",             "Yahoo Finance",  "Rendimiento del bono del Tesoro EE.UU. a 10 años", 0, None)
 
     # ── Bloomberg ─────────────────────────────────────────────────────────────
-    add("CDS_PERU_5Y",      "Bloomberg",  "CDS soberano Perú 5 años (PX_LAST) — mide riesgo crediticio país",   0, None)
+    add("BVL",          "Bloomberg",  "Bolsa de Valores de Lima (MXNUPEGE Index) — índice accionario Perú",  0, None)
+    add("delta_BVL",    "Bloomberg",  "Variación diaria de la BVL",                                          1, None)
+    add("bvl_ret",      "Bloomberg",  "Retorno diario (%) de la BVL",                                        1, None)
+    add("bvl_vol_22d",  "Bloomberg",  "Volatilidad rolling 22d de retornos BVL",                             None, None)
+    add("CDS_PERU_5Y",      "Bloomberg",  "CDS soberano Perú 5 años (CPERU1U5) — mide riesgo crediticio país",  0, None)
     add("delta_CDS",        "Bloomberg",  "Variación diaria del CDS Perú 5Y",                                   1, None)
     add("garch_vol_cds",    "Bloomberg",  "Volatilidad GARCH(1,1) de los cambios diarios del CDS",              None, None)
     add("COPPER",       "Bloomberg",  "LME Copper 3M (LMCADS03) — precio cobre USD/TM. Peru es 2do productor mundial", 0, None)
