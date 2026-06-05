@@ -119,6 +119,9 @@ PARAMS = {
     "hoja_bcrp_tc_compra": "TC Compra", # hoja con TC compra BCRP
     "hoja_bcrp_tc_venta":  "TC Venta",  # hoja con TC venta BCRP
 
+    # Series Bloomberg — generadas con aux_download_bloomberg.py (campo PX_LAST)
+    "ruta_bloomberg": r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Raw\bloomberg_series.xlsx",
+
     # APIs externas
     "fred_api_key": "96fa168ee9a9a4c1fcf323983db5ba64",
     "proxy": os.environ.get("BCRP_PROXY", "http://bcrproxy:8080"),
@@ -635,6 +638,32 @@ def _leer_bcrp_excel(ruta, nombre, hoja=0):
         return pd.Series(dtype=float, name=nombre)
 
 
+def _leer_bloomberg_excel(ruta, nombre):
+    """
+    Lee una columna del archivo bloomberg_series.xlsx generado por
+    aux_download_bloomberg.py (índice=fecha, columnas=CDS_PERU_5Y/PETROLEUM).
+    """
+    if not ruta or not os.path.exists(ruta):
+        logger.warning(
+            f"  Bloomberg '{nombre}' no encontrado en: {ruta}\n"
+            f"  → Ejecutar aux_download_bloomberg.py para generarlo."
+        )
+        return pd.Series(dtype=float, name=nombre)
+    try:
+        df = pd.read_excel(ruta, index_col=0, parse_dates=True)
+        df.index.name = "fecha"
+        if nombre not in df.columns:
+            logger.warning(f"  Columna '{nombre}' no encontrada en {ruta}. Columnas: {list(df.columns)}")
+            return pd.Series(dtype=float, name=nombre)
+        s = df[nombre].dropna()
+        s.index = pd.to_datetime(s.index)
+        logger.info(f"  {nombre} leído desde Bloomberg Excel: {len(s)} obs, hasta {s.index.max().date()}")
+        return s.rename(nombre)
+    except Exception as e:
+        logger.warning(f"  Error leyendo {nombre} desde {ruta}: {e}")
+        return pd.Series(dtype=float, name=nombre)
+
+
 def download_external_series(params):
     """
     Descarga todas las series externas y las retorna en un DataFrame
@@ -687,6 +716,11 @@ def download_external_series(params):
         logger.warning("  TC_PEN_USD: no se encontraron hojas TC Compra/Venta en series_bcrp.xlsx.")
         series["TC_PEN_USD"] = pd.Series(dtype=float, name="TC_PEN_USD")
 
+    # 4d. Bloomberg — CDS Perú 5Y y Petroleum Index
+    ruta_bbg = params.get("ruta_bloomberg", "")
+    series["CDS_PERU_5Y"] = _leer_bloomberg_excel(ruta_bbg, "CDS_PERU_5Y")
+    series["PETROLEUM"]   = _leer_bloomberg_excel(ruta_bbg, "PETROLEUM")
+
     # Alinear al índice de fechas del rango
     idx = pd.bdate_range(start=inicio, end=fin)
     df = pd.DataFrame(index=idx)
@@ -698,7 +732,8 @@ def download_external_series(params):
         else:
             df[nombre] = np.nan
 
-    cols_esperadas = ["VIX", "TC_PEN_USD", "T10Y", "FED_FUNDS", "EMBI_PERU", "TASA_REF_BCRP"]
+    cols_esperadas = ["VIX", "TC_PEN_USD", "T10Y", "FED_FUNDS", "EMBI_PERU", "TASA_REF_BCRP",
+                      "CDS_PERU_5Y", "PETROLEUM"]
     for c in cols_esperadas:
         if c not in df.columns:
             df[c] = np.nan
@@ -901,6 +936,19 @@ def build_macro_features(macro_df):
         resultado["diferencial_tasas"] = np.nan
 
     resultado["T10Y"] = df.get("T10Y", np.nan)
+
+    # Bloomberg: CDS Perú 5Y
+    cds = df.get("CDS_PERU_5Y", pd.Series(dtype=float))
+    resultado["CDS_PERU_5Y"]   = df.get("CDS_PERU_5Y", np.nan)
+    resultado["delta_CDS"]     = cds.diff(1)
+    resultado["garch_vol_cds"] = _garch_vol(cds.diff(1))
+
+    # Bloomberg: S&P GSCI Petroleum Index
+    petrol = df.get("PETROLEUM", pd.Series(dtype=float))
+    resultado["PETROLEUM"]        = df.get("PETROLEUM", np.nan)
+    resultado["delta_PETROLEUM"]  = petrol.diff(1)
+    resultado["petroleum_ret"]    = petrol.pct_change()
+    resultado["petroleum_ma22"]   = petrol.rolling(22).mean()
 
     return resultado
 
@@ -1469,6 +1517,15 @@ def build_data_dictionary(params):
     add("FED_FUNDS",        "FRED API",       "Tasa de política monetaria de la Fed",             0, None)
     add("diferencial_tasas","Calculado",      "TASA_REF_BCRP - FED_FUNDS",                        0, None)
     add("T10Y",             "Yahoo Finance",  "Rendimiento del bono del Tesoro EE.UU. a 10 años", 0, None)
+
+    # ── Bloomberg ─────────────────────────────────────────────────────────────
+    add("CDS_PERU_5Y",      "Bloomberg",  "CDS soberano Perú 5 años (PX_LAST) — mide riesgo crediticio país",   0, None)
+    add("delta_CDS",        "Bloomberg",  "Variación diaria del CDS Perú 5Y",                                   1, None)
+    add("garch_vol_cds",    "Bloomberg",  "Volatilidad GARCH(1,1) de los cambios diarios del CDS",              None, None)
+    add("PETROLEUM",        "Bloomberg",  "S&P GSCI Petroleum Index (SPPETIPP) — precio spot de petróleo",      0, None)
+    add("delta_PETROLEUM",  "Bloomberg",  "Variación diaria del índice de petróleo",                            1, None)
+    add("petroleum_ret",    "Bloomberg",  "Retorno diario (%) del índice de petróleo",                          1, None)
+    add("petroleum_ma22",   "Bloomberg",  "Media móvil 22d del índice de petróleo",                             None, None)
 
     # ── Features estacionales (en t+h — fecha futura, siempre conocidas) ─────
     add("dias_al_cierre_mes",    "Calendario", "Días hábiles restantes hasta fin de mes en t+h",          None, "t+h")
