@@ -66,17 +66,7 @@ _fin_historico = (_hoy - pd.offsets.BDay(1)).strftime("%Y-%m-%d")
 # Lista inicial: redundancias matemáticas confirmadas por análisis de
 # multicolinealidad (ver aux_depuracion_features.py → hoja "Recomendación").
 # ─────────────────────────────────────────────────────────────────────────────
-FEATURES_EXCLUIR = [
-    "log_h",               # = ln(h): relación determinista con h; XGBoost no lo necesita
-    "ma_R_5d",             # = media(R_t0…R_t-4): redundante si están los rezagos cortos
-    "ma_D_5d",             # = media(D_t0…D_t-4): ídem para depósitos
-    "delta_R",             # = R_t0 - R_t-1: combinación lineal exacta de dos features ya presentes
-    "delta_D",             # = D_t0 - D_t-1: ídem para depósitos
-    "VIX_ma22",            # = media(VIX últimos 22d): XGBoost aprende la tendencia con VIX solo
-    "diferencial_tasas",   # = TASA_REF_BCRP - FED_FUNDS: multicolinealidad exacta con ambas tasas
-    "dias_desde_cierre_mes",  # ≈ total_bdays_mes - dias_al_cierre_mes: casi redundante
-    "pos_en_mes",          # información equivalente a dias_al_cierre_mes medida desde el inicio
-]
+FEATURES_EXCLUIR = []
 
 PARAMS = {
     # Fechas

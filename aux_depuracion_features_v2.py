@@ -84,10 +84,7 @@ UMBRAL_CORR_TARGET = 0.05   # |corr(feat, target)| < 0.05 en todos los h → "si
 COLS_EXCLUIR_SIEMPRE = {"fecha_t", "banco", "h", "target", "fecha_th"}
 
 # Features ya excluidos en step001 (para marcarlos como "Ya excluido")
-FEATURES_YA_EXCLUIDOS = [
-    "log_h", "ma_R_5d", "ma_D_5d", "delta_R", "delta_D",
-    "VIX_ma22", "diferencial_tasas", "dias_desde_cierre_mes", "pos_en_mes",
-]
+FEATURES_YA_EXCLUIDOS = []
 
 DIR_OUTPUT.mkdir(parents=True, exist_ok=True)
 
