@@ -103,7 +103,7 @@ EMBARGO_DIAS_HAB    = 1 if EXPANDING else 75  # expanding: 1dh mínimo para evit
 
 # ── Modelo ────────────────────────────────────────────────────────────────────
 QUANTILES        = [0.01, 0.05, 0.50, 0.95, 0.99]
-N_TRIALS_OPTUNA  = 30
+N_TRIALS_OPTUNA  = 60
 S_MIN_FACTOR     = 0.01
 S_MAX_FACTOR     = 1.0
 
