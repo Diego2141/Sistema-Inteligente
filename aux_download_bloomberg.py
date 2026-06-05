@@ -114,7 +114,10 @@ def _leer_hoja(ruta: Path, hoja: str, nombre: str) -> pd.Series:
     datos = datos[datos["fecha"].str.strip() != ""]
 
     datos["fecha"] = _parsear_fechas(datos["fecha"])
-    datos[nombre]  = pd.to_numeric(datos[nombre], errors="coerce")
+    # Manejar separador decimal coma (locale español: "1828,51" → 1828.51)
+    datos[nombre] = (datos[nombre].astype(str)
+                                  .str.replace(",", ".", regex=False)
+                                  .pipe(pd.to_numeric, errors="coerce"))
     datos = datos.dropna(subset=["fecha", nombre])
     datos = datos.set_index("fecha").sort_index()
     datos = datos[~datos.index.duplicated(keep="last")]
