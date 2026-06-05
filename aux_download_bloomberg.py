@@ -7,32 +7,34 @@ Lee series Bloomberg desde Excel y genera bloomberg_series.xlsx (Raw/).
 INSTRUCCIONES — Bloomberg Excel Add-In (en el terminal Bloomberg)
 ══════════════════════════════════════════════════════════════════════════════
 
-1. Abre Excel con Bloomberg activo.
-2. Crea UN archivo con DOS hojas: "CDS" y "PETROL".
-3. En la hoja "CDS", celda A1, pega esta fórmula:
+Usa el mismo template que ya tienes funcionando. En cada hoja configura:
 
-   =BDH("PERU CDS USD SR 5Y D14 Corp","PX_LAST","01/01/2000",TODAY(),
-        "Days=W","Fill=P","Per=CD","DateFormat=YYYY-MM-DD")
+  Hoja "CDS":
+    Security  → PERU CDS USD SR 5Y D14 Corp
+    Field     → PX_LAST
+    Start     → 01/01/2000
+    End       → hoy
+    Period    → D
 
-4. En la hoja "PETROL", celda A1, pega esta fórmula:
+  Hoja "PETROL":
+    Security  → SPPETIPP Index
+    Field     → PX_LAST
+    Start     → 01/01/2000
+    End       → hoy
+    Period    → D
 
-   =BDH("SPPETIPP Index","PX_LAST","01/01/2000",TODAY(),
-        "Days=W","Fill=P","Per=CD","DateFormat=YYYY-MM-DD")
+El script reconoce automáticamente el formato estándar Bloomberg:
+  Fila 1: Security   | <ticker>
+  Fila 2: Start Date | <fecha>
+  Fila 3: End Date   | <fecha>
+  Fila 4: Period     | D
+  Fila 5: Currency   | <moneda>
+  Fila 6: (vacía)
+  Fila 7: Date       | PX_LAST
+  Fila 8+: datos
 
-   Parámetros:
-     Days=W    → solo días hábiles (lunes-viernes)
-     Fill=P    → rellena días sin cotización con valor previo
-     Per=CD    → periodicidad diaria
-     DateFormat=YYYY-MM-DD → formato ISO para evitar ambigüedades
-
-5. Espera que Bloomberg cargue los datos (puede tardar unos segundos).
-6. Guarda el archivo como:
-   bloomberg_series.xlsx
-   y cópialo a la carpeta Raw del proyecto.
-
-══════════════════════════════════════════════════════════════════════════════
-El script detecta automáticamente el formato de salida de Bloomberg BDH
-(con o sin filas de encabezado, distintos formatos de fecha).
+Guarda el archivo como bloomberg_series.xlsx y cópialo a:
+  1. Data\Raw\bloomberg_series.xlsx
 ══════════════════════════════════════════════════════════════════════════════
 """
 
@@ -52,33 +54,63 @@ HOJAS = {
     "PETROL": "PETROLEUM",
 }
 
+# Formato Bloomberg con template estándar:
+#   Fila 1: Security  | <ticker>
+#   Fila 2: Start Date| <fecha>
+#   Fila 3: End Date  | <fecha>
+#   Fila 4: Period    | D
+#   Fila 5: Currency  | PEN
+#   Fila 6: (vacía)
+#   Fila 7: Date      | PX_LAST   ← encabezado de columnas
+#   Fila 8+: datos    | valores
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-# LECTOR ROBUSTO — maneja distintos formatos de BDH
+# LECTOR ROBUSTO — maneja formato Bloomberg BDH
 # ─────────────────────────────────────────────────────────────────────────────
+# Formatos de fecha en orden de prioridad (DD/MM/YYYY primero = estándar Perú)
+_DATE_FORMATS = ["%d/%m/%Y", "%Y-%m-%d", "%d/%m/%Y %H:%M", "%m/%d/%Y",
+                 "%Y%m%d", "%d-%b-%y", "%d-%b-%Y"]
+
+
 def _detectar_fila_datos(raw: pd.DataFrame) -> int:
     """
-    Bloomberg BDH genera entre 0 y ~5 filas de metadatos antes de los datos.
-    Escanea filas hasta encontrar la primera con una fecha válida en col 0.
+    Bloomberg BDH genera metadatos en las primeras filas (Security, Dates, etc.).
+    Los metadatos tienen texto en col A; los datos tienen fecha en col A.
+    Retorna el índice de la primera fila con fecha válida en col A.
     """
     for i, row in raw.iterrows():
-        val = row.iloc[0]
+        val = str(row.iloc[0]).strip()
+        # Ignorar etiquetas conocidas de Bloomberg
+        if val.lower() in ("security", "start date", "end date", "period",
+                           "currency", "date", "dates", "nan", ""):
+            continue
+        for fmt in _DATE_FORMATS:
+            try:
+                ts = pd.to_datetime(val.split(" ")[0], format=fmt.split(" ")[0])
+                if pd.Timestamp("1990-01-01") <= ts <= pd.Timestamp("2100-01-01"):
+                    return i
+            except Exception:
+                continue
+    raise ValueError("No se encontró ninguna fila con fecha válida en la hoja.")
+
+
+def _parsear_fechas(serie: pd.Series) -> pd.Series:
+    """Intenta múltiples formatos de fecha en orden de prioridad DD/MM/YYYY."""
+    for fmt in _DATE_FORMATS:
         try:
-            ts = pd.to_datetime(val, dayfirst=False, errors="raise")
-            if pd.Timestamp("1990-01-01") <= ts <= pd.Timestamp("2100-01-01"):
-                return i
+            resultado = pd.to_datetime(serie, format=fmt, errors="raise")
+            return resultado
         except Exception:
             continue
-    raise ValueError("No se encontró ninguna fila con fecha válida en la hoja.")
+    # Fallback: inferencia automática con dayfirst=True (formato Perú)
+    return pd.to_datetime(serie, dayfirst=True, errors="coerce")
 
 
 def _leer_hoja(ruta: Path, hoja: str, nombre: str) -> pd.Series:
     """
     Lee una hoja de Excel exportada con BDH y retorna una Series limpia.
-    Maneja:
-      - Filas de encabezado Bloomberg (Ticker / Field / Dates / PX_LAST)
-      - Fechas en formato YYYY-MM-DD, MM/DD/YYYY, DD/MM/YYYY, YYYYMMDD
-      - Columna de fecha en col A, valor en col B
+    Compatible con el template Bloomberg estándar (6 filas de metadatos).
     """
     raw = pd.read_excel(ruta, sheet_name=hoja, header=None, dtype=str)
 
@@ -86,19 +118,10 @@ def _leer_hoja(ruta: Path, hoja: str, nombre: str) -> pd.Series:
     datos = raw.iloc[fila_inicio:, :2].copy()
     datos.columns = ["fecha", nombre]
     datos = datos.dropna(subset=["fecha"])
+    datos = datos[datos["fecha"].str.strip() != ""]
 
-    # Parsear fechas con múltiples formatos
-    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y", "%Y%m%d", "%d-%b-%y"):
-        try:
-            datos["fecha"] = pd.to_datetime(datos["fecha"], format=fmt, errors="raise")
-            break
-        except Exception:
-            continue
-    else:
-        datos["fecha"] = pd.to_datetime(datos["fecha"], infer_datetime_format=True,
-                                         errors="coerce")
-
-    datos[nombre] = pd.to_numeric(datos[nombre], errors="coerce")
+    datos["fecha"] = _parsear_fechas(datos["fecha"])
+    datos[nombre]  = pd.to_numeric(datos[nombre], errors="coerce")
     datos = datos.dropna(subset=["fecha", nombre])
     datos = datos.set_index("fecha").sort_index()
     datos = datos[~datos.index.duplicated(keep="last")]
