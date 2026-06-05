@@ -75,7 +75,7 @@ PARAMS = {
 
     # Modelo
     "h_min": 2,
-    "h_max": 90,
+    "h_max": 75,
     "quantiles": [0.01, 0.05, 0.50, 0.95, 0.99],
 
     # Modo demo (True mientras no lleguen los datos reales)
@@ -1662,6 +1662,15 @@ def build_data_dictionary(params):
     add("delta_COPPER", "Bloomberg",  "Variación diaria del precio del cobre",                                         1, None)
     add("copper_ret",   "Bloomberg",  "Retorno diario (%) del precio del cobre",                                       1, None)
     add("copper_ma22",  "Bloomberg",  "Media móvil 22d del precio del cobre",                                          None, None)
+
+    # ── Diferenciación Fraccional — López de Prado Cap. 5 ─────────────────────
+    # d calibrado en TRAIN (≤2010-12-31) para evitar leakage en rolling CV.
+    # step003/step005 recalibran d por fold vía reemplazar_ffd_*.
+    add("EMBI_PERU_frac",   "BCRP Add-In (FFD)",  "EMBI Perú diferenciado fraccionalmente (d óptimo ≥0). Estacionario, preserva memoria de largo plazo.", None, None)
+    add("T10Y_frac",        "Yahoo Finance (FFD)", "UST 10Y diferenciado fraccionalmente (d óptimo ≥0). Estacionario, preserva memoria de largo plazo.",    None, None)
+    add("CDS_PERU_5Y_frac", "Bloomberg (FFD)",     "CDS Perú 5Y diferenciado fraccionalmente (d óptimo ≥0). Estacionario, preserva memoria.",               None, None)
+    add("COPPER_frac",      "Bloomberg (FFD)",     "Cobre LME diferenciado fraccionalmente (d óptimo ≥0). Estacionario, preserva memoria.",                  None, None)
+    add("VIX_frac",         "Yahoo Finance (FFD)", "VIX diferenciado fraccionalmente (d≈0 — ya estacionario). Idéntico al nivel original.",                  None, None)
 
     # ── Features estacionales (en t+h — fecha futura, siempre conocidas) ─────
     add("dias_al_cierre_mes",    "Calendario", "Días hábiles restantes hasta fin de mes en t+h",          None, "t+h")
