@@ -103,9 +103,27 @@ EMBARGO_DIAS_HAB    = 1 if EXPANDING else 90  # expanding: 1dh mínimo para evit
 
 # ── Modelo ────────────────────────────────────────────────────────────────────
 QUANTILES        = [0.01, 0.05, 0.50, 0.95, 0.99]
-N_TRIALS_OPTUNA  = 60
 S_MIN_FACTOR     = 0.01
 S_MAX_FACTOR     = 1.0
+
+# ── Trials Optuna ─────────────────────────────────────────────────────────────
+# True  → número de trials varía por cuantil (TRIALS_POR_TAU)
+# False → número fijo para todos los cuantiles (TRIALS_FLAT)
+ADAPTIVE_TRIALS  = True
+
+TRIALS_FLAT      = 60        # usado cuando ADAPTIVE_TRIALS = False
+
+TRIALS_POR_TAU   = {         # usado cuando ADAPTIVE_TRIALS = True
+    0.1: 110,
+    0.2:  95,
+    0.3:  90,
+    0.4:  90,
+    0.5:  90,
+    0.6:  90,
+    0.7:  90,
+    0.8:  95,
+    0.9: 110,
+}
 
 # ── Opciones de salida ────────────────────────────────────────────────────────
 BANCOS_A_EVALUAR          = ["SISTEMA"]
@@ -187,6 +205,13 @@ DIR_FANCHARTS_MANUALES = DIR_MODO / "fancharts_manuales"   # plots de FOLDS_MANU
 for _d in (DIR_OUTPUT, DIR_MODO, DIR_MODELOS, DIR_PLOTS,
            DIR_FANCHARTS, DIR_FANCHARTS_MANUALES):
     _d.mkdir(parents=True, exist_ok=True)
+
+
+def get_n_trials(tau: float) -> int:
+    """Devuelve el número de trials Optuna para el cuantil dado."""
+    if ADAPTIVE_TRIALS:
+        return TRIALS_POR_TAU.get(round(tau, 1), 90)
+    return TRIALS_FLAT
 
 
 ###############################################################################
@@ -716,7 +741,7 @@ def _entrenar_fold_xgb_qt(X_tr, y_tr, X_va, y_va, std_y, n_trials, fold_num):
     Cada XGBoost usa _XGB_NTHREAD threads → sin over-subscription de CPU.
     """
     worker_args = [
-        (tau, X_tr, y_tr, X_va, y_va, std_y, n_trials, fold_num)
+        (tau, X_tr, y_tr, X_va, y_va, std_y, get_n_trials(tau), fold_num)
         for tau in QUANTILES
     ]
 
@@ -1600,8 +1625,13 @@ def evaluar_banco(banco: str):
     logger.info(
         f"  TRAIN {VENTANA_TRAIN_AÑOS}yr{'(min)' if EXPANDING else ''} | "
         f"VAL {VENTANA_VAL_AÑOS}yr (Optuna) | TEST {VENTANA_TEST_AÑOS}yr (métricas) | "
-        f"paso {PASO_AÑOS}yr | embargo {EMBARGO_DIAS_HAB}dh | trials {N_TRIALS_OPTUNA}"
+        f"paso {PASO_AÑOS}yr | embargo {EMBARGO_DIAS_HAB}dh | "
+        f"trials={'adaptivo' if ADAPTIVE_TRIALS else f'flat={TRIALS_FLAT}'}"
     )
+    if ADAPTIVE_TRIALS:
+        _tau_trials = {tau: get_n_trials(tau) for tau in QUANTILES}
+        logger.info(f"  Trials por cuantil: " +
+                    " | ".join(f"τ={t:.2f}→{n}" for t, n in _tau_trials.items()))
 
     t_inicio = time.time()
 
@@ -1729,7 +1759,7 @@ def evaluar_banco(banco: str):
             # ── Modo normal: Optuna + entrenamiento ─────────────────────────
             modelos, best_params = entrenar_fold(
                 X_train, y_train, X_val, y_val, std_y,
-                N_TRIALS_OPTUNA, fold["fold"]
+                get_n_trials(0.5), fold["fold"]
             )
 
             # Importancia de features (promedio entre cuantiles)
@@ -1919,7 +1949,9 @@ def evaluar_banco(banco: str):
                 "ventana_test_años"  : VENTANA_TEST_AÑOS,
                 "paso_años"          : PASO_AÑOS,
                 "embargo_dias_hab"   : EMBARGO_DIAS_HAB,
-                "n_trials_optuna"    : N_TRIALS_OPTUNA,
+                "adaptive_trials"    : ADAPTIVE_TRIALS,
+                "trials_flat"        : TRIALS_FLAT,
+                "trials_por_tau"     : TRIALS_POR_TAU if ADAPTIVE_TRIALS else {},
             },
             "anti_leakage": {
                 "embargo"          : f"{EMBARGO_DIAS_HAB} dh post-TRAIN",
