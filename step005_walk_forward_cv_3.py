@@ -100,26 +100,17 @@ VENTANA_VAL_AÑOS    = 0.5    # años de VAL (solo Optuna) — 6 meses, igual qu
 VENTANA_TEST_AÑOS   = 1      # años de TEST (solo métricas OOS)
 PASO_AÑOS           = 1      # desplazamiento / crecimiento entre folds
 
-# ── Anti-leakage: purga y burn-in ────────────────────────────────────────────
-#
-#  EXPANDING (train_start fijo = primera fecha disponible):
-#  │burn│[TRAIN efectivo 2000──────────T₀]│←── 75 dh ───→│[  VAL  ]│←── 75 dh ───→│[TEST]│
-#   22dh                                   purga (labels    purga VAL→TEST (labels
-#                                           Y features MA22) Y features MA22)
-#
-#  ROLLING (ventana fija que desliza):
-#  │burn│[TRAIN efectivo T_s────────T₀]│←── 75 dh ───→│[  VAL  ]│←── 75 dh ───→│[TEST]│
-#   22dh  ↑ cambia cada fold            purga (labels    purga VAL→TEST (labels
-#                                        Y features MA22) Y features MA22)
-#
-#  Justificación: purga = h_max = 75 dh >> MA22 = 22 dh → el gap de purga
-#  ya engloba el lookback de todas las features. Embargo adicional = 0.
-#  GARCH y FFD no requieren embargo extra porque se recalibran por fold.
-#
-H_MAX_DIAS_HAB   = 75   # horizonte máximo de predicción (h_max)
-PURGE_DIAS_HAB   = H_MAX_DIAS_HAB   # purga TRAIN→VAL: cubre labels Y feature lookback
-PURGE_VAL_TEST   = H_MAX_DIAS_HAB   # purga VAL→TEST: labels de Optuna que cruzan test_start
-BURN_IN_DIAS_HAB = 22               # excluir inicio de df_train (MA22 incompleto)
+# ── Anti-leakage: purga + burn-in ────────────────────────────────────────────
+# H_MAX_DIAS_HAB   : horizonte máximo de predicción (h_max en step001)
+# PURGE_DIAS_HAB   : días hábiles excluidos entre TRAIN-end y VAL-start.
+#                    Cubre: (a) solapamiento de etiquetas Y (h_max dh) y
+#                           (b) feature lookback (MA22 = 22 dh) — 75 ≥ 22 → redundante.
+# PURGE_VAL_TEST   : análogo entre VAL-end y TEST-start (labels Optuna no cruzan TEST)
+# BURN_IN_DIAS_HAB : excluye los primeros días de TRAIN donde MA22 aún no maduró
+H_MAX_DIAS_HAB   = 75   # igual que h_max en step001
+PURGE_DIAS_HAB   = H_MAX_DIAS_HAB   # purga TRAIN → VAL
+PURGE_VAL_TEST   = H_MAX_DIAS_HAB   # purga VAL   → TEST
+BURN_IN_DIAS_HAB = 22               # warm-up MA22 al inicio de TRAIN
 
 # ── Modelo ────────────────────────────────────────────────────────────────────
 QUANTILES        = [0.01, 0.05, 0.50, 0.95, 0.99]
@@ -306,6 +297,79 @@ def _garch_vol_fold(serie, train_end):
     return pd.Series(np.sqrt(np.maximum(s2, 0)) * escala, index=serie_full.index)
 
 
+def reemplazar_ffd_fold(df_fold, train_end):
+    """
+    Re-calibra FFD para cada columna _frac usando solo datos hasta train_end.
+    Preserva la misma d_opt que la calibrada en build_feature_matrix pero
+    garantiza que no se filtra información posterior a train_end.
+    """
+    frac_cols = [c for c in df_fold.columns if c.endswith("_frac")]
+    if not frac_cols:
+        return df_fold
+    df_fold = df_fold.copy()
+
+    try:
+        from statsmodels.tsa.stattools import adfuller
+        _statsmodels_ok = True
+    except ImportError:
+        _statsmodels_ok = False
+
+    def _ffd_weights_local(d, thresh=1e-5):
+        w, k = [1.0], 1
+        while True:
+            w_k = -w[-1] * (d - k + 1) / k
+            if abs(w_k) < thresh:
+                break
+            w.append(w_k)
+            k += 1
+        return np.array(w[::-1])
+
+    def _fracdiff_local(series, d, thresh=1e-5):
+        w = _ffd_weights_local(d, thresh)
+        width = len(w)
+        vals = series.values.astype(float)
+        out  = np.full(len(vals), np.nan)
+        for i in range(width - 1, len(vals)):
+            chunk = vals[i - width + 1: i + 1]
+            if not np.any(np.isnan(chunk)):
+                out[i] = float(np.dot(w, chunk))
+        return pd.Series(out, index=series.index)
+
+    def _find_d_local(series, n_steps=20, target_pval=0.05):
+        if not _statsmodels_ok or len(series.dropna()) < 30:
+            return 0.4
+        for d in np.linspace(0.05, 1.0, n_steps):
+            fd = _fracdiff_local(series.dropna(), round(float(d), 4))
+            fd_clean = fd.dropna()
+            if len(fd_clean) < 20:
+                continue
+            try:
+                pval = adfuller(fd_clean, maxlag=1, regression="c", autolag=None)[1]
+                if pval <= target_pval:
+                    return round(float(d), 4)
+            except Exception:
+                continue
+        return 1.0
+
+    idx_col = "fecha_t"
+    raw = (df_fold[[idx_col] + [c.replace("_frac", "") for c in frac_cols
+                                if c.replace("_frac", "") in df_fold.columns]]
+           .drop_duplicates(idx_col).set_index(idx_col).sort_index())
+
+    for col_frac in frac_cols:
+        col_raw = col_frac.replace("_frac", "")
+        if col_raw not in raw.columns:
+            continue
+        serie_train = raw[col_raw][raw.index <= train_end].dropna()
+        if len(serie_train) < 60:
+            continue
+        d_opt = _find_d_local(serie_train)
+        frac_full = _fracdiff_local(raw[col_raw], d_opt)
+        df_fold[col_frac] = df_fold[idx_col].map(frac_full)
+
+    return df_fold
+
+
 def reemplazar_garch_fold(df_fold, train_end):
     df_fold = df_fold.copy()
     idx_cols = ["fecha_t", "R_t0", "D_t0", "TC_PEN_USD", "EMBI_PERU"]
@@ -323,68 +387,6 @@ def reemplazar_garch_fold(df_fold, train_end):
     if "EMBI_PERU" in raw.columns:
         df_fold["garch_vol_embi"] = df_fold["fecha_t"].map(
             _garch_vol_fold(raw["EMBI_PERU"].diff(1), train_end))
-    return df_fold
-
-
-# ─── FFD sin leakage por fold (mismo patrón que reemplazar_garch_fold) ────────
-
-_FFD_SERIES_FOLD = ["EMBI_PERU", "T10Y", "CDS_PERU_5Y", "VIX"]
-_FFD_THRES_FOLD  = 1e-4
-_FFD_RANGO_FOLD  = np.arange(0.0, 1.05, 0.05)
-
-
-def _ffd_pesos_fold(d: float, n: int) -> np.ndarray:
-    w = [1.0]
-    for k in range(1, n):
-        w.append(w[-1] * (k - 1 - d) / k)
-    w = np.array(w[::-1])
-    return w[np.abs(w) > _FFD_THRES_FOLD]
-
-
-def _ffd_aplicar_fold(serie: pd.Series, d: float) -> pd.Series:
-    s = serie.ffill().dropna()
-    pesos = _ffd_pesos_fold(d, len(s))
-    L = len(pesos)
-    vals = {s.index[i]: float(np.dot(pesos, s.iloc[i - L + 1: i + 1]))
-            for i in range(L - 1, len(s))}
-    return pd.Series(vals, name=serie.name)
-
-
-def _ffd_calibrar_d_fold(serie: pd.Series, train_end) -> float:
-    from statsmodels.tsa.stattools import adfuller
-    s = serie.ffill().dropna()
-    s_tr = s[s.index <= train_end]
-    if len(s_tr) < 50:
-        return 1.0
-    for d in _FFD_RANGO_FOLD:
-        try:
-            sd = _ffd_aplicar_fold(s_tr, d) if d > 0 else s_tr
-            if len(sd) < 20:
-                continue
-            _, p, *_ = adfuller(sd)
-            if p < 0.05:
-                return float(d)
-        except Exception:
-            continue
-    return 1.0
-
-
-def reemplazar_ffd_fold(df_fold: pd.DataFrame, train_end) -> pd.DataFrame:
-    """Re-calibra d FFD con datos ≤ train_end y re-aplica FFD a la serie completa del fold."""
-    frac_cols = [f"{s}_frac" for s in _FFD_SERIES_FOLD if f"{s}_frac" in df_fold.columns]
-    if not frac_cols:
-        return df_fold
-    df_fold = df_fold.copy()
-    raw_cols = ["fecha_t"] + [s for s in _FFD_SERIES_FOLD if s in df_fold.columns]
-    raw = (df_fold[raw_cols].drop_duplicates("fecha_t")
-           .set_index("fecha_t").sort_index())
-    for nombre in _FFD_SERIES_FOLD:
-        col_frac = f"{nombre}_frac"
-        if col_frac not in df_fold.columns or nombre not in raw.columns:
-            continue
-        d = _ffd_calibrar_d_fold(raw[nombre], train_end)
-        ffd = _ffd_aplicar_fold(raw[nombre].ffill().dropna(), d)
-        df_fold[col_frac] = df_fold["fecha_t"].map(ffd)
     return df_fold
 
 
@@ -465,24 +467,19 @@ def generar_folds(
 ):
     """
     EXPANDING=True  → train_start fijo en f_min; train_end crece paso_años/fold.
-    EXPANDING=False → ventana rodante fija (mismo comportamiento que v2).
+    EXPANDING=False → ventana rodante fija.
 
-    Estructura por fold (igual para ambos modos):
-      │burn│[TRAIN efectivo]│←── purge 75dh ──→│[VAL]│←── purge 75dh ──→│[TEST]│
-       22dh                  cubre labels         cubre labels VAL→TEST
-                             Y features (MA22)    Y features (MA22)
+    Estructura por fold (López de Prado §12):
+      TRAIN → [purge_dias_hab] → VAL (Optuna) → [purge_val_test] → TEST (métricas OOS)
 
-    • purge TRAIN→VAL : h_max días — cubre label overlap Y feature lookback (MA22<75)
-    • purge VAL→TEST  : h_max días — cubre labels de Optuna que cruzan test_start
-    • embargo         : redundante (purga 75dh >> MA22 22dh); GARCH/FFD recalibrados por fold
-    • burn-in         : aplicado en _entrenar_fold sobre df_train
+    purge_dias_hab cubre tanto solapamiento de etiquetas Y (h_max dh) como
+    el warm-up de features de lookback (MA22 ≤ 22 dh ≤ h_max).
 
     Genera folds mientras test_end ≤ última fecha disponible.
     """
     folds   = []
     f_min   = fechas_disponibles.min()
     f_max   = fechas_disponibles.max()
-    paso    = pd.DateOffset(months=int(round(paso_años * 12)))
     fold_idx = 0
 
     while True:
@@ -496,41 +493,41 @@ def generar_folds(
             train_end   = train_start + pd.DateOffset(
                 months=int(round(ventana_train_años * 12)))
 
-        val_start  = train_end   + pd.offsets.BusinessDay(purge_dias_hab)
-        val_end    = val_start   + pd.DateOffset(months=int(round(ventana_val_años * 12)))
-        test_start = val_end     + pd.offsets.BusinessDay(purge_val_test)
-        test_end   = test_start  + pd.DateOffset(months=int(round(ventana_test_años * 12)))
+        val_start  = train_end  + pd.offsets.BusinessDay(purge_dias_hab)
+        val_end    = val_start  + pd.DateOffset(months=int(round(ventana_val_años * 12)))
+        test_start = val_end    + pd.offsets.BusinessDay(purge_val_test)
+        test_end   = test_start + pd.DateOffset(months=int(round(ventana_test_años * 12)))
 
         if test_end > f_max or train_end >= f_max or val_start >= f_max:
             break
 
-        burn_cutoff = train_start + pd.offsets.BusinessDay(BURN_IN_DIAS_HAB)
-        n_train     = ((fechas_disponibles >= train_start) &
-                       (fechas_disponibles <= train_end)).sum()
-        n_train_eff = ((fechas_disponibles >= burn_cutoff) &
-                       (fechas_disponibles <= train_end)).sum()
-        n_val       = ((fechas_disponibles >= val_start) &
-                       (fechas_disponibles <  test_start)).sum()
-        n_test      = ((fechas_disponibles >= test_start) &
-                       (fechas_disponibles <= test_end)).sum()
+        burn_cutoff  = train_start + pd.offsets.BusinessDay(BURN_IN_DIAS_HAB)
+        n_train_all  = int(((fechas_disponibles >= train_start) &
+                            (fechas_disponibles <= train_end)).sum())
+        n_train_eff  = int(((fechas_disponibles >= burn_cutoff) &
+                            (fechas_disponibles <= train_end)).sum())
+        n_val        = int(((fechas_disponibles >= val_start) &
+                            (fechas_disponibles <  test_start)).sum())
+        n_test       = int(((fechas_disponibles >= test_start) &
+                            (fechas_disponibles <= test_end)).sum())
 
         if n_train_eff < 60 or n_val < 10 or n_test < 10:
             fold_idx += 1
             continue
 
         folds.append({
-            "fold"            : fold_idx + 1,
-            "train_start"     : train_start,
-            "train_end"       : train_end,
-            "burn_cutoff"     : burn_cutoff,
-            "val_start"       : val_start,
-            "val_end"         : val_end,
-            "test_start"      : test_start,
-            "test_end"        : test_end,
-            "n_train_fechas"  : int(n_train),
-            "n_train_efectivo": int(n_train_eff),
-            "n_val_fechas"    : int(n_val),
-            "n_test_fechas"   : int(n_test),
+            "fold"              : fold_idx + 1,
+            "train_start"       : train_start,
+            "train_end"         : train_end,
+            "val_start"         : val_start,
+            "val_end"           : val_end,
+            "test_start"        : test_start,
+            "test_end"          : test_end,
+            "burn_cutoff"       : burn_cutoff,
+            "n_train_fechas"    : n_train_all,
+            "n_train_efectivo"  : n_train_eff,
+            "n_val_fechas"      : n_val,
+            "n_test_fechas"     : n_test,
         })
         fold_idx += 1
 
@@ -908,12 +905,11 @@ def preparar_fold_data(df, fold, cols_feat):
 
     df_train = df_fold_all[df_fold_all["fecha_t"] <= train_end]
 
-    # Burn-in: excluir los primeros BURN_IN_DIAS_HAB días de TRAIN (MA22 incompleto)
+    # Burn-in: excluir primeros BURN_IN_DIAS_HAB donde MA22 aún no maduró
     if BURN_IN_DIAS_HAB > 0:
         burn_cutoff = fold.get("burn_cutoff",
                                train_start + pd.offsets.BusinessDay(BURN_IN_DIAS_HAB))
         df_train = df_train[df_train["fecha_t"] >= burn_cutoff]
-
     df_val   = df_fold_all[(df_fold_all["fecha_t"] >= val_start) &
                            (df_fold_all["fecha_t"] <  test_start)]
     df_test  = df_fold_all[df_fold_all["fecha_t"] >= test_start]
@@ -1009,7 +1005,7 @@ def graficar_metricas_wfcv(df_test_m, banco):
         f"Walk-forward CV v3 [{modo}] — {banco}  [métricas TEST out-of-sample]\n"
         f"TRAIN {VENTANA_TRAIN_AÑOS}yr{'(min)' if EXPANDING else ''} / "
         f"VAL {VENTANA_VAL_AÑOS}yr (Optuna) / TEST {VENTANA_TEST_AÑOS}yr / "
-        f"paso {PASO_AÑOS}yr / purga {PURGE_DIAS_HAB}dh / burn-in {BURN_IN_DIAS_HAB}dh",
+        f"paso {PASO_AÑOS}yr / purge {PURGE_DIAS_HAB}dh / burn-in {BURN_IN_DIAS_HAB}dh",
         fontweight="bold", fontsize=10,
     )
     metricas_config = [
@@ -1706,8 +1702,7 @@ def evaluar_banco(banco: str):
     logger.info(
         f"  TRAIN {VENTANA_TRAIN_AÑOS}yr{'(min)' if EXPANDING else ''} | "
         f"VAL {VENTANA_VAL_AÑOS}yr (Optuna) | TEST {VENTANA_TEST_AÑOS}yr (métricas) | "
-        f"paso {PASO_AÑOS}yr | purga {PURGE_DIAS_HAB}dh (TRAIN→VAL) + {PURGE_VAL_TEST}dh (VAL→TEST) | "
-        f"burn-in {BURN_IN_DIAS_HAB}dh | trials {N_TRIALS_OPTUNA}"
+        f"paso {PASO_AÑOS}yr | purge {PURGE_DIAS_HAB}dh | burn-in {BURN_IN_DIAS_HAB}dh | trials {N_TRIALS_OPTUNA}"
     )
 
     t_inicio = time.time()
@@ -2026,19 +2021,16 @@ def evaluar_banco(banco: str):
                 "ventana_val_años"   : VENTANA_VAL_AÑOS,
                 "ventana_test_años"  : VENTANA_TEST_AÑOS,
                 "paso_años"          : PASO_AÑOS,
-                "h_max_dias_hab"     : H_MAX_DIAS_HAB,
                 "purge_dias_hab"     : PURGE_DIAS_HAB,
                 "purge_val_test"     : PURGE_VAL_TEST,
                 "burn_in_dias_hab"   : BURN_IN_DIAS_HAB,
                 "n_trials_optuna"    : N_TRIALS_OPTUNA,
             },
             "anti_leakage": {
-                "purge_train_val": (f"{PURGE_DIAS_HAB} dh — cubre labels TRAIN→VAL "
-                                    f"y feature lookback (MA22={BURN_IN_DIAS_HAB}dh < purga)"),
-                "purge_val_test" : f"{PURGE_VAL_TEST} dh — labels Optuna no cruzan test_start",
-                "burn_in"        : f"{BURN_IN_DIAS_HAB} dh — inicio de TRAIN excluido (MA22 incompleto)",
-                "embargo"        : "0 dh — redundante: purga 75dh >> MA22 22dh",
-                "garch_por_fold" : "ω/α/β estimados en TRAIN, propagados a VAL+TEST",
+                "purga_train_val"  : f"{PURGE_DIAS_HAB} dh post-TRAIN (cubre h_max={H_MAX_DIAS_HAB} + MA22)",
+                "purga_val_test"   : f"{PURGE_VAL_TEST} dh post-VAL",
+                "burn_in"          : f"{BURN_IN_DIAS_HAB} dh inicio TRAIN excluidos (MA22 warm-up)",
+                "garch_por_fold"   : "ω/α/β estimados en TRAIN, propagados a VAL+TEST",
                 "medianas_por_fold": "calculadas en TRAIN, aplicadas a VAL+TEST",
                 "val_test_sep"     : "VAL=Optuna only / TEST=métricas OOS only",
             },

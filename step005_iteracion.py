@@ -50,8 +50,6 @@ def _actualizar_config(modelo_cv: str, ventana_val: float, expanding: bool):
     s5.MODELO_CV        = modelo_cv
     s5.VENTANA_VAL_AÑOS = ventana_val
     s5.EXPANDING        = expanding
-    # Purga y burn-in idénticos para expanding y rolling (solo cambia EXPANDING)
-    # Embargo = 0: redundante porque purga 75dh >> MA22 22dh
     s5.H_MAX_DIAS_HAB   = 75
     s5.PURGE_DIAS_HAB   = s5.H_MAX_DIAS_HAB
     s5.PURGE_VAL_TEST   = s5.H_MAX_DIAS_HAB

@@ -68,6 +68,13 @@ _fin_historico = (_hoy - pd.offsets.BDay(1)).strftime("%Y-%m-%d")
 # ─────────────────────────────────────────────────────────────────────────────
 FEATURES_EXCLUIR = ["flujo_neto_acum_mes"]
 
+# ─────────────────────────────────────────────────────────────────────────────
+# DIFERENCIACIÓN FRACCIONAL (FFD) — López de Prado Cap. 5
+# Calibrar d mínimo solo con datos hasta esta fecha → sin leakage futuro.
+# Usar la mayor fecha disponible ANTES del período de test de producción.
+# ─────────────────────────────────────────────────────────────────────────────
+_FD_TRAIN_CUTOFF = "2010-12-31"   # calibrar d en ventana histórica inicial
+
 PARAMS = {
     # Fechas
     "fecha_inicio_historico": "2010-01-01",
@@ -638,13 +645,14 @@ def _leer_bcrp_excel(ruta, nombre, hoja=0):
         return pd.Series(dtype=float, name=nombre)
 
 
-_BBG_HOJAS = {"BVL": "BVL", "CDS_PERU_5Y": "CDS", "COPPER": "Cobre"}
+_BBG_HOJAS     = {"BVL": "BVL", "CDS_PERU_5Y": "CDS", "COPPER": "Cobre"}
 _BBG_DATE_FMTS = ["%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%Y%m%d"]
+
 
 def _leer_bloomberg_excel(ruta, nombre):
     """
     Lee directamente desde DataBBG.xlsx (hojas BVL / CDS / Cobre).
-    Maneja el formato Bloomberg estándar: 5 filas de metadatos + fila Date/PX_LAST + datos.
+    Maneja el formato Bloomberg estándar: filas de metadatos + datos.
     """
     if not ruta or not os.path.exists(ruta):
         logger.warning(f"  Bloomberg '{nombre}' no encontrado en: {ruta}")
@@ -652,9 +660,8 @@ def _leer_bloomberg_excel(ruta, nombre):
     hoja = _BBG_HOJAS.get(nombre, nombre)
     try:
         raw = pd.read_excel(ruta, sheet_name=hoja, header=None, dtype=str)
-        # Detectar primera fila con fecha válida en col A
-        etiquetas = {"security","start date","end date","period","currency",
-                     "pricing source","date","dates","nan",""}
+        etiquetas = {"security", "start date", "end date", "period", "currency",
+                     "pricing source", "date", "dates", "nan", ""}
         fila_inicio = None
         for i, row in raw.iterrows():
             val = str(row.iloc[0]).strip().lower()
@@ -678,8 +685,6 @@ def _leer_bloomberg_excel(ruta, nombre):
         datos.columns = ["fecha", nombre]
         datos = datos.dropna(subset=["fecha"])
         datos = datos[datos["fecha"].str.strip() != ""]
-
-        # Parsear fechas
         for fmt in _BBG_DATE_FMTS:
             try:
                 datos["fecha"] = pd.to_datetime(datos["fecha"], format=fmt, errors="raise")
@@ -688,16 +693,11 @@ def _leer_bloomberg_excel(ruta, nombre):
                 continue
         else:
             datos["fecha"] = pd.to_datetime(datos["fecha"], dayfirst=True, errors="coerce")
-
-        # Parsear valores (decimal coma o punto)
         datos[nombre] = (datos[nombre].astype(str)
-                                      .str.replace(",", ".", regex=False)
-                                      .pipe(pd.to_numeric, errors="coerce"))
-        datos = datos.dropna(subset=["fecha", nombre])
-        datos = datos.set_index("fecha").sort_index()
+                         .str.replace(",", ".", regex=False)
+                         .pipe(pd.to_numeric, errors="coerce"))
+        datos = datos.dropna(subset=["fecha", nombre]).set_index("fecha").sort_index()
         datos = datos[~datos.index.duplicated(keep="last")]
-        datos.index.name = "fecha"
-
         s = datos[nombre]
         logger.info(f"  {nombre} [{hoja}]: {len(s):,} obs, "
                     f"{s.index.min().date()} → {s.index.max().date()}")
@@ -759,11 +759,10 @@ def download_external_series(params):
         logger.warning("  TC_PEN_USD: no se encontraron hojas TC Compra/Venta en series_bcrp.xlsx.")
         series["TC_PEN_USD"] = pd.Series(dtype=float, name="TC_PEN_USD")
 
-    # 4d. Bloomberg — BVL, CDS Perú 5Y, Cobre COMEX
+    # 4d. Bloomberg — CDS Perú 5Y y Cobre LME (DataBBG.xlsx, hojas CDS / Cobre)
     ruta_bbg = params.get("ruta_bloomberg", "")
-    series["BVL"]         = _leer_bloomberg_excel(ruta_bbg, "BVL")
-    series["CDS_PERU_5Y"] = _leer_bloomberg_excel(ruta_bbg, "CDS_PERU_5Y")
-    series["COPPER"]      = _leer_bloomberg_excel(ruta_bbg, "COPPER")
+    for _nombre_bbg in ("CDS_PERU_5Y", "COPPER"):
+        series[_nombre_bbg] = _leer_bloomberg_excel(ruta_bbg, _nombre_bbg)
 
     # Alinear al índice de fechas del rango
     idx = pd.bdate_range(start=inicio, end=fin)
@@ -777,7 +776,7 @@ def download_external_series(params):
             df[nombre] = np.nan
 
     cols_esperadas = ["VIX", "TC_PEN_USD", "T10Y", "FED_FUNDS", "EMBI_PERU", "TASA_REF_BCRP",
-                      "BVL", "CDS_PERU_5Y", "COPPER"]
+                      "CDS_PERU_5Y", "COPPER"]
     for c in cols_esperadas:
         if c not in df.columns:
             df[c] = np.nan
@@ -789,74 +788,6 @@ def download_external_series(params):
 ###############################################################################
 # PARTE 5 — Construcción de features
 ###############################################################################
-
-# ─── Diferenciación Fraccional (López de Prado, Cap. 5) ─────────────────────
-_FD_TRAIN_CUTOFF = "2010-12-31"   # calibrar d antes de cualquier ventana de test rolling
-_FD_THRES        = 1e-4            # truncar pesos con |w| < thres (FFD)
-_FD_RANGO_D      = np.arange(0.0, 1.05, 0.05)
-
-
-def _fd_pesos(d: float, n: int) -> np.ndarray:
-    """Pesos binomiales w_0=1, w_k = w_{k-1}*(k-1-d)/k (López de Prado ec. 5.4)."""
-    w = [1.0]
-    for k in range(1, n):
-        w.append(w[-1] * (k - 1 - d) / k)
-    return np.array(w[::-1])
-
-
-def _fd_aplicar(serie: pd.Series, d: float, thres: float = _FD_THRES) -> pd.Series:
-    """Aplica FFD (Fixed-width window Fracdiff) con orden d a una serie limpia."""
-    s = serie.dropna()
-    pesos = _fd_pesos(d, len(s))
-    pesos = pesos[np.abs(pesos) > thres]
-    L = len(pesos)
-    vals = {s.index[i]: float(np.dot(pesos, s.iloc[i - L + 1: i + 1]))
-            for i in range(L - 1, len(s))}
-    return pd.Series(vals, name=serie.name)
-
-
-def _fd_calibrar_d(serie: pd.Series, cutoff: str = _FD_TRAIN_CUTOFF) -> float:
-    """
-    Encuentra el d mínimo que hace estacionaria la serie usando solo datos
-    de entrenamiento (≤ cutoff) para evitar leakage.
-    Retorna d=0 si ya es estacionaria, d=1.0 si no converge.
-    """
-    from statsmodels.tsa.stattools import adfuller
-    s_train = serie.dropna()
-    s_train = s_train[s_train.index <= cutoff]
-    if len(s_train) < 50:
-        return 1.0
-    for d in _FD_RANGO_D:
-        try:
-            if d == 0:
-                _, p, *_ = adfuller(s_train)
-            else:
-                sd = _fd_aplicar(s_train, d)
-                if len(sd) < 20:
-                    continue
-                _, p, *_ = adfuller(sd)
-            if p < 0.05:
-                logger.info(f"    FD calibrado: d={d:.2f} (p={p:.4f}) sobre {len(s_train)} obs ≤ {cutoff}")
-                return float(d)
-        except Exception:
-            continue
-    logger.warning("    FD: no convergió en [0,1] — usando d=1.0")
-    return 1.0
-
-
-def _fd_feature(serie: pd.Series, nombre: str,
-                cutoff: str = _FD_TRAIN_CUTOFF) -> pd.Series:
-    """
-    Calibra d sobre TRAIN y aplica FFD a la serie completa.
-    Retorna Serie con nombre '<nombre>_frac'.
-    """
-    if serie.dropna().empty:
-        return pd.Series(dtype=float, name=f"{nombre}_frac")
-    d = _fd_calibrar_d(serie, cutoff)
-    resultado = _fd_aplicar(serie.dropna(), d)
-    resultado.name = f"{nombre}_frac"
-    return resultado
-
 
 # 5a. Features bancarias
 def _garch_vol(flujo: pd.Series) -> pd.Series:
@@ -927,6 +858,68 @@ def _garch_vol(flujo: pd.Series) -> pd.Series:
     except Exception as e:
         logger.warning(f"  GARCH no convergió ({e}) — usando rolling std 20d")
         return flujo.rolling(20).std()
+
+
+###############################################################################
+# FFD — Diferenciación Fraccional de Ancho Fijo (López de Prado, Cap. 5)
+###############################################################################
+
+def _ffd_weights(d: float, thresh: float = 1e-5) -> np.ndarray:
+    """Calcula los pesos de FFD por expansión binomial: w_k = Π_{j=1}^{k} (d-j+1)/j * (-1)^k."""
+    w, k = [1.0], 1
+    while True:
+        w_k = -w[-1] * (d - k + 1) / k
+        if abs(w_k) < thresh:
+            break
+        w.append(w_k)
+        k += 1
+    return np.array(w[::-1])   # más reciente al final → conveniente para dot()
+
+
+def _fracdiff_fixed_width(series: pd.Series, d: float, thresh: float = 1e-5) -> pd.Series:
+    """Aplica FFD con ventana de ancho fijo a una Serie de pandas."""
+    w     = _ffd_weights(d, thresh)
+    width = len(w)
+    vals  = series.values.astype(float)
+    n     = len(vals)
+    out   = np.full(n, np.nan)
+    for i in range(width - 1, n):
+        chunk = vals[i - width + 1: i + 1]
+        if not np.any(np.isnan(chunk)):
+            out[i] = float(np.dot(w, chunk))
+    return pd.Series(out, index=series.index, name=series.name)
+
+
+def _find_min_d(
+    series: pd.Series,
+    thresh: float = 1e-5,
+    max_d: float  = 1.0,
+    target_pval: float = 0.05,
+    n_steps: int  = 20,
+) -> float:
+    """
+    Encuentra el d mínimo en (0, max_d] tal que la serie diferenciada
+    sea estacionaria (ADF p-value ≤ target_pval).
+    Requiere statsmodels; si no está disponible retorna 0.4 como fallback.
+    """
+    try:
+        from statsmodels.tsa.stattools import adfuller
+    except ImportError:
+        logger.warning("  statsmodels no disponible → d_opt fallback = 0.4")
+        return 0.4
+
+    for d in np.linspace(0.05, max_d, n_steps):
+        fd = _fracdiff_fixed_width(series.dropna(), round(float(d), 4), thresh)
+        fd_clean = fd.dropna()
+        if len(fd_clean) < 30:
+            continue
+        try:
+            pval = adfuller(fd_clean, maxlag=1, regression="c", autolag=None)[1]
+            if pval <= target_pval:
+                return round(float(d), 4)
+        except Exception:
+            continue
+    return round(max_d, 4)
 
 
 def build_bank_features(df_banco, lags_cortos, lag_semana, lag_mes, ventanas_vol):
@@ -1013,6 +1006,7 @@ def build_macro_features(macro_df):
             "TC_PEN_USD", "delta_TC", "tc_vol_5d", "tc_vol_22d", "garch_vol_tc",
             "EMBI_PERU", "delta_EMBI", "garch_vol_embi",
             "TASA_REF_BCRP", "FED_FUNDS", "diferencial_tasas", "T10Y",
+            "EMBI_PERU_frac", "T10Y_frac", "CDS_PERU_5Y_frac", "COPPER_frac", "VIX_frac",
         ]
         return pd.DataFrame(columns=cols)
 
@@ -1049,38 +1043,26 @@ def build_macro_features(macro_df):
 
     resultado["T10Y"] = df.get("T10Y", np.nan)
 
-    # Bloomberg: BVL (Bolsa de Valores de Lima — MXNUPEGE Index)
-    bvl = df.get("BVL", pd.Series(dtype=float))
-    resultado["BVL"]        = df.get("BVL", np.nan)
-    resultado["delta_BVL"]  = bvl.diff(1)
-    resultado["bvl_ret"]    = bvl.pct_change()
-    resultado["bvl_vol_22d"] = bvl.pct_change().rolling(22).std()
-
-    # Bloomberg: CDS Perú 5Y
-    cds = df.get("CDS_PERU_5Y", pd.Series(dtype=float))
-    resultado["CDS_PERU_5Y"]   = df.get("CDS_PERU_5Y", np.nan)
-    resultado["delta_CDS"]     = cds.diff(1)
-    resultado["garch_vol_cds"] = _garch_vol(cds.diff(1))
-
-    # Bloomberg: Cobre LME 3 meses (LMCADS03 Comdty) — USD/TM
-    copper = df.get("COPPER", pd.Series(dtype=float))
-    resultado["COPPER"]       = df.get("COPPER", np.nan)
-    resultado["delta_COPPER"] = copper.diff(1)
-    resultado["copper_ret"]   = copper.pct_change()
-    resultado["copper_ma22"]  = copper.rolling(22).mean()
-
-    # ── Diferenciación Fraccional (López de Prado) ────────────────────────────
-    # Aplicar a series I(1): EMBI_PERU, T10Y, CDS_PERU_5Y, COPPER, VIX
-    # d calibrado sobre datos ≤ _FD_TRAIN_CUTOFF para evitar leakage en rolling CV.
-    # step003 y step005 recalibran d por fold vía reemplazar_ffd_*.
-    logger.info("  Calculando features de diferenciación fraccional (FFD)...")
-    for nombre_raw, col_src in [("EMBI_PERU",   df.get("EMBI_PERU",   pd.Series(dtype=float))),
-                                 ("T10Y",        df.get("T10Y",        pd.Series(dtype=float))),
-                                 ("CDS_PERU_5Y", df.get("CDS_PERU_5Y", pd.Series(dtype=float))),
-                                 ("COPPER",      df.get("COPPER",      pd.Series(dtype=float))),
-                                 ("VIX",         df.get("VIX",         pd.Series(dtype=float)))]:
-        fd = _fd_feature(col_src.reindex(df.index), nombre_raw)
-        resultado[f"{nombre_raw}_frac"] = fd.reindex(resultado.index)
+    # ── FFD: diferenciación fraccional para series I(1) ────────────────────────
+    # d_opt calibrado en datos hasta _FD_TRAIN_CUTOFF (sin leakage).
+    # Si statsmodels no está disponible usa d_opt=0.4 como fallback conservador.
+    _fd_cutoff = pd.Timestamp(_FD_TRAIN_CUTOFF)
+    _ffd_targets = [
+        ("EMBI_PERU",   "EMBI_PERU_frac"),
+        ("T10Y",        "T10Y_frac"),
+        ("CDS_PERU_5Y", "CDS_PERU_5Y_frac"),
+        ("COPPER",      "COPPER_frac"),
+        ("VIX",         "VIX_frac"),
+    ]
+    for col_raw, col_frac in _ffd_targets:
+        serie = df.get(col_raw, pd.Series(dtype=float))
+        if isinstance(serie, pd.Series) and serie.dropna().shape[0] >= 60:
+            s_train = serie[serie.index <= _fd_cutoff].dropna()
+            d_opt   = _find_min_d(s_train) if len(s_train) >= 60 else 0.4
+            resultado[col_frac] = _fracdiff_fixed_width(serie, d_opt)
+            logger.info(f"  FFD {col_raw} → {col_frac}  d_opt={d_opt:.4f}")
+        else:
+            resultado[col_frac] = np.nan
 
     return resultado
 
@@ -1394,7 +1376,8 @@ def build_feature_matrix(
         for col in ["VIX","delta_VIX","VIX_ma22","TC_PEN_USD","delta_TC",
                     "tc_vol_5d","tc_vol_22d","garch_vol_tc",
                     "EMBI_PERU","delta_EMBI","garch_vol_embi",
-                    "TASA_REF_BCRP","FED_FUNDS","diferencial_tasas","T10Y"]:
+                    "TASA_REF_BCRP","FED_FUNDS","diferencial_tasas","T10Y",
+                    "EMBI_PERU_frac","T10Y_frac","CDS_PERU_5Y_frac","COPPER_frac","VIX_frac"]:
             df[col] = np.nan
 
     # ── 6. Estacionales (calculadas una vez por fecha_th única) ──────────────
@@ -1650,27 +1633,12 @@ def build_data_dictionary(params):
     add("diferencial_tasas","Calculado",      "TASA_REF_BCRP - FED_FUNDS",                        0, None)
     add("T10Y",             "Yahoo Finance",  "Rendimiento del bono del Tesoro EE.UU. a 10 años", 0, None)
 
-    # ── Bloomberg ─────────────────────────────────────────────────────────────
-    add("BVL",          "Bloomberg",  "Bolsa de Valores de Lima (MXNUPEGE Index) — índice accionario Perú",  0, None)
-    add("delta_BVL",    "Bloomberg",  "Variación diaria de la BVL",                                          1, None)
-    add("bvl_ret",      "Bloomberg",  "Retorno diario (%) de la BVL",                                        1, None)
-    add("bvl_vol_22d",  "Bloomberg",  "Volatilidad rolling 22d de retornos BVL",                             None, None)
-    add("CDS_PERU_5Y",      "Bloomberg",  "CDS soberano Perú 5 años (CPERU1U5) — mide riesgo crediticio país",  0, None)
-    add("delta_CDS",        "Bloomberg",  "Variación diaria del CDS Perú 5Y",                                   1, None)
-    add("garch_vol_cds",    "Bloomberg",  "Volatilidad GARCH(1,1) de los cambios diarios del CDS",              None, None)
-    add("COPPER",       "Bloomberg",  "LME Copper 3M (LMCADS03) — precio cobre USD/TM. Peru es 2do productor mundial", 0, None)
-    add("delta_COPPER", "Bloomberg",  "Variación diaria del precio del cobre",                                         1, None)
-    add("copper_ret",   "Bloomberg",  "Retorno diario (%) del precio del cobre",                                       1, None)
-    add("copper_ma22",  "Bloomberg",  "Media móvil 22d del precio del cobre",                                          None, None)
-
-    # ── Diferenciación Fraccional — López de Prado Cap. 5 ─────────────────────
-    # d calibrado en TRAIN (≤2010-12-31) para evitar leakage en rolling CV.
-    # step003/step005 recalibran d por fold vía reemplazar_ffd_*.
-    add("EMBI_PERU_frac",   "BCRP Add-In (FFD)",  "EMBI Perú diferenciado fraccionalmente (d óptimo ≥0). Estacionario, preserva memoria de largo plazo.", None, None)
-    add("T10Y_frac",        "Yahoo Finance (FFD)", "UST 10Y diferenciado fraccionalmente (d óptimo ≥0). Estacionario, preserva memoria de largo plazo.",    None, None)
-    add("CDS_PERU_5Y_frac", "Bloomberg (FFD)",     "CDS Perú 5Y diferenciado fraccionalmente (d óptimo ≥0). Estacionario, preserva memoria.",               None, None)
-    add("COPPER_frac",      "Bloomberg (FFD)",     "Cobre LME diferenciado fraccionalmente (d óptimo ≥0). Estacionario, preserva memoria.",                  None, None)
-    add("VIX_frac",         "Yahoo Finance (FFD)", "VIX diferenciado fraccionalmente (d≈0 — ya estacionario). Idéntico al nivel original.",                  None, None)
+    # ── Features FFD — diferenciación fraccional (López de Prado Cap. 5) ──────
+    add("EMBI_PERU_frac",   "BCRP Add-In (FFD)",  "EMBI Perú diferenciado fraccionalmente (d mínimo que elimina raíz unitaria). Preserva memoria de largo plazo; más estacionario que el nivel.", None, None)
+    add("T10Y_frac",        "Yahoo Finance (FFD)", "UST 10Y diferenciado fraccionalmente. Alternativa a delta_T10Y con menor pérdida de memoria.", None, None)
+    add("CDS_PERU_5Y_frac", "Bloomberg (FFD)",     "CDS Perú 5Y diferenciado fraccionalmente (d_opt calibrado en TRAIN).", None, None)
+    add("COPPER_frac",      "Bloomberg (FFD)",     "Cobre LME diferenciado fraccionalmente. Indicador de ciclo global.", None, None)
+    add("VIX_frac",         "Yahoo Finance (FFD)", "VIX diferenciado fraccionalmente (d≈0 si ya es estacionario; preserva estructura).", None, None)
 
     # ── Features estacionales (en t+h — fecha futura, siempre conocidas) ─────
     add("dias_al_cierre_mes",    "Calendario", "Días hábiles restantes hasta fin de mes en t+h",          None, "t+h")
