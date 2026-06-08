@@ -949,6 +949,7 @@ def build_bank_features(df_banco, lags_cortos, lag_semana, lag_mes, ventanas_vol
             + [f"sigma_flujo_{v}d" for v in VENTANAS_FLUJO]
             + [f"ma_flujo_{v}d"    for v in VENTANAS_FLUJO]
             + ["garch_vol", "flujo_neto_acum_mes"]
+            + ["flujo_neto_sum_5d", "flujo_neto_sum_22d", "flujo_neto_sum_66d"]
         )
         return pd.DataFrame(columns=cols)
 
@@ -991,6 +992,12 @@ def build_bank_features(df_banco, lags_cortos, lag_semana, lag_mes, ventanas_vol
     resultado["flujo_neto_acum_mes"] = (
         flujo.groupby(flujo.index.to_period("M")).cumsum()
     )
+
+    # Agregados rolling del flujo neto — ventana siempre relativa a t
+    # min_periods=N garantiza NaN para filas con historia insuficiente (→ imputadas por mediana del fold)
+    resultado["flujo_neto_sum_5d"]  = flujo.rolling( 5, min_periods= 5).sum()
+    resultado["flujo_neto_sum_22d"] = flujo.rolling(22, min_periods=22).sum()
+    resultado["flujo_neto_sum_66d"] = flujo.rolling(66, min_periods=66).sum()
 
     return resultado
 
@@ -1608,6 +1615,15 @@ def build_data_dictionary(params):
         "Acumulado del flujo neto D−R desde el primer día hábil del mes hasta t. "
         "Captura la lógica de reversión intramensual: acumulación de depósitos netos "
         "anticipa mayores retiros en cierre de mes, y viceversa.", 0, None)
+    add("flujo_neto_sum_5d",  "Datos bancarios",
+        "Suma rolling 5dh del flujo neto D−R hasta t (semana). "
+        "min_periods=5: NaN si historia < 5 días → imputado por mediana del fold.", 0, None)
+    add("flujo_neto_sum_22d", "Datos bancarios",
+        "Suma rolling 22dh del flujo neto D−R hasta t (mes). "
+        "min_periods=22: NaN si historia < 22 días → imputado por mediana del fold.", 0, None)
+    add("flujo_neto_sum_66d", "Datos bancarios",
+        "Suma rolling 66dh del flujo neto D−R hasta t (trimestre). "
+        "min_periods=66: NaN si historia < 66 días → imputado por mediana del fold.", 0, None)
 
     # ── Confirmados futuros ───────────────────────────────────────────────────
     # Entrenamiento: proxy histórico = valor realizado en t+1/t+2 (shift negativo)
