@@ -68,6 +68,13 @@ except ImportError:
     lgb = None
     _LGBM_OK = False
 
+try:
+    import shap
+    _SHAP_OK = True
+except ImportError:
+    shap = None
+    _SHAP_OK = False
+
 warnings.filterwarnings("ignore", category=UserWarning)
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
@@ -138,6 +145,14 @@ FIX_REG_LAMBDA = False
 
 # ── Fan chart TEST: número de snapshots por fold ──────────────────────────────
 FANCHART_N_SNAPSHOTS = 4   # 1 cada ~3 meses para TEST de 1 año
+
+# ── Diagnóstico de features (PARTE 7-bis) ─────────────────────────────────────
+# True  → corre gain / block-perm / SHAP por fold y genera los gráficos
+# False → omite el diagnóstico (más rápido)
+DIAGNOSTICO_FEATURES  = True
+DIAG_BLOCK_SIZE       = 20    # filas por bloque en la permutación (preserva autocorrelación)
+DIAG_N_REPEATS        = 3     # repeticiones por feature para estabilizar la estimación
+DIAG_SHAP_MAX_SAMPLES = 800   # máximo de filas VAL para SHAP (None = todas)
 
 # ── Comparación con Step004 en fan charts ─────────────────────────────────────
 # True  → superpone predicciones del modelo step004 (línea naranja discontinua)
@@ -1503,6 +1518,179 @@ def graficar_fanchart_test_fold(
 
 
 ###############################################################################
+# PARTE 7-bis — Diagnóstico de features (gain / block-perm / SHAP)
+###############################################################################
+
+def _diag_predict(model, X: np.ndarray) -> np.ndarray:
+    if MODELO_CV in ("xgb", "xgb_qt"):
+        return model.predict(xgb.DMatrix(X))
+    return model.predict(X)
+
+
+def _diag_gain_promedio(modelos: dict, cols_feat: list) -> pd.Series:
+    """Gain promedio normalizado a [0,1] sobre todos los cuantiles."""
+    series = []
+    for model in modelos.values():
+        if MODELO_CV in ("xgb", "xgb_qt"):
+            sc = model.get_score(importance_type="gain")
+            series.append(pd.Series(sc))
+        elif _LGBM_OK and MODELO_CV == "lgbm":
+            imp = model.feature_importance(importance_type="gain")
+            series.append(pd.Series(imp, index=model.feature_name()))
+    if not series:
+        return pd.Series(0.0, index=cols_feat)
+    avg = pd.concat(series, axis=1).mean(axis=1).reindex(cols_feat).fillna(0.0)
+    mx  = avg.max()
+    return avg / mx if mx > 0 else avg
+
+
+def _diag_block_perm_un_cuantil(model, X_val: np.ndarray, y_val: np.ndarray,
+                                  tau: float, cols_feat: list,
+                                  rng: np.random.Generator) -> pd.Series:
+    base = pinball_loss(y_val, _diag_predict(model, X_val), tau)
+    n    = len(X_val)
+    resultado = {}
+    for j, col in enumerate(cols_feat):
+        deltas = []
+        for _ in range(DIAG_N_REPEATS):
+            Xp = X_val.copy()
+            n_blocks = max(1, n // DIAG_BLOCK_SIZE)
+            shuffled = np.concatenate(
+                [rng.permutation(b) for b in np.array_split(np.arange(n), n_blocks)]
+            )
+            Xp[:, j] = X_val[shuffled, j]
+            deltas.append(pinball_loss(y_val, _diag_predict(model, Xp), tau) - base)
+        resultado[col] = float(np.mean(deltas))
+    return pd.Series(resultado)
+
+
+def _diag_block_perm_promedio(modelos: dict, X_val: np.ndarray, y_val: np.ndarray,
+                               cols_feat: list, fold_num: int) -> pd.Series:
+    rng    = np.random.default_rng(42 + fold_num)
+    series = [
+        _diag_block_perm_un_cuantil(model, X_val, y_val, tau, cols_feat, rng)
+        for tau, model in modelos.items()
+    ]
+    avg = pd.concat(series, axis=1).mean(axis=1)
+    mx  = avg.abs().max()
+    return avg / mx if mx > 0 else avg
+
+
+def _diag_shap_promedio(modelos: dict, X_val: np.ndarray,
+                         cols_feat: list, fold_num: int) -> pd.Series:
+    if not _SHAP_OK:
+        return pd.Series(np.nan, index=cols_feat)
+    rng  = np.random.default_rng(42 + fold_num)
+    n    = len(X_val)
+    samp = DIAG_SHAP_MAX_SAMPLES
+    idx  = rng.choice(n, min(samp, n), replace=False) if samp and samp < n else np.arange(n)
+    Xs   = X_val[idx]
+    series = []
+    for model in modelos.values():
+        try:
+            ex = shap.TreeExplainer(model)
+            if MODELO_CV in ("xgb", "xgb_qt"):
+                sv = ex.shap_values(xgb.DMatrix(Xs))
+            else:
+                sv = ex.shap_values(Xs)
+            series.append(pd.Series(np.abs(sv).mean(axis=0), index=cols_feat))
+        except Exception:
+            pass
+    if not series:
+        return pd.Series(np.nan, index=cols_feat)
+    avg = pd.concat(series, axis=1).mean(axis=1)
+    mx  = avg.abs().max()
+    return avg / mx if mx > 0 else avg
+
+
+def diagnosticar_fold(modelos, X_val, y_val, cols_feat, fold_num):
+    """Tres señales (gain train, perm val, shap val) promediadas sobre cuantiles."""
+    logger.info(f"    [diag] Fold {fold_num}: gain(train) + block-perm(val) + shap(val)")
+    gain = _diag_gain_promedio(modelos, cols_feat)
+    perm = _diag_block_perm_promedio(modelos, X_val, y_val, cols_feat, fold_num)
+    shp  = _diag_shap_promedio(modelos, X_val, cols_feat, fold_num)
+    return {"fold": fold_num, "gain_train": gain, "perm_val": perm, "shap_val": shp}
+
+
+def _diag_matriz(resultados: list, cols_feat: list) -> pd.DataFrame:
+    """Promedia los resultados de todos los folds en un DataFrame cols × señales."""
+    gain = pd.concat([r["gain_train"] for r in resultados], axis=1).mean(axis=1)
+    perm = pd.concat([r["perm_val"]   for r in resultados], axis=1).mean(axis=1)
+    shp  = pd.concat([r["shap_val"]   for r in resultados], axis=1).mean(axis=1)
+    return pd.DataFrame({"gain_train": gain, "perm_val": perm, "shap_val": shp},
+                        index=cols_feat)
+
+
+def _plot_gain_vs_perm(df: pd.DataFrame, tag: str):
+    """Gráfico horizontal de 2 barras por feature: gain(TRAIN) vs perm(VAL)."""
+    df_s   = df.sort_values("gain_train", ascending=True)
+    n_feat = len(df_s)
+    fig, ax = plt.subplots(figsize=(10, max(6, n_feat * 0.35)))
+    y, h = np.arange(n_feat), 0.35
+    ax.barh(y + h/2, df_s["gain_train"], height=h, color="#607D8B",
+            label="gain (TRAIN, in-sample)")
+    ax.barh(y - h/2, df_s["perm_val"],   height=h, color="#4CAF50",
+            label="perm (VAL, OOS)")
+    ax.set_yticks(y)
+    ax.set_yticklabels(df_s.index, fontsize=8)
+    ax.set_xlabel("Importancia normalizada")
+    ax.axvline(0, color="black", lw=0.8)
+    ax.legend(loc="lower right", fontsize=8)
+    ax.set_title(
+        f"gain(TRAIN) vs perm(VAL) — {tag}\n"
+        f"gain alto + perm bajo → sospecha de sobreajuste",
+        fontsize=10
+    )
+    plt.tight_layout()
+    ruta = DIR_MODO / f"diag_gain_vs_perm_{tag}.png"
+    plt.savefig(ruta, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    logger.info(f"  [diag] gain vs perm → {ruta.name}")
+
+
+def _plot_gain_perm_shap(df: pd.DataFrame, tag: str):
+    """Gráfico horizontal de 3 barras por feature: gain / perm / SHAP."""
+    df_s   = df.sort_values("gain_train", ascending=True)
+    n_feat = len(df_s)
+    fig, ax = plt.subplots(figsize=(11, max(6, n_feat * 0.45)))
+    y, h = np.arange(n_feat), 0.26
+    ax.barh(y + h,  df_s["gain_train"], height=h, color="#4878CF",
+            label="gain (TRAIN, in-sample)")
+    ax.barh(y,      df_s["perm_val"],   height=h, color="#6ACC65",
+            label="perm (VAL, OOS)")
+    ax.barh(y - h,  df_s["shap_val"],   height=h, color="#D65F5F",
+            label="SHAP |mean| (VAL, OOS)")
+    ax.set_yticks(y)
+    ax.set_yticklabels(df_s.index, fontsize=8)
+    ax.set_xlabel("Importancia normalizada")
+    ax.axvline(0, color="black", lw=0.8)
+    ax.legend(loc="lower right", fontsize=8)
+    nota_shap = "" if _SHAP_OK else "  ⚠ SHAP no disponible (pip install shap)"
+    ax.set_title(
+        f"gain / perm / SHAP — {tag}{nota_shap}\n"
+        f"convergencia gain≈perm≈SHAP → feature genuinamente útil",
+        fontsize=10
+    )
+    plt.tight_layout()
+    ruta = DIR_MODO / f"diag_gain_perm_shap_{tag}.png"
+    plt.savefig(ruta, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    logger.info(f"  [diag] gain+perm+SHAP → {ruta.name}")
+
+
+def consolidar_diagnostico(diag_por_fold: list, cols_feat: list, tag: str):
+    """Consolida resultados de todos los folds y genera CSV + 2 gráficos."""
+    if not diag_por_fold:
+        return
+    df = _diag_matriz(diag_por_fold, cols_feat)
+    ruta_csv = DIR_MODO / f"diag_features_{tag}.csv"
+    df.to_csv(ruta_csv)
+    logger.info(f"  [diag] CSV → {ruta_csv.name}")
+    _plot_gain_vs_perm(df, tag)
+    _plot_gain_perm_shap(df, tag)
+
+
+###############################################################################
 # PARTE 8 — Pipeline principal
 ###############################################################################
 
@@ -1670,6 +1858,7 @@ def evaluar_banco(banco: str):
     por_h_test        = []
     por_h_val         = []
     importancias_folds = []
+    diag_por_fold      = []
     modelos_ultimo    = None
     params_ultimo     = None
     folds_manifest    = []   # registro de todos los folds para fan chart histórico
@@ -1738,6 +1927,14 @@ def evaluar_banco(banco: str):
                 importancias_folds.append({"fold": fold["fold"], "importancias": imp})
             except Exception as _e_imp:
                 logger.warning(f"    Importancia fold {fold['fold']}: {_e_imp}")
+
+            if DIAGNOSTICO_FEATURES:
+                try:
+                    diag_por_fold.append(
+                        diagnosticar_fold(modelos, X_val, y_val.values, cols_feat, fold["fold"])
+                    )
+                except Exception as _e_diag:
+                    logger.warning(f"    [diag] Fold {fold['fold']} falló: {_e_diag}")
 
         preds_test = predecir_fold(modelos, X_test)
         preds_val  = predecir_fold(modelos, X_val)
@@ -1886,6 +2083,12 @@ def evaluar_banco(banco: str):
     graficar_cobertura_por_h(df_por_h_v, tag, "val")
     graficar_hiperparametros_wfcv(df_test_m, tag)
     graficar_importancia_por_fold(importancias_folds, cols_feat, tag)
+
+    if DIAGNOSTICO_FEATURES and diag_por_fold:
+        try:
+            consolidar_diagnostico(diag_por_fold, cols_feat, tag)
+        except Exception as _e_cons:
+            logger.warning(f"  [diag] consolidar_diagnostico falló: {_e_cons}")
 
     if GUARDAR_MODELO_FINAL and modelos_ultimo is not None:
         ultimo = folds[-1]
