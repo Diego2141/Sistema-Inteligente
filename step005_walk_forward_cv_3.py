@@ -68,6 +68,13 @@ except ImportError:
     lgb = None
     _LGBM_OK = False
 
+try:
+    import shap
+    _SHAP_OK = True
+except ImportError:
+    shap = None
+    _SHAP_OK = False
+
 warnings.filterwarnings("ignore", category=UserWarning)
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
@@ -111,6 +118,15 @@ H_MAX_DIAS_HAB   = 75   # igual que h_max en step001
 PURGE_DIAS_HAB   = H_MAX_DIAS_HAB   # purga TRAIN → VAL
 PURGE_VAL_TEST   = H_MAX_DIAS_HAB   # purga VAL   → TEST
 BURN_IN_DIAS_HAB = 22               # warm-up MA22 al inicio de TRAIN
+
+# ── Diagnóstico de features (PARTE 7-bis) ────────────────────────────────────
+# True  → mide gain(train) + block-perm(val) + SHAP(val) por fold y consolida
+# False → sin diagnóstico extra (comportamiento original)
+DIAGNOSTICO_FEATURES  = True
+DIAG_BLOCK_SIZE       = 20    # tamaño de bloque para block-permutation (preserva autocorr.)
+DIAG_N_REPEATS        = 3     # repeticiones de la permutación
+DIAG_PERM_MAX_SAMPLES = None  # submuestreo contiguo de VAL (None = todo)
+DIAG_SHAP_MAX_SAMPLES = 800   # muestras para SHAP por cuantil
 
 # ── Modelo ────────────────────────────────────────────────────────────────────
 QUANTILES        = [0.01, 0.05, 0.50, 0.95, 0.99]
@@ -1605,6 +1621,241 @@ def graficar_fanchart_test_fold(
 
 
 ###############################################################################
+# PARTE 7-bis — Diagnóstico de features (gain / block-perm / SHAP)
+###############################################################################
+
+def _diag_predict_un_modelo(model, X):
+    if MODELO_CV == "lgbm" and _LGBM_OK:
+        return model.predict(X.values)
+    return model.predict(xgb.DMatrix(X))
+
+
+def _diag_gain_promedio(modelos, cols_feat):
+    """Gain promedio entre cuantiles (TRAIN, in-sample). Excluye 'mean'."""
+    acum = {f: 0.0 for f in cols_feat}
+    n = 0
+    for tau, model in modelos.items():
+        if tau == "mean":
+            continue
+        if MODELO_CV == "lgbm" and _LGBM_OK:
+            imp = dict(zip(model.feature_name(),
+                           model.feature_importance(importance_type="gain").astype(float)))
+        else:
+            imp = model.get_score(importance_type="gain")
+        for f in cols_feat:
+            acum[f] += float(imp.get(f, 0.0))
+        n += 1
+    if n:
+        acum = {f: v / n for f, v in acum.items()}
+    return pd.Series(acum)
+
+
+def _diag_block_perm_un_cuantil(model, X, y, tau, block_size, n_repeats, rng):
+    n = len(X)
+    base = pinball_loss(y, _diag_predict_un_modelo(model, X), tau)
+    block_starts = np.arange(0, n, block_size)
+    imp = {}
+    for c in X.columns:
+        col = X[c].values
+        deltas = []
+        for _ in range(n_repeats):
+            perm_starts = rng.permutation(block_starts)
+            new_col = np.concatenate([col[s:s + block_size] for s in perm_starts])[:n]
+            Xp = X.copy(); Xp[c] = new_col
+            deltas.append(pinball_loss(y, _diag_predict_un_modelo(model, Xp), tau) - base)
+        imp[c] = float(np.mean(deltas))
+    return pd.Series(imp)
+
+
+def _diag_block_perm_promedio(modelos, X_val, y_val, cols_feat, fold_num):
+    X = X_val.reset_index(drop=True)[cols_feat]
+    y = np.asarray(y_val)
+    if DIAG_PERM_MAX_SAMPLES is not None and len(X) > DIAG_PERM_MAX_SAMPLES:
+        X = X.iloc[:DIAG_PERM_MAX_SAMPLES].copy()
+        y = y[:DIAG_PERM_MAX_SAMPLES]
+    bs  = max(2, min(DIAG_BLOCK_SIZE, len(X) // 3))
+    rng = np.random.default_rng(42 + fold_num)
+    acum = pd.Series(0.0, index=cols_feat)
+    n = 0
+    for tau in QUANTILES:
+        model = modelos.get(tau)
+        if model is None:
+            continue
+        s = _diag_block_perm_un_cuantil(model, X, y, tau, bs, DIAG_N_REPEATS, rng)
+        acum = acum.add(s.reindex(cols_feat).fillna(0.0), fill_value=0.0)
+        n += 1
+    if n:
+        acum /= n
+    return acum
+
+
+def _diag_shap_promedio(modelos, X_val, cols_feat, fold_num):
+    if not _SHAP_OK:
+        return pd.Series(np.nan, index=cols_feat)
+    X = X_val.reset_index(drop=True)[cols_feat]
+    if len(X) > DIAG_SHAP_MAX_SAMPLES:
+        X = X.sample(DIAG_SHAP_MAX_SAMPLES, random_state=42 + fold_num)
+    acum = pd.Series(0.0, index=cols_feat)
+    n = 0
+    for tau in QUANTILES:
+        model = modelos.get(tau)
+        if model is None:
+            continue
+        try:
+            explainer = shap.TreeExplainer(model)
+            sv = explainer.shap_values(X)
+            s = pd.Series(np.abs(sv).mean(axis=0), index=cols_feat)
+            acum = acum.add(s.fillna(0.0), fill_value=0.0)
+            n += 1
+        except Exception as e:
+            logger.warning(f"      [diag] SHAP τ={tau} falló: {e}")
+    if n == 0:
+        return pd.Series(np.nan, index=cols_feat)
+    return acum / n
+
+
+def diagnosticar_fold(modelos, X_val, y_val, cols_feat, fold_num):
+    """Tres señales (gain train, perm val, shap val) promediadas sobre cuantiles."""
+    logger.info(f"    [diag] Fold {fold_num}: gain(train) + block-perm(val) + shap(val)")
+    gain = _diag_gain_promedio(modelos, cols_feat)
+    perm = _diag_block_perm_promedio(modelos, X_val, y_val, cols_feat, fold_num)
+    shp  = _diag_shap_promedio(modelos, X_val, cols_feat, fold_num)
+    return {"fold": fold_num, "gain_train": gain, "perm_val": perm, "shap_val": shp}
+
+
+def _diag_matriz(diag_por_fold, senal, cols_feat):
+    filas = {d["fold"]: d[senal].reindex(cols_feat) for d in diag_por_fold}
+    m = pd.DataFrame(filas).T
+    m.index.name = "fold"
+    return m
+
+
+def consolidar_diagnostico(diag_por_fold, cols_feat, banco, top_n=25):
+    """CSVs + heatmaps + ranking + gain(train) vs perm(val). Solo reporta, no depura."""
+    if not diag_por_fold:
+        logger.warning("    [diag] Sin folds para consolidar")
+        return
+    senales = {
+        "gain_train": "Gain (TRAIN, in-sample)",
+        "perm_val":   "Block-Permutation (VAL, OOS)",
+        "shap_val":   "SHAP (VAL, OOS)",
+    }
+    matrices = {s: _diag_matriz(diag_por_fold, s, cols_feat) for s in senales}
+
+    for s, m in matrices.items():
+        ruta = DIR_MODO / f"diag_{s}_{banco}.csv"
+        m.to_csv(ruta)
+        logger.info(f"    [diag] CSV {s}: {ruta.name}")
+
+    estab_rows = []
+    for s, m in matrices.items():
+        if m.dropna(how="all").empty:
+            continue
+        ranks = m.rank(axis=1, ascending=False, method="min")
+        for feat in cols_feat:
+            estab_rows.append({
+                "senal"    : s,
+                "feature"  : feat,
+                "imp_mean" : float(m[feat].mean(skipna=True)),
+                "rank_mean": float(ranks[feat].mean(skipna=True)),
+                "rank_std" : float(ranks[feat].std(skipna=True)),
+            })
+    pd.DataFrame(estab_rows).to_csv(
+        DIR_MODO / f"diag_estabilidad_{banco}.csv", index=False)
+    logger.info(f"    [diag] CSV estabilidad: diag_estabilidad_{banco}.csv")
+
+    perm_m = matrices["perm_val"]
+    orden  = (perm_m.mean().sort_values(ascending=False).index.tolist()
+              if not perm_m.dropna(how="all").empty
+              else matrices["gain_train"].mean().sort_values(ascending=False).index.tolist())
+    orden_top = orden[:top_n]
+    folds     = sorted(matrices["gain_train"].index.tolist())
+
+    # Heatmaps por señal
+    for s, m in matrices.items():
+        if m.dropna(how="all").empty:
+            continue
+        sub      = m[orden_top].T
+        col_max  = sub.max(axis=0).replace(0, np.nan)
+        sub_norm = (sub / col_max).fillna(0.0)
+        fig, ax  = plt.subplots(figsize=(max(7, len(folds) * 1.1),
+                                         max(6, len(orden_top) * 0.42)))
+        im = ax.imshow(sub_norm.values, aspect="auto", cmap="YlOrRd",
+                       vmin=0, vmax=1, interpolation="nearest")
+        plt.colorbar(im, ax=ax, label="Importancia normalizada por fold")
+        ax.set_yticks(range(len(orden_top)))
+        ax.set_yticklabels(orden_top, fontsize=8)
+        ax.set_xticks(range(len(folds)))
+        ax.set_xticklabels([f"F{f}" for f in folds], fontsize=9)
+        ax.set_xlabel("Fold", fontsize=10)
+        ax.set_title(f"Diagnóstico VAL — {senales[s]} — {banco}\n"
+                     f"Top {len(orden_top)} features · normalizado por fold "
+                     f"(solo diagnóstico, NO depuración)", fontweight="bold", fontsize=10)
+        plt.tight_layout()
+        ruta = DIR_PLOTS / f"diag_heatmap_{s}_{banco}.png"
+        plt.savefig(ruta, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        logger.info(f"    [diag] Heatmap {s}: {ruta.name}")
+
+    # Ranking de estabilidad (block-perm VAL)
+    if not perm_m.dropna(how="all").empty:
+        top_r = orden[:min(10, len(orden))]
+        ranks = perm_m.rank(axis=1, ascending=False, method="min")
+        fig, ax = plt.subplots(figsize=(max(7, len(folds) * 1.1), 5))
+        cmap = plt.cm.tab10
+        for i, feat in enumerate(top_r):
+            ax.plot(folds, ranks[feat].values, "o-", lw=2, ms=7,
+                    color=cmap(i / 10), label=feat, alpha=0.85)
+        ax.invert_yaxis()
+        ax.yaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+        ax.set_xticks(folds)
+        ax.set_xticklabels([f"Fold {f}" for f in folds], fontsize=9)
+        ax.set_ylabel("Ranking perm(VAL)  (1 = más importante)", fontsize=10)
+        ax.set_title(f"Estabilidad de ranking — Block-Permutation VAL — {banco}\n"
+                     f"Línea plana = feature robusto · saltos = régimen-dependiente",
+                     fontweight="bold", fontsize=10)
+        ax.legend(fontsize=8, bbox_to_anchor=(1.01, 1), loc="upper left", framealpha=0.85)
+        ax.grid(True, alpha=0.25)
+        plt.tight_layout()
+        ruta = DIR_PLOTS / f"diag_ranking_perm_val_{banco}.png"
+        plt.savefig(ruta, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        logger.info(f"    [diag] Ranking perm(VAL): {ruta.name}")
+
+    # Scatter gain(train) vs perm(val)
+    gain_m = matrices["gain_train"]
+    if not perm_m.dropna(how="all").empty:
+        gain_mean = gain_m.mean()
+        perm_mean = perm_m.mean()
+        g = (gain_mean / (gain_mean.max() + 1e-12)).reindex(orden_top)
+        p = (perm_mean.clip(lower=0) /
+             (perm_mean.clip(lower=0).max() + 1e-12)).reindex(orden_top)
+        fig, ax = plt.subplots(figsize=(8, max(5, len(orden_top) * 0.4)))
+        ypos = np.arange(len(orden_top))
+        ax.barh(ypos - 0.2, g.values, height=0.4, color="slategrey",
+                label="gain (TRAIN, in-sample)")
+        ax.barh(ypos + 0.2, p.values, height=0.4, color="seagreen",
+                label="perm (VAL, OOS)")
+        ax.set_yticks(ypos)
+        ax.set_yticklabels(orden_top, fontsize=8)
+        ax.invert_yaxis()
+        ax.set_xlabel("Importancia normalizada", fontsize=10)
+        ax.set_title(f"gain(TRAIN) vs perm(VAL) — {banco}\n"
+                     f"gain alto + perm bajo → sospecha de sobreajuste",
+                     fontweight="bold", fontsize=9)
+        ax.legend(fontsize=9)
+        ax.grid(True, axis="x", alpha=0.25)
+        plt.tight_layout()
+        ruta = DIR_PLOTS / f"diag_gain_vs_perm_{banco}.png"
+        plt.savefig(ruta, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        logger.info(f"    [diag] gain(train) vs perm(val): {ruta.name}")
+
+    logger.info(f"    [diag] Consolidación completa — {len(folds)} folds, "
+                f"{len(cols_feat)} features")
+
+
+###############################################################################
 # PARTE 8 — Pipeline principal
 ###############################################################################
 
@@ -1773,6 +2024,7 @@ def evaluar_banco(banco: str):
     por_h_test        = []
     por_h_val         = []
     importancias_folds = []
+    diag_por_fold      = []
     modelos_ultimo    = None
     params_ultimo     = None
     folds_manifest    = []   # registro de todos los folds para fan chart histórico
@@ -1841,6 +2093,13 @@ def evaluar_banco(banco: str):
                 importancias_folds.append({"fold": fold["fold"], "importancias": imp})
             except Exception as _e_imp:
                 logger.warning(f"    Importancia fold {fold['fold']}: {_e_imp}")
+
+            if DIAGNOSTICO_FEATURES:
+                try:
+                    diag_por_fold.append(
+                        diagnosticar_fold(modelos, X_val, y_val, cols_feat, fold["fold"]))
+                except Exception as _e_diag:
+                    logger.warning(f"    [diag] Fold {fold['fold']} falló: {_e_diag}")
 
         preds_test = predecir_fold(modelos, X_test)
         preds_val  = predecir_fold(modelos, X_val)
@@ -1989,6 +2248,9 @@ def evaluar_banco(banco: str):
     graficar_cobertura_por_h(df_por_h_v, tag, "val")
     graficar_hiperparametros_wfcv(df_test_m, tag)
     graficar_importancia_por_fold(importancias_folds, cols_feat, tag)
+
+    if DIAGNOSTICO_FEATURES and diag_por_fold:
+        consolidar_diagnostico(diag_por_fold, cols_feat, tag)
 
     if GUARDAR_MODELO_FINAL and modelos_ultimo is not None:
         ultimo = folds[-1]
