@@ -34,6 +34,12 @@ NOVEDADES RESPECTO A v2
    ──────────────────────
    Idéntica a v2: VAL solo para Optuna, TEST solo para métricas OOS.
 
+4. Diagnóstico de features sobre VAL (NUEVO — no depura, solo reporta)
+   ──────────────────────────────────────────────────────────────────
+   Por cada fold mide gain(train) + block-permutation(val) + SHAP(val),
+   promediado sobre los 5 cuantiles, y consolida la estabilidad a través
+   de los folds. NO elimina features ni cambia el entrenamiento.
+
 ═══════════════════════════════════════════════════════════════════════════════
 Anti-leakage — idéntico a v1 y v2
 ═══════════════════════════════════════════════════════════════════════════════
@@ -68,6 +74,7 @@ except ImportError:
     lgb = None
     _LGBM_OK = False
 
+# <<< DIAG INTEGRACION (1/5): SHAP opcional para el diagnóstico de features
 try:
     import shap
     _SHAP_OK = True
@@ -92,12 +99,12 @@ logger = logging.getLogger(__name__)
 
 BASE_SISTEMA = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente")
 RUTA_MATRIZ  = BASE_SISTEMA / "1. Data" / "Clean" / "matriz_features.parquet"
-DIR_OUTPUT   = BASE_SISTEMA / "2. Output" / "step005_wfcv_v3"
+DIR_OUTPUT   = BASE_SISTEMA / "2. Output" / "step005_wfcv_v3_temporal"
 
 # ── Tipo de ventana ───────────────────────────────────────────────────────────
 # True  → EXPANDING: train_start fijo, train_end crece cada fold
 # False → ROLLING  : ventana fija que desliza (idéntico a v2)
-EXPANDING = True
+EXPANDING = False
 
 # ── Tamaños de ventana ────────────────────────────────────────────────────────
 # EXPANDING=True : VENTANA_TRAIN_AÑOS es el mínimo inicial; crece PASO_AÑOS/fold
@@ -106,51 +113,13 @@ VENTANA_TRAIN_AÑOS  = 5      # años de TRAIN iniciales / fijos
 VENTANA_VAL_AÑOS    = 0.5    # años de VAL (solo Optuna) — 6 meses, igual que step004
 VENTANA_TEST_AÑOS   = 1      # años de TEST (solo métricas OOS)
 PASO_AÑOS           = 1      # desplazamiento / crecimiento entre folds
-
-# ── Anti-leakage: purga + burn-in ────────────────────────────────────────────
-# H_MAX_DIAS_HAB   : horizonte máximo de predicción (h_max en step001)
-# PURGE_DIAS_HAB   : días hábiles excluidos entre TRAIN-end y VAL-start.
-#                    Cubre: (a) solapamiento de etiquetas Y (h_max dh) y
-#                           (b) feature lookback (MA22 = 22 dh) — 75 ≥ 22 → redundante.
-# PURGE_VAL_TEST   : análogo entre VAL-end y TEST-start (labels Optuna no cruzan TEST)
-# BURN_IN_DIAS_HAB : excluye los primeros días de TRAIN donde MA22 aún no maduró
-H_MAX_DIAS_HAB   = 75   # igual que h_max en step001
-PURGE_DIAS_HAB   = H_MAX_DIAS_HAB   # purga TRAIN → VAL
-PURGE_VAL_TEST   = H_MAX_DIAS_HAB   # purga VAL   → TEST
-BURN_IN_DIAS_HAB = 22               # warm-up MA22 al inicio de TRAIN
-
-# ── Diagnóstico de features (PARTE 7-bis) ────────────────────────────────────
-# True  → mide gain(train) + block-perm(val) + SHAP(val) por fold y consolida
-# False → sin diagnóstico extra (comportamiento original)
-DIAGNOSTICO_FEATURES  = True
-DIAG_BLOCK_SIZE       = 20    # tamaño de bloque para block-permutation (preserva autocorr.)
-DIAG_N_REPEATS        = 3     # repeticiones de la permutación
-DIAG_PERM_MAX_SAMPLES = None  # submuestreo contiguo de VAL (None = todo)
-DIAG_SHAP_MAX_SAMPLES = 800   # muestras para SHAP por cuantil
+EMBARGO_DIAS_HAB    = 1 if EXPANDING else 90  # expanding: 1dh mínimo para evitar overlap train_end en VAL; rolling: 90dh anti-leakage
 
 # ── Modelo ────────────────────────────────────────────────────────────────────
 QUANTILES        = [0.01, 0.05, 0.50, 0.95, 0.99]
+N_TRIALS_OPTUNA  = 60
 S_MIN_FACTOR     = 0.01
 S_MAX_FACTOR     = 1.0
-
-# ── Trials Optuna ─────────────────────────────────────────────────────────────
-# True  → número de trials varía por cuantil (TRIALS_POR_TAU)
-# False → número fijo para todos los cuantiles (TRIALS_FLAT)
-ADAPTIVE_TRIALS  = True
-
-TRIALS_FLAT      = 60        # usado cuando ADAPTIVE_TRIALS = False
-
-TRIALS_POR_TAU   = {         # usado cuando ADAPTIVE_TRIALS = True
-    0.1: 110,
-    0.2:  95,
-    0.3:  90,
-    0.4:  90,
-    0.5:  90,
-    0.6:  90,
-    0.7:  90,
-    0.8:  95,
-    0.9: 110,
-}
 
 # ── Opciones de salida ────────────────────────────────────────────────────────
 BANCOS_A_EVALUAR          = ["SISTEMA"]
@@ -163,6 +132,15 @@ GUARDAR_MODELOS_TODOS_FOLDS = True
 # False → entrenamiento completo (comportamiento normal)
 SOLO_REGENERAR_PLOTS = False
 COLS_EXCLUIR              = {"fecha_t", "banco", "target"}
+
+# <<< DIAG INTEGRACION (config): activa/desactiva el diagnóstico de features
+#   True  → corre gain(train)+perm(val)+shap(val) por fold y consolida
+#   False → comportamiento original (sin diagnóstico extra)
+DIAGNOSTICO_FEATURES      = True
+DIAG_BLOCK_SIZE           = 20     # bloque para block-permutation (preserva autocorr.)
+DIAG_N_REPEATS            = 3      # repeticiones de la permutación
+DIAG_PERM_MAX_SAMPLES     = None   # submuestreo contiguo de VAL para acelerar (None=todo)
+DIAG_SHAP_MAX_SAMPLES     = 800    # muestras para SHAP por cuantil
 
 # ── Límite de folds ───────────────────────────────────────────────────────────
 # None → usa todos los folds generados
@@ -201,20 +179,7 @@ _s4_carpeta, _s4_subcarpeta, _s4_prefijo = _STEP004_SUFIJO.get(
 DIR_MODELOS_STEP004 = BASE_SISTEMA / "2. Output" / _s4_carpeta / _s4_subcarpeta
 
 # ── Folds manuales — comparación directa con step004 ─────────────────────────
-# Lista de folds con fechas exactas, añadidos a (o reemplazando) los folds auto.
-# Permite replicar el split de step004 sin embargo entre TRAIN y VAL.
-# Descomentar el ejemplo para activar el fold equivalente a step004:
 FOLDS_MANUALES: list[dict] = []
-# FOLDS_MANUALES = [
-#     {
-#         "train_start": "2015-01-02",   # inicio real de los datos
-#         "train_end"  : "2022-06-30",   # mismo corte que step004 (CORTE_VAL − 1d)
-#         "val_start"  : "2022-07-01",   # sin embargo, igual que step004
-#         "val_end"    : "2023-01-02",   # CORTE_TEST − 1d
-#         "test_start" : "2023-01-03",   # mismo CORTE_TEST que step004
-#         "test_end"   : "2024-06-30",   # hasta donde haya datos
-#     }
-# ]
 
 # True  → corre SOLO los folds manuales (omite los generados automáticamente)
 # False → añade los folds manuales al final de los generados
@@ -232,13 +197,6 @@ DIR_FANCHARTS_MANUALES = DIR_MODO / "fancharts_manuales"   # plots de FOLDS_MANU
 for _d in (DIR_OUTPUT, DIR_MODO, DIR_MODELOS, DIR_PLOTS,
            DIR_FANCHARTS, DIR_FANCHARTS_MANUALES):
     _d.mkdir(parents=True, exist_ok=True)
-
-
-def get_n_trials(tau: float) -> int:
-    """Devuelve el número de trials Optuna para el cuantil dado."""
-    if ADAPTIVE_TRIALS:
-        return TRIALS_POR_TAU.get(round(tau, 1), 90)
-    return TRIALS_FLAT
 
 
 ###############################################################################
@@ -277,14 +235,9 @@ def crps_approx(y_true, preds):
 # PARTE 2 — GARCH por fold
 ###############################################################################
 
-# Número de procesos paralelos (uno por cuantil) y threads XGBoost por proceso.
-# Con ProcessPoolExecutor cada proceso tiene su propio GIL → paralelismo real.
-# Reparto óptimo: 5 procesos × (cpu_count // 5) threads = ~cpu_count cores activos.
 _N_QUANTILES_PARALLEL = len([0.01, 0.05, 0.50, 0.95, 0.99])  # = 5
 _XGB_NTHREAD = max(2, (os.cpu_count() or 10) // _N_QUANTILES_PARALLEL)
 
-# Cache de parámetros GARCH por fecha de corte de TRAIN — evita re-estimación en el
-# mismo fold y para el guardado de metadata (antes se estimaba 2-3 veces por fold).
 _garch_params_cache: dict[str, dict] = {}
 
 def _ajustar_garch_params(x_train):
@@ -338,79 +291,6 @@ def _garch_vol_fold(serie, train_end):
     return pd.Series(np.sqrt(np.maximum(s2, 0)) * escala, index=serie_full.index)
 
 
-def reemplazar_ffd_fold(df_fold, train_end):
-    """
-    Re-calibra FFD para cada columna _frac usando solo datos hasta train_end.
-    Preserva la misma d_opt que la calibrada en build_feature_matrix pero
-    garantiza que no se filtra información posterior a train_end.
-    """
-    frac_cols = [c for c in df_fold.columns if c.endswith("_frac")]
-    if not frac_cols:
-        return df_fold
-    df_fold = df_fold.copy()
-
-    try:
-        from statsmodels.tsa.stattools import adfuller
-        _statsmodels_ok = True
-    except ImportError:
-        _statsmodels_ok = False
-
-    def _ffd_weights_local(d, thresh=1e-5):
-        w, k = [1.0], 1
-        while True:
-            w_k = -w[-1] * (d - k + 1) / k
-            if abs(w_k) < thresh:
-                break
-            w.append(w_k)
-            k += 1
-        return np.array(w[::-1])
-
-    def _fracdiff_local(series, d, thresh=1e-5):
-        w = _ffd_weights_local(d, thresh)
-        width = len(w)
-        vals = series.values.astype(float)
-        out  = np.full(len(vals), np.nan)
-        for i in range(width - 1, len(vals)):
-            chunk = vals[i - width + 1: i + 1]
-            if not np.any(np.isnan(chunk)):
-                out[i] = float(np.dot(w, chunk))
-        return pd.Series(out, index=series.index)
-
-    def _find_d_local(series, n_steps=20, target_pval=0.05):
-        if not _statsmodels_ok or len(series.dropna()) < 30:
-            return 0.4
-        for d in np.linspace(0.05, 1.0, n_steps):
-            fd = _fracdiff_local(series.dropna(), round(float(d), 4))
-            fd_clean = fd.dropna()
-            if len(fd_clean) < 20:
-                continue
-            try:
-                pval = adfuller(fd_clean, maxlag=1, regression="c", autolag=None)[1]
-                if pval <= target_pval:
-                    return round(float(d), 4)
-            except Exception:
-                continue
-        return 1.0
-
-    idx_col = "fecha_t"
-    raw = (df_fold[[idx_col] + [c.replace("_frac", "") for c in frac_cols
-                                if c.replace("_frac", "") in df_fold.columns]]
-           .drop_duplicates(idx_col).set_index(idx_col).sort_index())
-
-    for col_frac in frac_cols:
-        col_raw = col_frac.replace("_frac", "")
-        if col_raw not in raw.columns:
-            continue
-        serie_train = raw[col_raw][raw.index <= train_end].dropna()
-        if len(serie_train) < 60:
-            continue
-        d_opt = _find_d_local(serie_train)
-        frac_full = _fracdiff_local(raw[col_raw], d_opt)
-        df_fold[col_frac] = df_fold[idx_col].map(frac_full)
-
-    return df_fold
-
-
 def reemplazar_garch_fold(df_fold, train_end):
     df_fold = df_fold.copy()
     idx_cols = ["fecha_t", "R_t0", "D_t0", "TC_PEN_USD", "EMBI_PERU"]
@@ -432,10 +312,6 @@ def reemplazar_garch_fold(df_fold, train_end):
 
 
 def _extraer_garch_params_fold(df, train_end):
-    """
-    Estima parámetros GARCH(1,1) usando solo datos de TRAIN (hasta train_end).
-    Resultado cacheado por fecha de corte para no re-estimar en el mismo fold.
-    """
     cache_key = str(train_end.date()) if hasattr(train_end, "date") else str(train_end)
     if cache_key in _garch_params_cache:
         return _garch_params_cache[cache_key]
@@ -502,25 +378,13 @@ def generar_folds(
     ventana_val_años,
     ventana_test_años,
     paso_años,
-    purge_dias_hab,
-    purge_val_test,
+    embargo_dias_hab,
     expanding,
 ):
-    """
-    EXPANDING=True  → train_start fijo en f_min; train_end crece paso_años/fold.
-    EXPANDING=False → ventana rodante fija.
-
-    Estructura por fold (López de Prado §12):
-      TRAIN → [purge_dias_hab] → VAL (Optuna) → [purge_val_test] → TEST (métricas OOS)
-
-    purge_dias_hab cubre tanto solapamiento de etiquetas Y (h_max dh) como
-    el warm-up de features de lookback (MA22 ≤ 22 dh ≤ h_max).
-
-    Genera folds mientras test_end ≤ última fecha disponible.
-    """
     folds   = []
     f_min   = fechas_disponibles.min()
     f_max   = fechas_disponibles.max()
+    paso    = pd.DateOffset(months=int(round(paso_años * 12)))
     fold_idx = 0
 
     while True:
@@ -534,61 +398,43 @@ def generar_folds(
             train_end   = train_start + pd.DateOffset(
                 months=int(round(ventana_train_años * 12)))
 
-        val_start  = train_end  + pd.offsets.BusinessDay(purge_dias_hab)
-        val_end    = val_start  + pd.DateOffset(months=int(round(ventana_val_años * 12)))
-        test_start = val_end    + pd.offsets.BusinessDay(purge_val_test)
-        test_end   = test_start + pd.DateOffset(months=int(round(ventana_test_años * 12)))
+        val_start  = train_end   + pd.offsets.BusinessDay(embargo_dias_hab)
+        val_end    = val_start   + pd.DateOffset(months=int(round(ventana_val_años * 12)))
+        test_start = val_end
+        test_end   = test_start  + pd.DateOffset(months=int(round(ventana_test_años * 12)))
 
         if test_end > f_max or train_end >= f_max or val_start >= f_max:
             break
 
-        burn_cutoff  = train_start + pd.offsets.BusinessDay(BURN_IN_DIAS_HAB)
-        n_train_all  = int(((fechas_disponibles >= train_start) &
-                            (fechas_disponibles <= train_end)).sum())
-        n_train_eff  = int(((fechas_disponibles >= burn_cutoff) &
-                            (fechas_disponibles <= train_end)).sum())
-        n_val        = int(((fechas_disponibles >= val_start) &
-                            (fechas_disponibles <  test_start)).sum())
-        n_test       = int(((fechas_disponibles >= test_start) &
-                            (fechas_disponibles <= test_end)).sum())
+        n_train = ((fechas_disponibles >= train_start) &
+                   (fechas_disponibles <= train_end)).sum()
+        n_val   = ((fechas_disponibles >= val_start) &
+                   (fechas_disponibles <  test_start)).sum()
+        n_test  = ((fechas_disponibles >= test_start) &
+                   (fechas_disponibles <= test_end)).sum()
 
-        if n_train_eff < 60 or n_val < 10 or n_test < 10:
+        if n_train < 60 or n_val < 10 or n_test < 10:
             fold_idx += 1
             continue
 
         folds.append({
-            "fold"              : fold_idx + 1,
-            "train_start"       : train_start,
-            "train_end"         : train_end,
-            "val_start"         : val_start,
-            "val_end"           : val_end,
-            "test_start"        : test_start,
-            "test_end"          : test_end,
-            "burn_cutoff"       : burn_cutoff,
-            "n_train_fechas"    : n_train_all,
-            "n_train_efectivo"  : n_train_eff,
-            "n_val_fechas"      : n_val,
-            "n_test_fechas"     : n_test,
+            "fold"           : fold_idx + 1,
+            "train_start"    : train_start,
+            "train_end"      : train_end,
+            "val_start"      : val_start,
+            "val_end"        : val_end,
+            "test_start"     : test_start,
+            "test_end"       : test_end,
+            "n_train_fechas" : int(n_train),
+            "n_val_fechas"   : int(n_val),
+            "n_test_fechas"  : int(n_test),
         })
         fold_idx += 1
 
     return folds
 
 
-def resolver_folds_manuales(
-    folds_cfg: list[dict],
-    fechas_disponibles,
-    n_folds_previos: int,
-) -> list[dict]:
-    """
-    Convierte la lista FOLDS_MANUALES en dicts compatibles con el pipeline.
-
-    Cada entrada de folds_cfg debe tener:
-      train_start, train_end, val_start, val_end, test_start, test_end  (str o Timestamp)
-
-    Los fold numbers se asignan como n_folds_previos+1, +2, ...
-    El campo "_manual": True permite identificarlos en los logs.
-    """
+def resolver_folds_manuales(folds_cfg, fechas_disponibles, n_folds_previos):
     folds = []
     for i, cfg in enumerate(folds_cfg):
         ts = pd.Timestamp(cfg["train_start"])
@@ -604,12 +450,9 @@ def resolver_folds_manuales(
 
         folds.append({
             "fold"           : n_folds_previos + i + 1,
-            "train_start"    : ts,
-            "train_end"      : te,
-            "val_start"      : vs,
-            "val_end"        : ve,
-            "test_start"     : xs,
-            "test_end"       : xe,
+            "train_start"    : ts, "train_end": te,
+            "val_start"      : vs, "val_end"  : ve,
+            "test_start"     : xs, "test_end" : xe,
             "n_train_fechas" : n_train,
             "n_val_fechas"   : n_val,
             "n_test_fechas"  : n_test,
@@ -710,7 +553,6 @@ def entrenar_quantiles(X_tr, y_tr, best_params, quantiles, std_y):
 def predecir_y_corregir(modelos, X):
     dmat      = xgb.DMatrix(X)
     preds_raw = {tau: m.predict(dmat) for tau, m in modelos.items()}
-    # "mean" key is not a quantile — exclude from crossing correction
     mean_pred = preds_raw.pop("mean", None)
     taus      = sorted(preds_raw)
     matrix    = np.sort(np.column_stack([preds_raw[t] for t in taus]), axis=1)
@@ -795,7 +637,7 @@ def _objetivo_optuna_xgb_qt_tau(trial, tau, X_tr, y_tr, X_va, y_va, std_y):
         "reg_alpha"       : 0.0 if FIX_REG_ALPHA else trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True),
         "reg_lambda"      : trial.suggest_float("reg_lambda", 0.1, 5.0) if FIX_REG_LAMBDA else trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
         "tree_method"     : "hist",
-        "nthread"         : _XGB_NTHREAD,   # limita threads por trial en paralelo
+        "nthread"         : _XGB_NTHREAD,
         "seed"            : 42,
     }
     n_est  = trial.suggest_int("n_estimators", 100, 1000)
@@ -814,10 +656,6 @@ def _objetivo_optuna_xgb_qt_tau(trial, tau, X_tr, y_tr, X_va, y_va, std_y):
 
 
 def _worker_optuna_tau(args):
-    """
-    Función de módulo (picklable) para ProcessPoolExecutor.
-    Cada proceso hijo corre Optuna + entrenamiento final para un cuantil.
-    """
     tau, X_tr, y_tr, X_va, y_va, std_y, n_trials, fold_num = args
     study = optuna.create_study(
         direction="minimize",
@@ -842,17 +680,10 @@ def _worker_optuna_tau(args):
 
 
 def _entrenar_fold_xgb_qt(X_tr, y_tr, X_va, y_va, std_y, n_trials, fold_num):
-    """
-    Entrena un modelo por cuantil con Optuna independiente para cada uno.
-    Los estudios corren en paralelo con ProcessPoolExecutor (un proceso por
-    cuantil, GIL independiente) → paralelismo real en múltiples núcleos.
-    Cada XGBoost usa _XGB_NTHREAD threads → sin over-subscription de CPU.
-    """
     worker_args = [
-        (tau, X_tr, y_tr, X_va, y_va, std_y, get_n_trials(tau), fold_num)
+        (tau, X_tr, y_tr, X_va, y_va, std_y, n_trials, fold_num)
         for tau in QUANTILES
     ]
-
     modelos     = {}
     best_by_tau = {}
     with ProcessPoolExecutor(max_workers=_N_QUANTILES_PARALLEL) as ex:
@@ -865,7 +696,6 @@ def _entrenar_fold_xgb_qt(X_tr, y_tr, X_va, y_va, std_y, n_trials, fold_num):
                         f"pinball/VAL={best_val:.4f}  s={bp['s']:.3f}  "
                         f"n_est={bp['n_estimators']}")
 
-    # Mean model — reg:squarederror with best Q50 hyperparameters as base
     bp_mean = best_by_tau.get(0.50, list(best_by_tau.values())[0])
     params_mean = {k: v for k, v in bp_mean.items() if k not in ("s", "n_estimators")}
     params_mean.update({"objective": "reg:squarederror",
@@ -878,7 +708,6 @@ def _entrenar_fold_xgb_qt(X_tr, y_tr, X_va, y_va, std_y, n_trials, fold_num):
                                 verbose_eval=False)
     logger.info(f"    [xgb_qt] mean fold {fold_num}: reg:squarederror "
                 f"(n_est={bp_mean['n_estimators']})")
-
     return modelos, best_by_tau.get(0.50, list(best_by_tau.values())[0])
 
 
@@ -915,14 +744,6 @@ def get_feature_cols(df):
 
 
 def preparar_fold_data(df, fold, cols_feat):
-    """
-    Retorna:
-      X_train, y_train, X_val, y_val, X_test, y_test,
-      h_train, h_val, h_test, fechas_t_test
-
-    fechas_t_test: array de pd.Timestamp con la fecha de origen de cada fila
-    de TEST — necesario para construir los fan charts por snapshot.
-    """
     train_start = fold["train_start"]
     train_end   = fold["train_end"]
     val_start   = fold["val_start"]
@@ -940,17 +761,7 @@ def preparar_fold_data(df, fold, cols_feat):
     if garch_cols:
         df_fold_all = reemplazar_garch_fold(df_fold_all, train_end)
 
-    frac_cols = [c for c in df_fold_all.columns if c.endswith("_frac")]
-    if frac_cols:
-        df_fold_all = reemplazar_ffd_fold(df_fold_all, train_end)
-
     df_train = df_fold_all[df_fold_all["fecha_t"] <= train_end]
-
-    # Burn-in: excluir primeros BURN_IN_DIAS_HAB donde MA22 aún no maduró
-    if BURN_IN_DIAS_HAB > 0:
-        burn_cutoff = fold.get("burn_cutoff",
-                               train_start + pd.offsets.BusinessDay(BURN_IN_DIAS_HAB))
-        df_train = df_train[df_train["fecha_t"] >= burn_cutoff]
     df_val   = df_fold_all[(df_fold_all["fecha_t"] >= val_start) &
                            (df_fold_all["fecha_t"] <  test_start)]
     df_test  = df_fold_all[df_fold_all["fecha_t"] >= test_start]
@@ -1046,7 +857,7 @@ def graficar_metricas_wfcv(df_test_m, banco):
         f"Walk-forward CV v3 [{modo}] — {banco}  [métricas TEST out-of-sample]\n"
         f"TRAIN {VENTANA_TRAIN_AÑOS}yr{'(min)' if EXPANDING else ''} / "
         f"VAL {VENTANA_VAL_AÑOS}yr (Optuna) / TEST {VENTANA_TEST_AÑOS}yr / "
-        f"paso {PASO_AÑOS}yr / purge {PURGE_DIAS_HAB}dh / burn-in {BURN_IN_DIAS_HAB}dh",
+        f"paso {PASO_AÑOS}yr / embargo {EMBARGO_DIAS_HAB}dh",
         fontweight="bold", fontsize=10,
     )
     metricas_config = [
@@ -1123,27 +934,14 @@ def graficar_comparacion_val_test(df_val_m, df_test_m, banco):
 
 
 def graficar_fanchart_acum_test_fold(
-    preds_test: dict,
-    y_test: np.ndarray,
-    h_test: np.ndarray,
-    fechas_t_test,
-    fold: dict,
-    banco: str,
-    dir_out: Path | None = None,
+    preds_test, y_test, h_test, fechas_t_test, fold, banco, dir_out=None,
 ):
-    """
-    Fan chart de flujo neto ACUMULADO (cumsum sobre h) para un fold TEST.
-    Mismas fechas de origen que graficar_fanchart_test_fold; cada cuantil
-    se acumula con np.cumsum → banda de incertidumbre del total acumulado.
-    """
     fechas_unicas = pd.DatetimeIndex(sorted(set(fechas_t_test)))
     if len(fechas_unicas) == 0:
         return
-
     test_start = fold["test_start"]
     n_snap     = FANCHART_N_SNAPSHOTS
     meses_paso = 12.0 / n_snap
-
     origenes = []
     for i in range(n_snap):
         target  = test_start + pd.DateOffset(months=int(round(i * meses_paso)))
@@ -1151,43 +949,29 @@ def graficar_fanchart_acum_test_fold(
         nearest = fechas_unicas[np.argmin(diffs)]
         if nearest not in origenes:
             origenes.append(nearest)
-
     if not origenes:
         return
-
     ncols = 2
     nrows = int(np.ceil(len(origenes) / ncols))
     modo  = "EXPANDING" if EXPANDING else "ROLLING"
-
     fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 7, nrows * 5), sharey=False)
     axes_flat = axes.flatten() if len(origenes) > 1 else [axes]
-
     fig.suptitle(
         f"Fan chart ACUMULADO TEST OOS — Fold {fold['fold']} — {banco} [{modo}]\n"
         f"TEST: {fold['test_start'].date()} → {fold['test_end'].date()}  |  "
         f"TRAIN hasta: {fold['train_end'].date()}",
         fontweight="bold", fontsize=11,
     )
-
     for ax, t0 in zip(axes_flat, origenes):
         mask = np.array([pd.Timestamp(f) == t0 for f in fechas_t_test])
         if mask.sum() == 0:
-            ax.set_visible(False)
-            continue
-
-        h_s = h_test[mask]
-        y_s = y_test[mask]
+            ax.set_visible(False); continue
+        h_s = h_test[mask]; y_s = y_test[mask]
         p_s = {tau: arr[mask] for tau, arr in preds_test.items()}
-
-        order = np.argsort(h_s)
-        h_s   = h_s[order]
-        y_s   = y_s[order]
-        p_s   = {tau: arr[order] for tau, arr in p_s.items()}
-
-        # Acumular con cumsum
+        order = np.argsort(h_s); h_s = h_s[order]; y_s = y_s[order]
+        p_s = {tau: arr[order] for tau, arr in p_s.items()}
         y_cum = np.cumsum(y_s)
         p_cum = {tau: np.cumsum(arr) for tau, arr in p_s.items()}
-
         if {0.01, 0.99}.issubset(p_cum):
             ax.fill_between(h_s, p_cum[0.01] / 1e6, p_cum[0.99] / 1e6,
                             alpha=0.12, color="steelblue", label="Q01-Q99 (CV)")
@@ -1202,35 +986,28 @@ def graficar_fanchart_acum_test_fold(
         if "mean" in p_cum:
             ax.plot(h_s, p_cum["mean"] / 1e6, color="navy", lw=2.2,
                     zorder=4, label="Media (CV)")
-
         q_lo_cum   = p_cum.get(0.05, np.full_like(y_cum, -np.inf))
         q_hi_cum   = p_cum.get(0.95, np.full_like(y_cum,  np.inf))
         dentro_cum = (y_cum >= q_lo_cum) & (y_cum <= q_hi_cum)
-
         ax.plot(h_s, y_cum / 1e6, color="dimgray", lw=1.0, ls="--",
                 zorder=4, alpha=0.75, label="Realizado acum.")
         ax.scatter(h_s[dentro_cum],  y_cum[dentro_cum]  / 1e6, color="seagreen", s=20,
                    zorder=5, label="Dentro Q05-Q95")
         ax.scatter(h_s[~dentro_cum], y_cum[~dentro_cum] / 1e6, color="crimson",  s=20,
                    zorder=5, label="Fuera Q05-Q95")
-
         cov_snap = float(dentro_cum.mean())
-        ax.set_title(
-            f"Origen: {t0.strftime('%Y-%m-%d')}\nCoverage 90% acum.: {cov_snap:.1%}",
-            fontsize=9, fontweight="bold",
-        )
+        ax.set_title(f"Origen: {t0.strftime('%Y-%m-%d')}\nCoverage 90% acum.: {cov_snap:.1%}",
+                     fontsize=9, fontweight="bold")
         ax.set_xlabel("Horizonte h (días hábiles)", fontsize=8)
         ax.set_ylabel("Flujo acumulado D-R (MM USD)", fontsize=8)
         ax.axhline(0, color="black", lw=0.5, alpha=0.3, ls="--")
         ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:,.0f}"))
         ax.grid(True, alpha=0.25)
-
     handles, labels = axes_flat[0].get_legend_handles_labels()
     if handles:
         axes_flat[0].legend(handles, labels, fontsize=7, loc="best")
     for ax in axes_flat[len(origenes):]:
         ax.set_visible(False)
-
     plt.tight_layout()
     _dir = dir_out if dir_out is not None else DIR_FANCHARTS
     nombre = _dir / f"fanchart_acum_test_fold{fold['fold']:02d}_{banco}.png"
@@ -1333,10 +1110,6 @@ def graficar_hiperparametros_wfcv(df_test_m, banco):
 
 
 def _extraer_importancias(modelos, cols_feat):
-    """
-    Devuelve {feature: gain_promedio_entre_cuantiles} para XGBoost o LightGBM.
-    Los features sin importancia en algún cuantil reciben gain=0.
-    """
     acum = {f: 0.0 for f in cols_feat}
     n    = 0
     for tau, model in modelos.items():
@@ -1345,86 +1118,45 @@ def _extraer_importancias(modelos, cols_feat):
             gains  = model.feature_importance(importance_type="gain")
             imp    = dict(zip(names, gains.astype(float)))
         else:
-            # xgb.Booster: solo devuelve features con importancia > 0
             imp = model.get_score(importance_type="gain")
-
         for feat in cols_feat:
             acum[feat] = acum[feat] + float(imp.get(feat, 0.0))
         n += 1
-
     if n > 0:
         acum = {f: v / n for f, v in acum.items()}
     return acum
 
 
-def graficar_importancia_por_fold(
-    importancias_folds: list,
-    cols_feat: list,
-    banco: str,
-):
-    """
-    Genera dos gráficos a partir de la lista de importancias por fold:
-
-    1. Heatmap (Features × Folds) — ganancia normalizada por fold.
-       Verde intenso = feature dominante en ese fold; blanco/amarillo = marginal.
-       Útil para detectar features consistentes vs. régimen-dependientes.
-
-    2. Rank-stability (Top-10) — muestra cómo cambia el ranking de las features
-       más importantes entre folds.  Línea plana = feature robusto;
-       línea con saltos grandes = feature régimen-dependiente.
-
-    También guarda un CSV con las ganancias brutas por fold.
-    """
+def graficar_importancia_por_fold(importancias_folds, cols_feat, banco):
     if not importancias_folds:
         return
-
-    # ── Pivot: filas = feature, columnas = fold ───────────────────────────────
     registros = []
     for item in importancias_folds:
         fold_id = item["fold"]
         imp     = item["importancias"]
         total   = sum(imp.values()) or 1.0
         for feat, gain in imp.items():
-            registros.append({
-                "fold"     : fold_id,
-                "feature"  : feat,
-                "gain_norm": gain / total,
-                "gain_raw" : gain,
-            })
-
+            registros.append({"fold": fold_id, "feature": feat,
+                              "gain_norm": gain / total, "gain_raw": gain})
     df_imp = pd.DataFrame(registros)
     if df_imp.empty:
         return
-
-    pivot_norm = df_imp.pivot_table(
-        index="feature", columns="fold", values="gain_norm", aggfunc="mean"
-    ).fillna(0.0)
-    pivot_raw  = df_imp.pivot_table(
-        index="feature", columns="fold", values="gain_raw",  aggfunc="mean"
-    ).fillna(0.0)
-
-    # Ordenar por importancia media descendente
+    pivot_norm = df_imp.pivot_table(index="feature", columns="fold",
+                                    values="gain_norm", aggfunc="mean").fillna(0.0)
+    pivot_raw  = df_imp.pivot_table(index="feature", columns="fold",
+                                    values="gain_raw",  aggfunc="mean").fillna(0.0)
     pivot_norm["_mean"] = pivot_norm.mean(axis=1)
     pivot_norm = pivot_norm.sort_values("_mean", ascending=False).drop(columns=["_mean"])
-    pivot_raw  = pivot_raw.loc[pivot_norm.index]  # mismo orden
-
+    pivot_raw  = pivot_raw.loc[pivot_norm.index]
     TOP_N  = min(25, len(pivot_norm))
     modo   = "EXPANDING" if EXPANDING else "ROLLING"
     folds  = sorted(pivot_norm.columns.tolist())
-
-    # ── Gráfico 1: Heatmap ────────────────────────────────────────────────────
     top_feats_h = pivot_norm.iloc[:TOP_N]
-    fig_h, ax_h = plt.subplots(
-        figsize=(max(8, len(folds) * 1.2), max(6, TOP_N * 0.45))
-    )
-
-    im = ax_h.imshow(
-        top_feats_h.values, aspect="auto", cmap="YlOrRd",
-        vmin=0.0, vmax=max(top_feats_h.values.max() * 1.05, 1e-9),
-        interpolation="nearest",
-    )
+    fig_h, ax_h = plt.subplots(figsize=(max(8, len(folds) * 1.2), max(6, TOP_N * 0.45)))
+    im = ax_h.imshow(top_feats_h.values, aspect="auto", cmap="YlOrRd",
+                     vmin=0.0, vmax=max(top_feats_h.values.max() * 1.05, 1e-9),
+                     interpolation="nearest")
     plt.colorbar(im, ax=ax_h, label="Ganancia normalizada por fold")
-
     ax_h.set_yticks(range(TOP_N))
     ax_h.set_yticklabels(top_feats_h.index.tolist(), fontsize=8)
     ax_h.set_xticks(range(len(folds)))
@@ -1435,48 +1167,33 @@ def graficar_importancia_por_fold(
         f"Importancia de features por fold — {banco} [{modo}]\n"
         f"Top {TOP_N} features · ganancia XGBoost normalizada por fold "
         f"(TRAIN {VENTANA_TRAIN_AÑOS}yr / VAL {VENTANA_VAL_AÑOS}yr / TEST {VENTANA_TEST_AÑOS}yr)",
-        fontweight="bold", fontsize=11,
-    )
-
-    # Anotar valores en celdas cuando la tabla es pequeña
+        fontweight="bold", fontsize=11)
     if TOP_N <= 20 and len(folds) <= 12:
         for i in range(TOP_N):
             for j in range(len(folds)):
                 val = top_feats_h.values[i, j]
-                ax_h.text(
-                    j, i, f"{val:.3f}", ha="center", va="center",
-                    fontsize=6.5,
-                    color="white" if val > top_feats_h.values.max() * 0.6 else "black",
-                )
-
+                ax_h.text(j, i, f"{val:.3f}", ha="center", va="center", fontsize=6.5,
+                          color="white" if val > top_feats_h.values.max() * 0.6 else "black")
     plt.tight_layout()
     nombre_h = DIR_PLOTS / f"wfcv_v3_importancia_heatmap_{banco}.png"
     plt.savefig(nombre_h, dpi=150, bbox_inches="tight")
     plt.close(fig_h)
     logger.info(f"  Heatmap importancia: {nombre_h.name}")
 
-    # ── Gráfico 2: Rank-stability ─────────────────────────────────────────────
     TOP_RANK   = min(10, len(pivot_norm))
     top_feats_r = pivot_norm.iloc[:TOP_RANK].index.tolist()
-
-    # Rango en cada fold (1 = mayor ganancia) sobre TODOS los features
     rank_data = {feat: [] for feat in top_feats_r}
     for fold_id in folds:
         col_vals = pivot_norm[fold_id]
         ranked   = col_vals.rank(ascending=False, method="min")
         for feat in top_feats_r:
             rank_data[feat].append(int(ranked.get(feat, len(pivot_norm) + 1)))
-
     fig_r, ax_r = plt.subplots(figsize=(max(7, len(folds) * 1.2), 5))
     cmap_r = plt.cm.tab10
     for i, feat in enumerate(top_feats_r):
-        ax_r.plot(
-            folds, rank_data[feat], "o-",
-            lw=2, ms=7, color=cmap_r(i / max(TOP_RANK, 1)),
-            label=feat, alpha=0.85,
-        )
-
-    ax_r.invert_yaxis()   # rango 1 arriba
+        ax_r.plot(folds, rank_data[feat], "o-", lw=2, ms=7,
+                  color=cmap_r(i / max(TOP_RANK, 1)), label=feat, alpha=0.85)
+    ax_r.invert_yaxis()
     ax_r.yaxis.set_major_locator(mticker.MaxNLocator(integer=True))
     ax_r.set_xticks(folds)
     ax_r.set_xticklabels([f"Fold {f}" for f in folds], fontsize=9)
@@ -1485,8 +1202,7 @@ def graficar_importancia_por_fold(
     ax_r.set_title(
         f"Estabilidad de ranking — Top {TOP_RANK} features — {banco} [{modo}]\n"
         f"Línea plana = feature robusto · saltos grandes = régimen-dependiente",
-        fontweight="bold", fontsize=10,
-    )
+        fontweight="bold", fontsize=10)
     ax_r.legend(fontsize=8, bbox_to_anchor=(1.01, 1), loc="upper left", framealpha=0.85)
     ax_r.grid(True, alpha=0.25)
     plt.tight_layout()
@@ -1495,7 +1211,6 @@ def graficar_importancia_por_fold(
     plt.close(fig_r)
     logger.info(f"  Ranking importancia: {nombre_r.name}")
 
-    # ── CSV importancias brutas ────────────────────────────────────────────────
     df_csv = pivot_raw.copy().reset_index()
     df_csv.columns.name = None
     ruta_csv = DIR_MODO / f"wfcv_v3_importancias_{banco}.csv"
@@ -1504,36 +1219,15 @@ def graficar_importancia_por_fold(
 
 
 def graficar_fanchart_test_fold(
-    preds_test: dict,
-    y_test: np.ndarray,
-    h_test: np.ndarray,
-    fechas_t_test,
-    fold: dict,
-    banco: str,
-    preds_overlay: dict | None = None,   # step004 predictions para comparación
-    dir_out: Path | None = None,         # carpeta de salida; None → DIR_FANCHARTS
+    preds_test, y_test, h_test, fechas_t_test, fold, banco,
+    preds_overlay=None, dir_out=None,
 ):
-    """
-    Fan chart TEST out-of-sample para un fold.
-
-    Selecciona hasta FANCHART_N_SNAPSHOTS fechas de origen separadas ~3 meses
-    dentro del período TEST. Para cada fecha muestra:
-      · Bandas Q01-Q99 (muy transparente) y Q05-Q95 (media)
-      · Línea Q50 (mediana predicha)
-      · Puntos realizados: verde = dentro de Q05-Q95 / rojo = fuera
-
-    Ayuda a detectar si el modelo sobre/sub-estima en horizontes cortos o largos,
-    y en qué trimestres del período TEST falla la cobertura.
-    """
     fechas_unicas = pd.DatetimeIndex(sorted(set(fechas_t_test)))
     if len(fechas_unicas) == 0:
         return
-
-    # Seleccionar fechas de origen: una cada ~(12/N_SNAPSHOTS) meses del TEST
     test_start = fold["test_start"]
     n_snap     = FANCHART_N_SNAPSHOTS
     meses_paso = 12.0 / n_snap
-
     origenes = []
     for i in range(n_snap):
         target  = test_start + pd.DateOffset(months=int(round(i * meses_paso)))
@@ -1541,48 +1235,32 @@ def graficar_fanchart_test_fold(
         nearest = fechas_unicas[np.argmin(diffs)]
         if nearest not in origenes:
             origenes.append(nearest)
-
     if not origenes:
         return
-
-    # Layout 2×2
     ncols = 2
     nrows = int(np.ceil(len(origenes) / ncols))
     modo  = "EXPANDING" if EXPANDING else "ROLLING"
-
     fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 7, nrows * 5), sharey=False)
     axes_flat = axes.flatten() if len(origenes) > 1 else [axes]
-
-    s4_tag = "  |  🟠 naranja = Step004 (GARCH global, lookahead)" if preds_overlay is not None else ""
+    s4_tag = "  |  naranja = Step004 (GARCH global, lookahead)" if preds_overlay is not None else ""
     fig.suptitle(
         f"Fan chart TEST OOS — Fold {fold['fold']} — {banco} [{modo}]\n"
         f"TEST: {fold['test_start'].date()} → {fold['test_end'].date()}  |  "
         f"TRAIN hasta: {fold['train_end'].date()}{s4_tag}",
         fontweight="bold", fontsize=11,
     )
-
     for ax, t0 in zip(axes_flat, origenes):
         mask = np.array([pd.Timestamp(f) == t0 for f in fechas_t_test])
         if mask.sum() == 0:
-            ax.set_visible(False)
-            continue
-
-        h_s = h_test[mask]
-        y_s = y_test[mask]
+            ax.set_visible(False); continue
+        h_s = h_test[mask]; y_s = y_test[mask]
         p_s = {tau: arr[mask] for tau, arr in preds_test.items()}
-
-        order = np.argsort(h_s)
-        h_s   = h_s[order]
-        y_s   = y_s[order]
-        p_s   = {tau: arr[order] for tau, arr in p_s.items()}
-
-        # Predicciones step004 overlay (misma máscara y orden)
+        order = np.argsort(h_s); h_s = h_s[order]; y_s = y_s[order]
+        p_s = {tau: arr[order] for tau, arr in p_s.items()}
         p_s4 = None
         if preds_overlay is not None:
             p_s4 = {tau: arr[mask][order] for tau, arr in preds_overlay.items()
                     if tau != "mean"}
-
-        # Bandas de incertidumbre — step005 (azul)
         if {0.01, 0.99}.issubset(p_s):
             ax.fill_between(h_s, p_s[0.01] / 1e6, p_s[0.99] / 1e6,
                             alpha=0.12, color="steelblue", label="Q01-Q99 (CV)")
@@ -1597,8 +1275,6 @@ def graficar_fanchart_test_fold(
         if "mean" in p_s:
             ax.plot(h_s, p_s["mean"] / 1e6, color="navy", lw=2.2,
                     zorder=4, label="Media (CV)")
-
-        # Overlay step004 — naranja discontinuo
         if p_s4 is not None:
             if {0.05, 0.95}.issubset(p_s4):
                 ax.fill_between(h_s, p_s4[0.05] / 1e6, p_s4[0.95] / 1e6,
@@ -1606,37 +1282,28 @@ def graficar_fanchart_test_fold(
             if 0.50 in p_s4:
                 ax.plot(h_s, p_s4[0.50] / 1e6, color="darkorange", lw=1.6,
                         ls="--", zorder=4, alpha=0.85, label="Q50 Step004")
-
-        # Realizados: línea punteada + scatter coloreado por cobertura
         q_lo   = p_s.get(0.05, np.full_like(y_s, -np.inf))
         q_hi   = p_s.get(0.95, np.full_like(y_s,  np.inf))
         dentro = (y_s >= q_lo) & (y_s <= q_hi)
-
         ax.plot(h_s, y_s / 1e6, color="dimgray", lw=1.0, ls="--",
                 zorder=4, alpha=0.75, label="Realizado")
         ax.scatter(h_s[dentro],  y_s[dentro]  / 1e6, color="seagreen", s=20,
                    zorder=5, label="Dentro Q05-Q95")
         ax.scatter(h_s[~dentro], y_s[~dentro] / 1e6, color="crimson",  s=20,
                    zorder=5, label="Fuera Q05-Q95")
-
         cov_snap = float(dentro.mean())
-        ax.set_title(
-            f"Origen: {t0.strftime('%Y-%m-%d')}\nCoverage 90%: {cov_snap:.1%}",
-            fontsize=9, fontweight="bold",
-        )
+        ax.set_title(f"Origen: {t0.strftime('%Y-%m-%d')}\nCoverage 90%: {cov_snap:.1%}",
+                     fontsize=9, fontweight="bold")
         ax.set_xlabel("Horizonte h (días hábiles)", fontsize=8)
         ax.set_ylabel("Flujo D-R (MM USD)", fontsize=8)
         ax.axhline(0, color="black", lw=0.5, alpha=0.3, ls="--")
         ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:,.0f}"))
         ax.grid(True, alpha=0.25)
-
-    # Leyenda en el primer panel; ocultar paneles sobrantes
     handles, labels = axes_flat[0].get_legend_handles_labels()
     if handles:
         axes_flat[0].legend(handles, labels, fontsize=7, loc="best")
     for ax in axes_flat[len(origenes):]:
         ax.set_visible(False)
-
     plt.tight_layout()
     _dir = dir_out if dir_out is not None else DIR_FANCHARTS
     nombre = _dir / f"fanchart_test_fold{fold['fold']:02d}_{banco}.png"
@@ -1646,8 +1313,18 @@ def graficar_fanchart_test_fold(
 
 
 ###############################################################################
-# PARTE 7-bis — Diagnóstico de features (gain / block-perm / SHAP)
+# PARTE 7-bis — DIAGNÓSTICO DE FEATURES sobre VAL  (NUEVO, no depura)
+# <<< DIAG INTEGRACION (2/5)
 ###############################################################################
+#
+# Mide gain(train) + block-permutation(val) + SHAP(val) por fold, promediando
+# los cuantiles, y consolida la estabilidad a través de los folds. Diagnóstico
+# puro: NO elimina features ni cambia el entrenamiento.
+#
+# Asimetría honesta: gain es IN-SAMPLE (grabado al construir el árbol con TRAIN;
+# XGBoost no recomputa gain limpio sobre VAL). perm y shap son OUT-OF-SAMPLE.
+# Comparar gain(train) vs perm(val) revela features aprovechadas en train que
+# no se sostienen fuera de muestra.
 
 def _diag_predict_un_modelo(model, X):
     if MODELO_CV == "lgbm" and _LGBM_OK:
@@ -1657,14 +1334,14 @@ def _diag_predict_un_modelo(model, X):
 
 def _diag_gain_promedio(modelos, cols_feat):
     """Gain promedio entre cuantiles (TRAIN, in-sample). Excluye 'mean'."""
-    acum = {f: 0.0 for f in cols_feat}
-    n = 0
+    acum = {f: 0.0 for f in cols_feat}; n = 0
     for tau, model in modelos.items():
         if tau == "mean":
             continue
         if MODELO_CV == "lgbm" and _LGBM_OK:
-            imp = dict(zip(model.feature_name(),
-                           model.feature_importance(importance_type="gain").astype(float)))
+            names = model.feature_name()
+            gains = model.feature_importance(importance_type="gain").astype(float)
+            imp = dict(zip(names, gains))
         else:
             imp = model.get_score(importance_type="gain")
         for f in cols_feat:
@@ -1681,8 +1358,7 @@ def _diag_block_perm_un_cuantil(model, X, y, tau, block_size, n_repeats, rng):
     block_starts = np.arange(0, n, block_size)
     imp = {}
     for c in X.columns:
-        col = X[c].values
-        deltas = []
+        col = X[c].values; deltas = []
         for _ in range(n_repeats):
             perm_starts = rng.permutation(block_starts)
             new_col = np.concatenate([col[s:s + block_size] for s in perm_starts])[:n]
@@ -1696,19 +1372,16 @@ def _diag_block_perm_promedio(modelos, X_val, y_val, cols_feat, fold_num):
     X = X_val.reset_index(drop=True)[cols_feat]
     y = np.asarray(y_val)
     if DIAG_PERM_MAX_SAMPLES is not None and len(X) > DIAG_PERM_MAX_SAMPLES:
-        X = X.iloc[:DIAG_PERM_MAX_SAMPLES].copy()
-        y = y[:DIAG_PERM_MAX_SAMPLES]
+        X = X.iloc[:DIAG_PERM_MAX_SAMPLES].copy(); y = y[:DIAG_PERM_MAX_SAMPLES]
     bs  = max(2, min(DIAG_BLOCK_SIZE, len(X) // 3))
     rng = np.random.default_rng(42 + fold_num)
-    acum = pd.Series(0.0, index=cols_feat)
-    n = 0
+    acum = pd.Series(0.0, index=cols_feat); n = 0
     for tau in QUANTILES:
         model = modelos.get(tau)
         if model is None:
             continue
         s = _diag_block_perm_un_cuantil(model, X, y, tau, bs, DIAG_N_REPEATS, rng)
-        acum = acum.add(s.reindex(cols_feat).fillna(0.0), fill_value=0.0)
-        n += 1
+        acum = acum.add(s.reindex(cols_feat).fillna(0.0), fill_value=0.0); n += 1
     if n:
         acum /= n
     return acum
@@ -1720,8 +1393,7 @@ def _diag_shap_promedio(modelos, X_val, cols_feat, fold_num):
     X = X_val.reset_index(drop=True)[cols_feat]
     if len(X) > DIAG_SHAP_MAX_SAMPLES:
         X = X.sample(DIAG_SHAP_MAX_SAMPLES, random_state=42 + fold_num)
-    acum = pd.Series(0.0, index=cols_feat)
-    n = 0
+    acum = pd.Series(0.0, index=cols_feat); n = 0
     for tau in QUANTILES:
         model = modelos.get(tau)
         if model is None:
@@ -1730,8 +1402,7 @@ def _diag_shap_promedio(modelos, X_val, cols_feat, fold_num):
             explainer = shap.TreeExplainer(model)
             sv = explainer.shap_values(X)
             s = pd.Series(np.abs(sv).mean(axis=0), index=cols_feat)
-            acum = acum.add(s.fillna(0.0), fill_value=0.0)
-            n += 1
+            acum = acum.add(s.fillna(0.0), fill_value=0.0); n += 1
         except Exception as e:
             logger.warning(f"      [diag] SHAP τ={tau} falló: {e}")
     if n == 0:
@@ -1741,7 +1412,8 @@ def _diag_shap_promedio(modelos, X_val, cols_feat, fold_num):
 
 def diagnosticar_fold(modelos, X_val, y_val, cols_feat, fold_num):
     """Tres señales (gain train, perm val, shap val) promediadas sobre cuantiles."""
-    logger.info(f"    [diag] Fold {fold_num}: gain(train) + block-perm(val) + shap(val)")
+    logger.info(f"    [diag] Fold {fold_num}: gain(train)+block-perm(val)+shap(val) "
+                f"sobre {len(QUANTILES)} cuantiles")
     gain = _diag_gain_promedio(modelos, cols_feat)
     perm = _diag_block_perm_promedio(modelos, X_val, y_val, cols_feat, fold_num)
     shp  = _diag_shap_promedio(modelos, X_val, cols_feat, fold_num)
@@ -1756,7 +1428,7 @@ def _diag_matriz(diag_por_fold, senal, cols_feat):
 
 
 def consolidar_diagnostico(diag_por_fold, cols_feat, banco, top_n=25):
-    """CSVs + heatmaps + ranking + gain(train) vs perm(val). Solo reporta, no depura."""
+    """CSVs + heatmaps + ranking + gain(train) vs perm(val). Solo reporta."""
     if not diag_por_fold:
         logger.warning("    [diag] Sin folds para consolidar")
         return
@@ -1779,50 +1451,44 @@ def consolidar_diagnostico(diag_por_fold, cols_feat, banco, top_n=25):
         ranks = m.rank(axis=1, ascending=False, method="min")
         for feat in cols_feat:
             estab_rows.append({
-                "senal"    : s,
-                "feature"  : feat,
-                "imp_mean" : float(m[feat].mean(skipna=True)),
+                "senal": s, "feature": feat,
+                "imp_mean": float(m[feat].mean(skipna=True)),
                 "rank_mean": float(ranks[feat].mean(skipna=True)),
-                "rank_std" : float(ranks[feat].std(skipna=True)),
+                "rank_std":  float(ranks[feat].std(skipna=True)),
             })
-    pd.DataFrame(estab_rows).to_csv(
-        DIR_MODO / f"diag_estabilidad_{banco}.csv", index=False)
+    pd.DataFrame(estab_rows).to_csv(DIR_MODO / f"diag_estabilidad_{banco}.csv", index=False)
     logger.info(f"    [diag] CSV estabilidad: diag_estabilidad_{banco}.csv")
 
     perm_m = matrices["perm_val"]
-    orden  = (perm_m.mean().sort_values(ascending=False).index.tolist()
-              if not perm_m.dropna(how="all").empty
-              else matrices["gain_train"].mean().sort_values(ascending=False).index.tolist())
+    if perm_m.dropna(how="all").empty:
+        orden = matrices["gain_train"].mean().sort_values(ascending=False).index.tolist()
+    else:
+        orden = perm_m.mean().sort_values(ascending=False).index.tolist()
     orden_top = orden[:top_n]
-    folds     = sorted(matrices["gain_train"].index.tolist())
+    folds = sorted(matrices["gain_train"].index.tolist())
 
-    # Heatmaps por señal
     for s, m in matrices.items():
         if m.dropna(how="all").empty:
             continue
-        sub      = m[orden_top].T
-        col_max  = sub.max(axis=0).replace(0, np.nan)
+        sub = m[orden_top].T
+        col_max = sub.max(axis=0).replace(0, np.nan)
         sub_norm = (sub / col_max).fillna(0.0)
-        fig, ax  = plt.subplots(figsize=(max(7, len(folds) * 1.1),
-                                         max(6, len(orden_top) * 0.42)))
+        fig, ax = plt.subplots(figsize=(max(7, len(folds) * 1.1),
+                                        max(6, len(orden_top) * 0.42)))
         im = ax.imshow(sub_norm.values, aspect="auto", cmap="YlOrRd",
                        vmin=0, vmax=1, interpolation="nearest")
         plt.colorbar(im, ax=ax, label="Importancia normalizada por fold")
-        ax.set_yticks(range(len(orden_top)))
-        ax.set_yticklabels(orden_top, fontsize=8)
-        ax.set_xticks(range(len(folds)))
-        ax.set_xticklabels([f"F{f}" for f in folds], fontsize=9)
+        ax.set_yticks(range(len(orden_top))); ax.set_yticklabels(orden_top, fontsize=8)
+        ax.set_xticks(range(len(folds))); ax.set_xticklabels([f"F{f}" for f in folds], fontsize=9)
         ax.set_xlabel("Fold", fontsize=10)
         ax.set_title(f"Diagnóstico VAL — {senales[s]} — {banco}\n"
                      f"Top {len(orden_top)} features · normalizado por fold "
-                     f"(solo diagnóstico, NO depuración)", fontweight="bold", fontsize=10)
+                     f"(diagnóstico, NO depuración)", fontweight="bold", fontsize=10)
         plt.tight_layout()
         ruta = DIR_PLOTS / f"diag_heatmap_{s}_{banco}.png"
-        plt.savefig(ruta, dpi=150, bbox_inches="tight")
-        plt.close(fig)
+        plt.savefig(ruta, dpi=150, bbox_inches="tight"); plt.close(fig)
         logger.info(f"    [diag] Heatmap {s}: {ruta.name}")
 
-    # Ranking de estabilidad (block-perm VAL)
     if not perm_m.dropna(how="all").empty:
         top_r = orden[:min(10, len(orden))]
         ranks = perm_m.rank(axis=1, ascending=False, method="min")
@@ -1833,8 +1499,8 @@ def consolidar_diagnostico(diag_por_fold, cols_feat, banco, top_n=25):
                     color=cmap(i / 10), label=feat, alpha=0.85)
         ax.invert_yaxis()
         ax.yaxis.set_major_locator(mticker.MaxNLocator(integer=True))
-        ax.set_xticks(folds)
-        ax.set_xticklabels([f"Fold {f}" for f in folds], fontsize=9)
+        ax.set_xticks(folds); ax.set_xticklabels([f"Fold {f}" for f in folds], fontsize=9)
+        ax.set_xlabel("Fold", fontsize=10)
         ax.set_ylabel("Ranking perm(VAL)  (1 = más importante)", fontsize=10)
         ax.set_title(f"Estabilidad de ranking — Block-Permutation VAL — {banco}\n"
                      f"Línea plana = feature robusto · saltos = régimen-dependiente",
@@ -1843,37 +1509,30 @@ def consolidar_diagnostico(diag_por_fold, cols_feat, banco, top_n=25):
         ax.grid(True, alpha=0.25)
         plt.tight_layout()
         ruta = DIR_PLOTS / f"diag_ranking_perm_val_{banco}.png"
-        plt.savefig(ruta, dpi=150, bbox_inches="tight")
-        plt.close(fig)
+        plt.savefig(ruta, dpi=150, bbox_inches="tight"); plt.close(fig)
         logger.info(f"    [diag] Ranking perm(VAL): {ruta.name}")
 
-    # Scatter gain(train) vs perm(val)
-    gain_m = matrices["gain_train"]
-    if not perm_m.dropna(how="all").empty:
-        gain_mean = gain_m.mean()
-        perm_mean = perm_m.mean()
+    gain_m, perm_m2 = matrices["gain_train"], matrices["perm_val"]
+    if not perm_m2.dropna(how="all").empty:
+        gain_mean = gain_m.mean(); perm_mean = perm_m2.mean()
         g = (gain_mean / (gain_mean.max() + 1e-12)).reindex(orden_top)
-        p = (perm_mean.clip(lower=0) /
-             (perm_mean.clip(lower=0).max() + 1e-12)).reindex(orden_top)
+        p = (perm_mean.clip(lower=0) / (perm_mean.clip(lower=0).max() + 1e-12)).reindex(orden_top)
         fig, ax = plt.subplots(figsize=(8, max(5, len(orden_top) * 0.4)))
         ypos = np.arange(len(orden_top))
         ax.barh(ypos - 0.2, g.values, height=0.4, color="slategrey",
                 label="gain (TRAIN, in-sample)")
         ax.barh(ypos + 0.2, p.values, height=0.4, color="seagreen",
                 label="perm (VAL, OOS)")
-        ax.set_yticks(ypos)
-        ax.set_yticklabels(orden_top, fontsize=8)
-        ax.invert_yaxis()
+        ax.set_yticks(ypos); ax.set_yticklabels(orden_top, fontsize=8); ax.invert_yaxis()
         ax.set_xlabel("Importancia normalizada", fontsize=10)
         ax.set_title(f"gain(TRAIN) vs perm(VAL) — {banco}\n"
-                     f"gain alto + perm bajo → sospecha de sobreajuste",
+                     f"gain alto + perm bajo → feature aprovechada en train que NO "
+                     f"se sostiene fuera de muestra (sospecha de sobreajuste)",
                      fontweight="bold", fontsize=9)
-        ax.legend(fontsize=9)
-        ax.grid(True, axis="x", alpha=0.25)
+        ax.legend(fontsize=9); ax.grid(True, axis="x", alpha=0.25)
         plt.tight_layout()
         ruta = DIR_PLOTS / f"diag_gain_vs_perm_{banco}.png"
-        plt.savefig(ruta, dpi=150, bbox_inches="tight")
-        plt.close(fig)
+        plt.savefig(ruta, dpi=150, bbox_inches="tight"); plt.close(fig)
         logger.info(f"    [diag] gain(train) vs perm(val): {ruta.name}")
 
     logger.info(f"    [diag] Consolidación completa — {len(folds)} folds, "
@@ -1884,32 +1543,22 @@ def consolidar_diagnostico(diag_por_fold, cols_feat, banco, top_n=25):
 # PARTE 8 — Pipeline principal
 ###############################################################################
 
-def _cargar_metadata_disco(banco: str) -> dict:
-    """
-    Encuentra y carga el metadata JSON más reciente para el banco y MODELO_CV
-    en DIR_MODELOS. Lanza FileNotFoundError si no existe.
-    """
+def _cargar_metadata_disco(banco):
     sfx = "lgbm_wfcv_v3" if MODELO_CV == "lgbm" else f"{MODELO_CV}_wfcv_v3"
     candidatos = sorted(DIR_MODELOS.glob(f"metadata_{sfx}_{banco}_*.json"), reverse=True)
     if not candidatos:
         raise FileNotFoundError(
-            f"No se encontró metadata para banco={banco} modelo={MODELO_CV} en {DIR_MODELOS}"
-        )
+            f"No se encontró metadata para banco={banco} modelo={MODELO_CV} en {DIR_MODELOS}")
     meta = json.loads(candidatos[0].read_text(encoding="utf-8"))
     logger.info(f"  [REPLOT] Metadata cargado: {candidatos[0].name}")
     return meta
 
 
-def _cargar_modelos_fold_disco(fold_info: dict, banco: str) -> dict:
-    """
-    Carga desde disco los modelos de un fold específico.
-    Usa fecha_hoy guardada en fold_info (del manifest original).
-    """
+def _cargar_modelos_fold_disco(fold_info, banco):
     sfx      = "lgbm_wfcv_v3" if MODELO_CV == "lgbm" else f"{MODELO_CV}_wfcv_v3"
     ext      = ".txt" if MODELO_CV == "lgbm" else ".json"
     fold_num = fold_info["fold"]
     fecha    = fold_info["fecha_hoy"]
-
     modelos = {}
     for tau in QUANTILES:
         ruta = DIR_MODELOS / f"{sfx}_{banco}_fold{fold_num:02d}_q{int(tau*100):02d}_{fecha}{ext}"
@@ -1920,42 +1569,29 @@ def _cargar_modelos_fold_disco(fold_info: dict, banco: str) -> dict:
             modelos[tau] = lgb_load.Booster(model_file=str(ruta))
         else:
             b = xgb.Booster(); b.load_model(str(ruta)); modelos[tau] = b
-
-    # Mean model (opcional — solo existe si fue entrenado con la nueva versión)
     ruta_mean = DIR_MODELOS / f"{sfx}_{banco}_fold{fold_num:02d}_mean_{fecha}{ext}"
     if ruta_mean.exists():
         b = xgb.Booster(); b.load_model(str(ruta_mean)); modelos["mean"] = b
-
     has_mean = "mean" in modelos
     logger.info(f"  [REPLOT] Fold {fold_num} cargado desde disco"
                 f"{'  (+ media)' if has_mean else ''}")
     return modelos
 
 
-def _cargar_modelos_step004(banco: str) -> dict | None:
-    """
-    Carga los modelos del step004 (eval) para el banco indicado.
-    Retorna dict {tau: Booster} o None si no se encuentran archivos.
-    Soporta naming xgb_qt y xgb.
-    """
+def _cargar_modelos_step004(banco):
     if not DIR_MODELOS_STEP004.exists():
         logger.warning(f"  [S4] Directorio step004 no encontrado: {DIR_MODELOS_STEP004}")
         return None
-
     sfx = _s4_prefijo
-    # Buscar metadata para obtener fecha del modelo
     metas = sorted(DIR_MODELOS_STEP004.glob(f"metadata_{sfx}_{banco}_*.json"), reverse=True)
     if not metas:
-        # fallback: sin metadata, buscar modelos directamente
         metas = sorted(DIR_MODELOS_STEP004.glob(f"metadata_{sfx}_wfcv_v3_{banco}_*.json"), reverse=True)
     if not metas:
         logger.warning(f"  [S4] No se encontró metadata step004 en {DIR_MODELOS_STEP004}")
         return None
-
     meta  = json.loads(metas[0].read_text(encoding="utf-8"))
     fecha = metas[0].stem.split("_")[-1]
     quantiles_s4 = meta.get("quantiles", QUANTILES)
-
     modelos_s4 = {}
     for tau in quantiles_s4:
         ruta = DIR_MODELOS_STEP004 / f"{sfx}_{banco}_q{int(tau*100):02d}_{fecha}.json"
@@ -1964,13 +1600,12 @@ def _cargar_modelos_step004(banco: str) -> dict | None:
             return None
         b = xgb.Booster(); b.load_model(str(ruta))
         modelos_s4[tau] = b
-
     logger.info(f"  [S4] Modelos step004 cargados: {metas[0].name}  "
                 f"({len(modelos_s4)} cuantiles)")
     return modelos_s4
 
 
-def evaluar_banco(banco: str):
+def evaluar_banco(banco):
     modo = "EXPANDING" if EXPANDING else "ROLLING"
     logger.info(f"\n{'='*65}")
     logger.info(f"BANCO: {banco}  — Walk-Forward CV v3  [{modo}]  [TEST OOS]")
@@ -1978,13 +1613,7 @@ def evaluar_banco(banco: str):
     logger.info(
         f"  TRAIN {VENTANA_TRAIN_AÑOS}yr{'(min)' if EXPANDING else ''} | "
         f"VAL {VENTANA_VAL_AÑOS}yr (Optuna) | TEST {VENTANA_TEST_AÑOS}yr (métricas) | "
-        f"paso {PASO_AÑOS}yr | purge {PURGE_DIAS_HAB}dh | burn-in {BURN_IN_DIAS_HAB}dh | "
-        f"trials={'adaptivo' if ADAPTIVE_TRIALS else f'flat={TRIALS_FLAT}'}"
-    )
-    if ADAPTIVE_TRIALS:
-        _tau_trials = {tau: get_n_trials(tau) for tau in QUANTILES}
-        logger.info(f"  Trials por cuantil: " +
-                    " | ".join(f"τ={t:.2f}→{n}" for t, n in _tau_trials.items()))
+        f"paso {PASO_AÑOS}yr | embargo {EMBARGO_DIAS_HAB}dh | trials {N_TRIALS_OPTUNA}")
 
     t_inicio = time.time()
 
@@ -2001,7 +1630,6 @@ def evaluar_banco(banco: str):
     logger.info(f"  [{banco}] {len(df):,} filas | {len(cols_feat)} features | "
                 f"rango: {fechas.min().date()} → {fechas.max().date()}")
 
-    # Cargar modelos step004 para comparación (opcional)
     modelos_s4 = _cargar_modelos_step004(banco) if COMPARAR_CON_STEP004 else None
     if COMPARAR_CON_STEP004 and modelos_s4 is None:
         logger.warning("  [S4] No se pudo cargar step004 — comparación desactivada")
@@ -2012,10 +1640,8 @@ def evaluar_banco(banco: str):
         ventana_val_años=VENTANA_VAL_AÑOS,
         ventana_test_años=VENTANA_TEST_AÑOS,
         paso_años=PASO_AÑOS,
-        purge_dias_hab=PURGE_DIAS_HAB,
-        purge_val_test=PURGE_VAL_TEST,
-        expanding=EXPANDING,
-    )
+        embargo_dias_hab=EMBARGO_DIAS_HAB,
+        expanding=EXPANDING)
     if not folds:
         logger.error(f"  [{banco}] No se generaron folds")
         return None
@@ -2026,14 +1652,13 @@ def evaluar_banco(banco: str):
                     f"datos desde {folds[N_MAX_FOLDS]['test_start'].date()} quedan OOS")
         folds = folds[:N_MAX_FOLDS]
 
-    # Folds manuales (p.ej. réplica exacta del split de step004)
     if FOLDS_MANUALES:
         n_previos = 0 if SOLO_FOLDS_MANUALES else len(folds)
         folds_man = resolver_folds_manuales(FOLDS_MANUALES, fechas, n_previos)
         if SOLO_FOLDS_MANUALES:
             folds = folds_man
             logger.info(f"  [{banco}] Modo SOLO_FOLDS_MANUALES — "
-                        f"{len(folds_man)} fold(s) manual(es) en lugar de los automáticos")
+                        f"{len(folds_man)} fold(s) manual(es)")
         else:
             folds = folds + folds_man
             logger.info(f"  [{banco}] +{len(folds_man)} fold(s) manual(es) añadido(s)")
@@ -2046,30 +1671,26 @@ def evaluar_banco(banco: str):
             f"    Fold {f['fold']:2d}{tag} | TRAIN {f['train_start'].date()} → "
             f"{f['train_end'].date()} ({n_train_yr}yr, {f['n_train_fechas']}dh) | "
             f"VAL  {f['val_start'].date()} → {f['val_end'].date()} | "
-            f"TEST {f['test_start'].date()} → {f['test_end'].date()}"
-        )
+            f"TEST {f['test_start'].date()} → {f['test_end'].date()}")
 
     resultados_test   = []
     resultados_val    = []
     por_h_test        = []
     por_h_val         = []
     importancias_folds = []
-    diag_por_fold      = []
+    diag_por_fold      = []   # <<< DIAG INTEGRACION (3/5)
     modelos_ultimo    = None
     params_ultimo     = None
-    folds_manifest    = []   # registro de todos los folds para fan chart histórico
+    folds_manifest    = []
     fecha_hoy         = pd.Timestamp.today().strftime("%Y%m%d")
 
-    # ── Modo regenerar plots: carga metadata del disco para obtener fecha_hoy ───
     _meta_disco = None
     if SOLO_REGENERAR_PLOTS:
         try:
             _meta_disco   = _cargar_metadata_disco(banco)
             folds_manifest = _meta_disco.get("folds_manifest", [])
-            # Indexar por fold_num para acceso rápido
             _fm_idx = {fi["fold"]: fi for fi in folds_manifest}
-            logger.info(f"  [REPLOT] {len(folds_manifest)} folds en manifest — "
-                        f"solo se regenerarán los fan charts")
+            logger.info(f"  [REPLOT] {len(folds_manifest)} folds en manifest")
         except FileNotFoundError as _e_meta:
             logger.error(f"  [REPLOT] {_e_meta}")
             logger.error("  [REPLOT] Ejecuta primero con SOLO_REGENERAR_PLOTS=False")
@@ -2080,11 +1701,8 @@ def evaluar_banco(banco: str):
         logger.info(f"\n  ── Fold {fold['fold']}/{len(folds)} ──────────────────────")
 
         try:
-            (X_train, y_train,
-             X_val,   y_val,
-             X_test,  y_test,
-             h_train, h_val, h_test,
-             fechas_t_test) = preparar_fold_data(df, fold, cols_feat)
+            (X_train, y_train, X_val, y_val, X_test, y_test,
+             h_train, h_val, h_test, fechas_t_test) = preparar_fold_data(df, fold, cols_feat)
         except Exception as e:
             logger.warning(f"  Fold {fold['fold']}: error preparando datos — {e}")
             continue
@@ -2098,7 +1716,6 @@ def evaluar_banco(banco: str):
                     f"X_test={len(X_test):,} | std_y={std_y:,.0f}")
 
         if SOLO_REGENERAR_PLOTS:
-            # ── Modo replot: carga modelos del disco, salta Optuna ───────────
             fold_num  = fold["fold"]
             fold_info = _fm_idx.get(fold_num)
             if fold_info is None:
@@ -2111,19 +1728,16 @@ def evaluar_banco(banco: str):
                 continue
             best_params = {}
         else:
-            # ── Modo normal: Optuna + entrenamiento ─────────────────────────
             modelos, best_params = entrenar_fold(
-                X_train, y_train, X_val, y_val, std_y,
-                get_n_trials(0.5), fold["fold"]
-            )
+                X_train, y_train, X_val, y_val, std_y, N_TRIALS_OPTUNA, fold["fold"])
 
-            # Importancia de features (promedio entre cuantiles)
             try:
                 imp = _extraer_importancias(modelos, cols_feat)
                 importancias_folds.append({"fold": fold["fold"], "importancias": imp})
             except Exception as _e_imp:
                 logger.warning(f"    Importancia fold {fold['fold']}: {_e_imp}")
 
+            # <<< DIAG INTEGRACION (4/5): diagnóstico sobre VAL, modelo del fold
             if DIAGNOSTICO_FEATURES:
                 try:
                     diag_por_fold.append(
@@ -2181,27 +1795,21 @@ def evaluar_banco(banco: str):
                 f"    TEST: coverage={cov_t:.1%}  pinball_Q50={row_test.get('pinball_q50','?'):,.0f}  "
                 f"winkler={row_test.get('winkler_90','?'):,.0f}  "
                 f"| VAL coverage={cov_v:.1%} (sesgo={cov_v-cov_t:+.1%})  "
-                f"({row_test['tiempo_min']} min)"
-            )
+                f"({row_test['tiempo_min']} min)")
 
-        # Fan charts TEST — folds manuales van a carpeta separada
         preds_s4  = predecir_y_corregir(modelos_s4, X_test) if modelos_s4 is not None else None
         _fanchart_dir = DIR_FANCHARTS_MANUALES if fold.get("_manual") else None
         graficar_fanchart_test_fold(
             preds_test, y_test.values, h_test, fechas_t_test, fold, banco,
-            preds_overlay=preds_s4,
-            dir_out=_fanchart_dir,
-        )
+            preds_overlay=preds_s4, dir_out=_fanchart_dir)
         graficar_fanchart_acum_test_fold(
             preds_test, y_test.values, h_test, fechas_t_test, fold, banco,
-            dir_out=_fanchart_dir,
-        )
+            dir_out=_fanchart_dir)
 
         modelos_ultimo = modelos
         params_ultimo  = best_params
 
         if not SOLO_REGENERAR_PLOTS:
-            # ── Guardar modelo del fold + manifest ───────────────────────────
             sfx = "lgbm_wfcv_v3" if MODELO_CV == "lgbm" else f"{MODELO_CV}_wfcv_v3"
             ext = ".txt" if MODELO_CV == "lgbm" else ".json"
             fold_num = fold["fold"]
@@ -2224,7 +1832,7 @@ def evaluar_banco(banco: str):
                 logger.info(f"    Modelos fold {fold_num} guardados en {DIR_MODELOS.name}/")
 
             folds_manifest.append({
-                "fold"       : fold_num,
+                "fold": fold_num,
                 "train_start": str(fold["train_start"].date()),
                 "train_end"  : str(fold["train_end"].date()),
                 "test_start" : str(fold["test_start"].date()),
@@ -2237,8 +1845,7 @@ def evaluar_banco(banco: str):
         gc.collect()
 
     if SOLO_REGENERAR_PLOTS:
-        logger.info(f"\n  [REPLOT] Fan charts regenerados para {banco}. "
-                    f"Métricas y metadata no actualizados.")
+        logger.info(f"\n  [REPLOT] Fan charts regenerados para {banco}.")
         return None
 
     if not resultados_test:
@@ -2249,7 +1856,6 @@ def evaluar_banco(banco: str):
     df_val_m   = pd.DataFrame(resultados_val)
     df_por_h_t = pd.concat(por_h_test, ignore_index=True) if por_h_test else pd.DataFrame()
     df_por_h_v = pd.concat(por_h_val,  ignore_index=True) if por_h_val  else pd.DataFrame()
-    # fecha_hoy ya fue definido antes del loop para consistencia en nombres de archivo
 
     def _save(df, nombre):
         ruta = DIR_MODO / nombre
@@ -2279,13 +1885,12 @@ def evaluar_banco(banco: str):
     graficar_hiperparametros_wfcv(df_test_m, tag)
     graficar_importancia_por_fold(importancias_folds, cols_feat, tag)
 
+    # <<< DIAG INTEGRACION (5/5): consolidar diagnóstico cross-fold
     if DIAGNOSTICO_FEATURES and diag_por_fold:
         consolidar_diagnostico(diag_por_fold, cols_feat, tag)
 
     if GUARDAR_MODELO_FINAL and modelos_ultimo is not None:
         ultimo = folds[-1]
-
-        # Reusar GARCH del último fold ya calculado en el manifest (evita 3ª estimación)
         garch_params_prod = folds_manifest[-1]["garch"] if folds_manifest else {}
         if garch_params_prod:
             logger.info(f"  GARCH producción (del manifest): {list(garch_params_prod.keys())}")
@@ -2306,24 +1911,19 @@ def evaluar_banco(banco: str):
         metadata = {
             "banco": banco, "modelo": f"{MODELO_CV}_wfcv_v3",
             "fecha_entrenamiento": pd.Timestamp.today().strftime("%Y-%m-%d"),
-            "version": "v3 — expanding/rolling + TEST OOS",
+            "version": "v3 — expanding/rolling + TEST OOS + diagnóstico features",
             "config": {
                 "expanding"          : EXPANDING,
                 "ventana_train_años" : VENTANA_TRAIN_AÑOS,
                 "ventana_val_años"   : VENTANA_VAL_AÑOS,
                 "ventana_test_años"  : VENTANA_TEST_AÑOS,
                 "paso_años"          : PASO_AÑOS,
-                "purge_dias_hab"     : PURGE_DIAS_HAB,
-                "purge_val_test"     : PURGE_VAL_TEST,
-                "burn_in_dias_hab"   : BURN_IN_DIAS_HAB,
-                "adaptive_trials"    : ADAPTIVE_TRIALS,
-                "trials_flat"        : TRIALS_FLAT,
-                "trials_por_tau"     : TRIALS_POR_TAU if ADAPTIVE_TRIALS else {},
+                "embargo_dias_hab"   : EMBARGO_DIAS_HAB,
+                "n_trials_optuna"    : N_TRIALS_OPTUNA,
+                "diagnostico_features": DIAGNOSTICO_FEATURES,
             },
             "anti_leakage": {
-                "purga_train_val"  : f"{PURGE_DIAS_HAB} dh post-TRAIN (cubre h_max={H_MAX_DIAS_HAB} + MA22)",
-                "purga_val_test"   : f"{PURGE_VAL_TEST} dh post-VAL",
-                "burn_in"          : f"{BURN_IN_DIAS_HAB} dh inicio TRAIN excluidos (MA22 warm-up)",
+                "embargo"          : f"{EMBARGO_DIAS_HAB} dh post-TRAIN",
                 "garch_por_fold"   : "ω/α/β estimados en TRAIN, propagados a VAL+TEST",
                 "medianas_por_fold": "calculadas en TRAIN, aplicadas a VAL+TEST",
                 "val_test_sep"     : "VAL=Optuna only / TEST=métricas OOS only",
@@ -2337,10 +1937,8 @@ def evaluar_banco(banco: str):
             "garch_produccion": {
                 "train_end" : str(ultimo["train_end"].date()),
                 "series"    : garch_params_prod,
-                "uso"       : (
-                    "Usar omega/alpha/beta para propagar GARCH desde train_end "
-                    "en producción — garantiza consistencia entrenamiento-predicción"
-                ),
+                "uso"       : ("Usar omega/alpha/beta para propagar GARCH desde "
+                               "train_end en producción"),
             },
             "n_folds": len(folds), "quantiles": QUANTILES,
             "features": cols_feat, "best_params_ultimo_fold": params_ultimo,
@@ -2390,6 +1988,9 @@ def main():
     if MODELO_CV == "lgbm" and not _LGBM_OK:
         logger.error("MODELO_CV='lgbm' pero lightgbm no está instalado.")
         return
+    if DIAGNOSTICO_FEATURES and not _SHAP_OK:
+        logger.warning("DIAGNOSTICO_FEATURES=True pero shap no está instalado — "
+                       "el diagnóstico correrá sin la señal SHAP (gain+perm).")
     if not RUTA_MATRIZ.exists():
         logger.error(f"Matriz no encontrada: {RUTA_MATRIZ}")
         return

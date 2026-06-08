@@ -50,9 +50,13 @@ def _actualizar_config(modelo_cv: str, ventana_val: float, expanding: bool):
     s5.MODELO_CV        = modelo_cv
     s5.VENTANA_VAL_AÑOS = ventana_val
     s5.EXPANDING        = expanding
-    s5.EMBARGO_DIAS_HAB = 0 if expanding else 90
+    s5.H_MAX_DIAS_HAB   = 75
+    s5.PURGE_DIAS_HAB   = s5.H_MAX_DIAS_HAB
+    s5.PURGE_VAL_TEST   = s5.H_MAX_DIAS_HAB
+    s5.BURN_IN_DIAS_HAB = 22
     s5.ADAPTIVE_TRIALS  = False
     s5.TRIALS_FLAT      = N_TRIALS_FORZADO
+    s5.N_MAX_FOLDS      = 9 if expanding else 8
 
     _modo     = "expanding" if expanding else "rolling"
     _ventanas = f"{s5.VENTANA_TRAIN_AÑOS}{ventana_val}{s5.VENTANA_TEST_AÑOS}"
