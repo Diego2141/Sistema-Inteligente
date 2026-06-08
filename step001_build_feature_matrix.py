@@ -126,9 +126,8 @@ PARAMS = {
     "hoja_bcrp_tc_compra": "TC Compra", # hoja con TC compra BCRP
     "hoja_bcrp_tc_venta":  "TC Venta",  # hoja con TC venta BCRP
 
-    # Bloomberg (CDS_PERU_5Y y COPPER) — exportar desde Bloomberg Terminal a Excel
-    # Columnas esperadas: fecha | CDS_PERU_5Y | COPPER  (dejar vacío si no hay acceso)
-    "ruta_bloomberg": r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Raw\bloomberg_series.xlsx",
+    # Series Bloomberg — DataBBG.xlsx con valores estáticos (hojas: BVL, CDS, Cobre)
+    "ruta_bloomberg": r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Raw\DataBBG.xlsx",
 
     # APIs externas
     "fred_api_key": "96fa168ee9a9a4c1fcf323983db5ba64",
@@ -646,34 +645,66 @@ def _leer_bcrp_excel(ruta, nombre, hoja=0):
         return pd.Series(dtype=float, name=nombre)
 
 
-def _leer_bloomberg_excel(ruta, cols=("CDS_PERU_5Y", "COPPER")):
+_BBG_HOJAS     = {"BVL": "BVL", "CDS_PERU_5Y": "CDS", "COPPER": "Cobre"}
+_BBG_DATE_FMTS = ["%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%Y%m%d"]
+
+
+def _leer_bloomberg_excel(ruta, nombre):
     """
-    Lee series Bloomberg desde un Excel exportado manualmente.
-    Formato esperado: columna 'fecha' + una columna por serie.
-    Si el archivo no existe o falta una columna, retorna Series vacías.
+    Lee directamente desde DataBBG.xlsx (hojas BVL / CDS / Cobre).
+    Maneja el formato Bloomberg estándar: filas de metadatos + datos.
     """
-    resultado = {c: pd.Series(dtype=float, name=c) for c in cols}
     if not ruta or not os.path.exists(ruta):
-        logger.warning(f"  bloomberg_series.xlsx no encontrado en: {ruta}")
-        return resultado
+        logger.warning(f"  Bloomberg '{nombre}' no encontrado en: {ruta}")
+        return pd.Series(dtype=float, name=nombre)
+    hoja = _BBG_HOJAS.get(nombre, nombre)
     try:
-        df = pd.read_excel(ruta)
-        df.columns = [str(c).strip() for c in df.columns]
-        col_fecha = next((c for c in df.columns if c.lower() in ("fecha", "date")), None)
-        if col_fecha is None:
-            logger.warning("  Bloomberg Excel: columna 'fecha' no encontrada")
-            return resultado
-        df[col_fecha] = pd.to_datetime(df[col_fecha], errors="coerce")
-        df = df.dropna(subset=[col_fecha]).set_index(col_fecha).sort_index()
-        for c in cols:
-            if c in df.columns:
-                resultado[c] = pd.to_numeric(df[c], errors="coerce").rename(c)
-                logger.info(f"  {c} (Bloomberg): {len(resultado[c])} obs, hasta {resultado[c].dropna().index.max().date()}")
-            else:
-                logger.warning(f"  Bloomberg Excel: columna '{c}' no encontrada")
+        raw = pd.read_excel(ruta, sheet_name=hoja, header=None, dtype=str)
+        etiquetas = {"security", "start date", "end date", "period", "currency",
+                     "pricing source", "date", "dates", "nan", ""}
+        fila_inicio = None
+        for i, row in raw.iterrows():
+            val = str(row.iloc[0]).strip().lower()
+            if val in etiquetas:
+                continue
+            for fmt in _BBG_DATE_FMTS:
+                try:
+                    ts = pd.to_datetime(val.split(" ")[0], format=fmt)
+                    if pd.Timestamp("1990-01-01") <= ts <= pd.Timestamp("2100-01-01"):
+                        fila_inicio = i
+                        break
+                except Exception:
+                    continue
+            if fila_inicio is not None:
+                break
+        if fila_inicio is None:
+            logger.warning(f"  {nombre}: no se encontraron filas de datos en hoja '{hoja}'")
+            return pd.Series(dtype=float, name=nombre)
+
+        datos = raw.iloc[fila_inicio:, :2].copy()
+        datos.columns = ["fecha", nombre]
+        datos = datos.dropna(subset=["fecha"])
+        datos = datos[datos["fecha"].str.strip() != ""]
+        for fmt in _BBG_DATE_FMTS:
+            try:
+                datos["fecha"] = pd.to_datetime(datos["fecha"], format=fmt, errors="raise")
+                break
+            except Exception:
+                continue
+        else:
+            datos["fecha"] = pd.to_datetime(datos["fecha"], dayfirst=True, errors="coerce")
+        datos[nombre] = (datos[nombre].astype(str)
+                         .str.replace(",", ".", regex=False)
+                         .pipe(pd.to_numeric, errors="coerce"))
+        datos = datos.dropna(subset=["fecha", nombre]).set_index("fecha").sort_index()
+        datos = datos[~datos.index.duplicated(keep="last")]
+        s = datos[nombre]
+        logger.info(f"  {nombre} [{hoja}]: {len(s):,} obs, "
+                    f"{s.index.min().date()} → {s.index.max().date()}")
+        return s
     except Exception as e:
-        logger.warning(f"  Error leyendo Bloomberg Excel: {e}")
-    return resultado
+        logger.warning(f"  Error leyendo Bloomberg '{nombre}' (hoja '{hoja}'): {e}")
+        return pd.Series(dtype=float, name=nombre)
 
 
 def download_external_series(params):
@@ -728,11 +759,10 @@ def download_external_series(params):
         logger.warning("  TC_PEN_USD: no se encontraron hojas TC Compra/Venta en series_bcrp.xlsx.")
         series["TC_PEN_USD"] = pd.Series(dtype=float, name="TC_PEN_USD")
 
-    # 4d. Bloomberg — CDS Perú 5Y y Cobre LME (exportados manualmente desde Terminal)
+    # 4d. Bloomberg — CDS Perú 5Y y Cobre LME (DataBBG.xlsx, hojas CDS / Cobre)
     ruta_bbg = params.get("ruta_bloomberg", "")
-    bbg = _leer_bloomberg_excel(ruta_bbg, cols=("CDS_PERU_5Y", "COPPER"))
-    for nombre, s in bbg.items():
-        series[nombre] = s
+    for _nombre_bbg in ("CDS_PERU_5Y", "COPPER"):
+        series[_nombre_bbg] = _leer_bloomberg_excel(ruta_bbg, _nombre_bbg)
 
     # Alinear al índice de fechas del rango
     idx = pd.bdate_range(start=inicio, end=fin)
