@@ -7,7 +7,10 @@ Corre step005_walk_forward_cv_3 para las 8 combinaciones de configuración:
   · EXPANDING      : [True, False]
 
 Cada combinación escribe en su propia subcarpeta dentro de DIR_OUTPUT.
-N_TRIALS_OPTUNA se fuerza a 60 para todas las corridas.
+
+Trials Optuna — dos modos controlados por USAR_ADAPTIVE_TRIALS:
+  True  → usa TRIALS_POR_TAU de step005 (más trials en colas τ=0.1/0.9)
+  False → usa N_TRIALS_FORZADO flat para todos los cuantiles
 """
 
 import gc
@@ -34,7 +37,13 @@ MODELOS_CV   = ["xgb", "xgb_qt"]
 VENTANAS_VAL = [0.5, 1.0]
 EXPANDINGS   = [True, False]
 
-N_TRIALS_FORZADO = 60   # usado cuando ADAPTIVE_TRIALS = False en step005
+# ── Trials Optuna ─────────────────────────────────────────────────────────────
+# True  → respeta TRIALS_POR_TAU de step005 (adaptativo por cuantil)
+# False → sobreescribe con N_TRIALS_FORZADO flat para todos los cuantiles
+USAR_ADAPTIVE_TRIALS = False
+
+N_TRIALS_FORZADO = 60   # usado solo cuando USAR_ADAPTIVE_TRIALS = False
+
 BANCOS           = ["SISTEMA"]
 
 
@@ -54,8 +63,9 @@ def _actualizar_config(modelo_cv: str, ventana_val: float, expanding: bool):
     s5.PURGE_DIAS_HAB   = s5.H_MAX_DIAS_HAB
     s5.PURGE_VAL_TEST   = s5.H_MAX_DIAS_HAB
     s5.BURN_IN_DIAS_HAB = 22
-    s5.ADAPTIVE_TRIALS  = False
-    s5.TRIALS_FLAT      = N_TRIALS_FORZADO
+    s5.ADAPTIVE_TRIALS  = USAR_ADAPTIVE_TRIALS
+    if not USAR_ADAPTIVE_TRIALS:
+        s5.TRIALS_FLAT  = N_TRIALS_FORZADO
     s5.N_MAX_FOLDS      = 9 if expanding else 8
 
     _modo     = "expanding" if expanding else "rolling"
@@ -87,7 +97,10 @@ def main():
 
     logger.info("=" * 70)
     logger.info(f"STEP005 — ITERACIÓN DE CONFIGURACIONES  ({n} combinaciones)")
-    logger.info(f"  TRIALS_FLAT forzado     : {N_TRIALS_FORZADO}  (ADAPTIVE_TRIALS=False)")
+    if USAR_ADAPTIVE_TRIALS:
+        logger.info(f"  Trials                  : ADAPTATIVO (TRIALS_POR_TAU de step005)")
+    else:
+        logger.info(f"  Trials                  : FLAT = {N_TRIALS_FORZADO} por cuantil")
     logger.info(f"  Bancos                  : {BANCOS}")
     logger.info("=" * 70)
     logger.info("  # | MODELO_CV | VAL (yr) | MODO      | Carpeta")
