@@ -62,9 +62,10 @@ def _parsear_nombre(nombre: str) -> dict:
     # ventanas = "50.51" → train=5, val=0.5, test=1
     # ventanas = "51.01" → train=5, val=1.0, test=1
     try:
+        # "50.51" → before="50", after="51" → val = float("0.5") = 0.5
+        # "51.01" → before="51", after="01" → val = float("1.0") = 1.0
         partes_v = ventanas.split(".")
-        val_str  = partes_v[1][:2] if len(partes_v) > 1 else "??"
-        val      = float(val_str) / 10
+        val = float(partes_v[0][-1] + "." + partes_v[1][0]) if len(partes_v) > 1 else float("nan")
     except Exception:
         val = float("nan")
     return {"modelo": modelo, "modo": modo, "val_yr": val, "nombre": nombre}
@@ -343,7 +344,9 @@ if por_h_test:
         ax.set_xlabel("h (días hábiles)", fontsize=7)
         ax.set_ylabel("Fold", fontsize=7)
         ax.axhline(len(pivot.index) - 0.5, color="none")
-        plt.colorbar(im, ax=ax, format="%.0%", shrink=0.8)
+        plt.colorbar(im, ax=ax,
+                     format=mticker.FuncFormatter(lambda x, _: f"{x:.0%}"),
+                     shrink=0.8)
         plot_idx += 1
 
     for j in range(plot_idx, len(axes_flat)):
