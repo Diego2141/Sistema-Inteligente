@@ -392,20 +392,18 @@ else:
 
     # ── Plot 5: barras gain/perm/shap consenso (top features) ───
     if len(senales_disp) >= 2:
-        top_feats_diag = (
-            diag_mean.groupby("feature")["gain_diag_norm"]
-            .mean().sort_values(ascending=False)
-            .head(TOP_N).index.tolist()
-            if "gain_diag_norm" in diag_mean.columns
-            else top_consensus[:TOP_N]
-        )
+        # SIEMPRE usamos top_consensus (derivado de wfcv_v3_importancias, todos los modelos)
+        # como universo de features, para ser consistentes con el heatmap (Plot 01).
+        # diag_gain_train se usa solo para las barras azules, no para seleccionar features.
+        top_feats_diag = top_consensus[:TOP_N]
 
-        # Promedio sobre todos los modelos disponibles para cada señal
+        # Para cada señal: promedio sobre modelos que tienen ese diag disponible.
+        # Features sin cobertura en diag quedan en NaN → barra invisible (correcto).
         diag_consensus = (
             diag_mean[diag_mean["feature"].isin(top_feats_diag)]
             .groupby("feature")[[f"{s}_norm" for s in senales_disp]]
             .mean()
-            .reindex(top_feats_diag)
+            .reindex(top_feats_diag)   # conserva el orden de top_consensus
         )
 
         fig5, ax5 = plt.subplots(figsize=(12, TOP_N * 0.45 + 2))
@@ -433,7 +431,7 @@ else:
         ax5.set_xlabel("Importancia normalizada (promedio sobre todos los modelos)")
         ax5.set_title(
             f"Gain / Perm / SHAP — Consensus sobre {n_diag_modelos} modelos — {BANCO}\n"
-            "convergencia gain≈perm≈SHAP → feature genuinamente útil en todos los modelos",
+            "Orden: rank gain consensus (8 modelos) — convergencia gain≈perm≈SHAP → feature genuinamente útil",
             fontweight="bold", fontsize=10)
         ax5.legend(fontsize=8, loc="lower right")
         ax5.invert_yaxis()
