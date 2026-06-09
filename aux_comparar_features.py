@@ -179,30 +179,60 @@ def _etiq(nombre):
             f"v={m['val_yr']}y")
 
 # ─────────────────────────────────────────────────────────────────
-# Construir tabla resumen: mean_gain_raw normalizado por modelo
+# Construir tabla resumen: rank percentil combinado (gain + perm + SHAP)
 # ─────────────────────────────────────────────────────────────────
-# Para cada (modelo, feature): media de gain_raw sobre folds
-pivot_gain = (
-    df_imp_all.groupby(["nombre", "feature"])["gain_raw"]
-    .mean()
-    .unstack("nombre")
-    .fillna(0.0)
-)
 
-# Normalizar columna a columna (rank pct: 1 = top, 0 = bottom)
-pivot_rank = pivot_gain.rank(ascending=True, pct=True)
+def _pivot_rank(df_src: pd.DataFrame, col: str) -> pd.DataFrame:
+    """Rank percentil por modelo para una señal dada (1 = más importante)."""
+    piv = (
+        df_src.groupby(["nombre", "feature"])[col]
+        .mean()
+        .unstack("nombre")
+        .fillna(0.0)
+    )
+    return piv.rank(ascending=True, pct=True)
 
-# Media de rank pct sobre todos los modelos → consensus
-pivot_rank["consensus"] = pivot_rank.mean(axis=1)
-top_consensus = pivot_rank.sort_values("consensus", ascending=False).head(TOP_N).index.tolist()
+# Gain (TRAIN) — fuente: wfcv_v3_importancias, siempre disponible
+pivot_rank_gain = _pivot_rank(df_imp_all, "gain_raw")
+pivot_rank_gain["consensus_gain"] = pivot_rank_gain.mean(axis=1)
 
-print(f"\nTop {TOP_N} features por consensus (gain rank promedio):")
+# Perm y SHAP (VAL OOS) — fuente: diag_long, cuando existan
+pivot_rank_perm = pd.DataFrame()
+pivot_rank_shap = pd.DataFrame()
+if not df_diag_all.empty:
+    if "perm" in df_diag_all.columns:
+        pivot_rank_perm = _pivot_rank(df_diag_all.dropna(subset=["perm"]), "perm")
+        pivot_rank_perm["consensus_perm"] = pivot_rank_perm.mean(axis=1)
+    if "shap" in df_diag_all.columns:
+        pivot_rank_shap = _pivot_rank(df_diag_all.dropna(subset=["shap"]), "shap")
+        pivot_rank_shap["consensus_shap"] = pivot_rank_shap.mean(axis=1)
+
+# Consenso combinado: promedio de las señales disponibles (igual peso)
+df_cons = pd.DataFrame({"consensus_gain": pivot_rank_gain["consensus_gain"]})
+if not pivot_rank_perm.empty:
+    df_cons["consensus_perm"] = pivot_rank_perm["consensus_perm"]
+if not pivot_rank_shap.empty:
+    df_cons["consensus_shap"] = pivot_rank_shap["consensus_shap"]
+
+df_cons["consensus"] = df_cons.mean(axis=1)   # ⅓ gain + ⅓ perm + ⅓ SHAP
+top_consensus = df_cons.sort_values("consensus", ascending=False).head(TOP_N).index.tolist()
+
+n_senales = df_cons.shape[1] - 1   # excluye columna "consensus"
+print(f"\nTop {TOP_N} features por consensus combinado ({n_senales} señales):")
 for i, f in enumerate(top_consensus, 1):
-    print(f"  {i:2d}. {f:<35}  consensus={pivot_rank.loc[f,'consensus']:.3f}")
+    row = df_cons.loc[f]
+    detalle = "  ".join(
+        f"{k.replace('consensus_','')}={row[k]:.2f}"
+        for k in df_cons.columns if k != "consensus" and k in row.index
+    )
+    print(f"  {i:2d}. {f:<35}  consensus={row['consensus']:.3f}  [{detalle}]")
 
-# Guardar tabla
-df_tabla = pivot_rank.reset_index().rename(columns={"index": "feature"})
+# Guardar tabla (rank por señal + consensus combinado)
+df_tabla = df_cons.reset_index().rename(columns={"feature": "feature"})
 df_tabla.to_csv(DIR_OUT / "00_tabla_consensus.csv", index=False)
+
+# pivot_rank apunta al gain para el heatmap (visualización por modelo)
+pivot_rank = pivot_rank_gain
 
 # ─────────────────────────────────────────────────────────────────
 # 1. HEATMAP CONSENSUS (features × modelos, valor = rank pct)
@@ -221,7 +251,7 @@ ax1.set_yticks(np.arange(len(top_consensus)))
 ax1.set_yticklabels(top_consensus, fontsize=8)
 ax1.set_title(
     f"Importancia Relativa por Feature y Modelo — {BANCO}\n"
-    f"(rank percentil del gain medio sobre folds; 1.0 = más importante en ese modelo)",
+    f"(rank percentil gain — ordenado por consensus gain+perm+SHAP; 1.0 = más importante en ese modelo)",
     fontweight="bold", fontsize=10)
 plt.colorbar(im, ax=ax1, shrink=0.6,
              format=mticker.FuncFormatter(lambda x, _: f"{x:.0%}"))
