@@ -68,6 +68,13 @@ _fin_historico = (_hoy - pd.offsets.BDay(1)).strftime("%Y-%m-%d")
 # ─────────────────────────────────────────────────────────────────────────────
 FEATURES_EXCLUIR = ["flujo_neto_acum_mes"]
 
+# ─────────────────────────────────────────────────────────────────────────────
+# DIFERENCIACIÓN FRACCIONAL (FFD) — López de Prado Cap. 5
+# Calibrar d mínimo solo con datos hasta esta fecha → sin leakage futuro.
+# Usar la mayor fecha disponible ANTES del período de test de producción.
+# ─────────────────────────────────────────────────────────────────────────────
+_FD_TRAIN_CUTOFF = "2010-12-31"   # calibrar d en ventana histórica inicial
+
 PARAMS = {
     # Fechas
     "fecha_inicio_historico": "2010-01-01",
@@ -75,7 +82,7 @@ PARAMS = {
 
     # Modelo
     "h_min": 2,
-    "h_max": 90,
+    "h_max": 75,
     "quantiles": [0.01, 0.05, 0.50, 0.95, 0.99],
 
     # Modo demo (True mientras no lleguen los datos reales)
@@ -118,6 +125,9 @@ PARAMS = {
     "hoja_bcrp_tasa_ref": "TasaPM",     # hoja con PD12301MD (Tasa de Referencia)
     "hoja_bcrp_tc_compra": "TC Compra", # hoja con TC compra BCRP
     "hoja_bcrp_tc_venta":  "TC Venta",  # hoja con TC venta BCRP
+
+    # Series Bloomberg — DataBBG.xlsx con valores estáticos (hojas: BVL, CDS, Cobre)
+    "ruta_bloomberg": r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Raw\DataBBG.xlsx",
 
     # APIs externas
     "fred_api_key": "96fa168ee9a9a4c1fcf323983db5ba64",
@@ -635,6 +645,68 @@ def _leer_bcrp_excel(ruta, nombre, hoja=0):
         return pd.Series(dtype=float, name=nombre)
 
 
+_BBG_HOJAS     = {"BVL": "BVL", "CDS_PERU_5Y": "CDS", "COPPER": "Cobre"}
+_BBG_DATE_FMTS = ["%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%Y%m%d"]
+
+
+def _leer_bloomberg_excel(ruta, nombre):
+    """
+    Lee directamente desde DataBBG.xlsx (hojas BVL / CDS / Cobre).
+    Maneja el formato Bloomberg estándar: filas de metadatos + datos.
+    """
+    if not ruta or not os.path.exists(ruta):
+        logger.warning(f"  Bloomberg '{nombre}' no encontrado en: {ruta}")
+        return pd.Series(dtype=float, name=nombre)
+    hoja = _BBG_HOJAS.get(nombre, nombre)
+    try:
+        raw = pd.read_excel(ruta, sheet_name=hoja, header=None, dtype=str)
+        etiquetas = {"security", "start date", "end date", "period", "currency",
+                     "pricing source", "date", "dates", "nan", ""}
+        fila_inicio = None
+        for i, row in raw.iterrows():
+            val = str(row.iloc[0]).strip().lower()
+            if val in etiquetas:
+                continue
+            for fmt in _BBG_DATE_FMTS:
+                try:
+                    ts = pd.to_datetime(val.split(" ")[0], format=fmt)
+                    if pd.Timestamp("1990-01-01") <= ts <= pd.Timestamp("2100-01-01"):
+                        fila_inicio = i
+                        break
+                except Exception:
+                    continue
+            if fila_inicio is not None:
+                break
+        if fila_inicio is None:
+            logger.warning(f"  {nombre}: no se encontraron filas de datos en hoja '{hoja}'")
+            return pd.Series(dtype=float, name=nombre)
+
+        datos = raw.iloc[fila_inicio:, :2].copy()
+        datos.columns = ["fecha", nombre]
+        datos = datos.dropna(subset=["fecha"])
+        datos = datos[datos["fecha"].str.strip() != ""]
+        for fmt in _BBG_DATE_FMTS:
+            try:
+                datos["fecha"] = pd.to_datetime(datos["fecha"], format=fmt, errors="raise")
+                break
+            except Exception:
+                continue
+        else:
+            datos["fecha"] = pd.to_datetime(datos["fecha"], dayfirst=True, errors="coerce")
+        datos[nombre] = (datos[nombre].astype(str)
+                         .str.replace(",", ".", regex=False)
+                         .pipe(pd.to_numeric, errors="coerce"))
+        datos = datos.dropna(subset=["fecha", nombre]).set_index("fecha").sort_index()
+        datos = datos[~datos.index.duplicated(keep="last")]
+        s = datos[nombre]
+        logger.info(f"  {nombre} [{hoja}]: {len(s):,} obs, "
+                    f"{s.index.min().date()} → {s.index.max().date()}")
+        return s
+    except Exception as e:
+        logger.warning(f"  Error leyendo Bloomberg '{nombre}' (hoja '{hoja}'): {e}")
+        return pd.Series(dtype=float, name=nombre)
+
+
 def download_external_series(params):
     """
     Descarga todas las series externas y las retorna en un DataFrame
@@ -687,6 +759,11 @@ def download_external_series(params):
         logger.warning("  TC_PEN_USD: no se encontraron hojas TC Compra/Venta en series_bcrp.xlsx.")
         series["TC_PEN_USD"] = pd.Series(dtype=float, name="TC_PEN_USD")
 
+    # 4d. Bloomberg — CDS Perú 5Y y Cobre LME (DataBBG.xlsx, hojas CDS / Cobre)
+    ruta_bbg = params.get("ruta_bloomberg", "")
+    for _nombre_bbg in ("CDS_PERU_5Y", "COPPER"):
+        series[_nombre_bbg] = _leer_bloomberg_excel(ruta_bbg, _nombre_bbg)
+
     # Alinear al índice de fechas del rango
     idx = pd.bdate_range(start=inicio, end=fin)
     df = pd.DataFrame(index=idx)
@@ -698,7 +775,8 @@ def download_external_series(params):
         else:
             df[nombre] = np.nan
 
-    cols_esperadas = ["VIX", "TC_PEN_USD", "T10Y", "FED_FUNDS", "EMBI_PERU", "TASA_REF_BCRP"]
+    cols_esperadas = ["VIX", "TC_PEN_USD", "T10Y", "FED_FUNDS", "EMBI_PERU", "TASA_REF_BCRP",
+                      "CDS_PERU_5Y", "COPPER"]
     for c in cols_esperadas:
         if c not in df.columns:
             df[c] = np.nan
@@ -782,6 +860,68 @@ def _garch_vol(flujo: pd.Series) -> pd.Series:
         return flujo.rolling(20).std()
 
 
+###############################################################################
+# FFD — Diferenciación Fraccional de Ancho Fijo (López de Prado, Cap. 5)
+###############################################################################
+
+def _ffd_weights(d: float, thresh: float = 1e-5) -> np.ndarray:
+    """Calcula los pesos de FFD por expansión binomial: w_k = Π_{j=1}^{k} (d-j+1)/j * (-1)^k."""
+    w, k = [1.0], 1
+    while True:
+        w_k = -w[-1] * (d - k + 1) / k
+        if abs(w_k) < thresh:
+            break
+        w.append(w_k)
+        k += 1
+    return np.array(w[::-1])   # más reciente al final → conveniente para dot()
+
+
+def _fracdiff_fixed_width(series: pd.Series, d: float, thresh: float = 1e-5) -> pd.Series:
+    """Aplica FFD con ventana de ancho fijo a una Serie de pandas."""
+    w     = _ffd_weights(d, thresh)
+    width = len(w)
+    vals  = series.values.astype(float)
+    n     = len(vals)
+    out   = np.full(n, np.nan)
+    for i in range(width - 1, n):
+        chunk = vals[i - width + 1: i + 1]
+        if not np.any(np.isnan(chunk)):
+            out[i] = float(np.dot(w, chunk))
+    return pd.Series(out, index=series.index, name=series.name)
+
+
+def _find_min_d(
+    series: pd.Series,
+    thresh: float = 1e-5,
+    max_d: float  = 1.0,
+    target_pval: float = 0.05,
+    n_steps: int  = 20,
+) -> float:
+    """
+    Encuentra el d mínimo en (0, max_d] tal que la serie diferenciada
+    sea estacionaria (ADF p-value ≤ target_pval).
+    Requiere statsmodels; si no está disponible retorna 0.4 como fallback.
+    """
+    try:
+        from statsmodels.tsa.stattools import adfuller
+    except ImportError:
+        logger.warning("  statsmodels no disponible → d_opt fallback = 0.4")
+        return 0.4
+
+    for d in np.linspace(0.05, max_d, n_steps):
+        fd = _fracdiff_fixed_width(series.dropna(), round(float(d), 4), thresh)
+        fd_clean = fd.dropna()
+        if len(fd_clean) < 30:
+            continue
+        try:
+            pval = adfuller(fd_clean, maxlag=1, regression="c", autolag=None)[1]
+            if pval <= target_pval:
+                return round(float(d), 4)
+        except Exception:
+            continue
+    return round(max_d, 4)
+
+
 def build_bank_features(df_banco, lags_cortos, lag_semana, lag_mes, ventanas_vol):
     """
     Recibe serie temporal de un banco con columnas R y D.
@@ -809,6 +949,7 @@ def build_bank_features(df_banco, lags_cortos, lag_semana, lag_mes, ventanas_vol
             + [f"sigma_flujo_{v}d" for v in VENTANAS_FLUJO]
             + [f"ma_flujo_{v}d"    for v in VENTANAS_FLUJO]
             + ["garch_vol", "flujo_neto_acum_mes"]
+            + ["flujo_neto_sum_5d", "flujo_neto_sum_22d", "flujo_neto_sum_66d"]
         )
         return pd.DataFrame(columns=cols)
 
@@ -852,6 +993,12 @@ def build_bank_features(df_banco, lags_cortos, lag_semana, lag_mes, ventanas_vol
         flujo.groupby(flujo.index.to_period("M")).cumsum()
     )
 
+    # Agregados rolling del flujo neto — ventana siempre relativa a t
+    # min_periods=N garantiza NaN para filas con historia insuficiente (→ imputadas por mediana del fold)
+    resultado["flujo_neto_sum_5d"]  = flujo.rolling( 5, min_periods= 5).sum()
+    resultado["flujo_neto_sum_22d"] = flujo.rolling(22, min_periods=22).sum()
+    resultado["flujo_neto_sum_66d"] = flujo.rolling(66, min_periods=66).sum()
+
     return resultado
 
 
@@ -866,6 +1013,7 @@ def build_macro_features(macro_df):
             "TC_PEN_USD", "delta_TC", "tc_vol_5d", "tc_vol_22d", "garch_vol_tc",
             "EMBI_PERU", "delta_EMBI", "garch_vol_embi",
             "TASA_REF_BCRP", "FED_FUNDS", "diferencial_tasas", "T10Y",
+            "EMBI_PERU_frac", "T10Y_frac", "CDS_PERU_5Y_frac", "COPPER_frac", "VIX_frac",
         ]
         return pd.DataFrame(columns=cols)
 
@@ -901,6 +1049,27 @@ def build_macro_features(macro_df):
         resultado["diferencial_tasas"] = np.nan
 
     resultado["T10Y"] = df.get("T10Y", np.nan)
+
+    # ── FFD: diferenciación fraccional para series I(1) ────────────────────────
+    # d_opt calibrado en datos hasta _FD_TRAIN_CUTOFF (sin leakage).
+    # Si statsmodels no está disponible usa d_opt=0.4 como fallback conservador.
+    _fd_cutoff = pd.Timestamp(_FD_TRAIN_CUTOFF)
+    _ffd_targets = [
+        ("EMBI_PERU",   "EMBI_PERU_frac"),
+        ("T10Y",        "T10Y_frac"),
+        ("CDS_PERU_5Y", "CDS_PERU_5Y_frac"),
+        ("COPPER",      "COPPER_frac"),
+        ("VIX",         "VIX_frac"),
+    ]
+    for col_raw, col_frac in _ffd_targets:
+        serie = df.get(col_raw, pd.Series(dtype=float))
+        if isinstance(serie, pd.Series) and serie.dropna().shape[0] >= 60:
+            s_train = serie[serie.index <= _fd_cutoff].dropna()
+            d_opt   = _find_min_d(s_train) if len(s_train) >= 60 else 0.4
+            resultado[col_frac] = _fracdiff_fixed_width(serie, d_opt)
+            logger.info(f"  FFD {col_raw} → {col_frac}  d_opt={d_opt:.4f}")
+        else:
+            resultado[col_frac] = np.nan
 
     return resultado
 
@@ -1214,7 +1383,8 @@ def build_feature_matrix(
         for col in ["VIX","delta_VIX","VIX_ma22","TC_PEN_USD","delta_TC",
                     "tc_vol_5d","tc_vol_22d","garch_vol_tc",
                     "EMBI_PERU","delta_EMBI","garch_vol_embi",
-                    "TASA_REF_BCRP","FED_FUNDS","diferencial_tasas","T10Y"]:
+                    "TASA_REF_BCRP","FED_FUNDS","diferencial_tasas","T10Y",
+                    "EMBI_PERU_frac","T10Y_frac","CDS_PERU_5Y_frac","COPPER_frac","VIX_frac"]:
             df[col] = np.nan
 
     # ── 6. Estacionales (calculadas una vez por fecha_th única) ──────────────
@@ -1445,6 +1615,15 @@ def build_data_dictionary(params):
         "Acumulado del flujo neto D−R desde el primer día hábil del mes hasta t. "
         "Captura la lógica de reversión intramensual: acumulación de depósitos netos "
         "anticipa mayores retiros en cierre de mes, y viceversa.", 0, None)
+    add("flujo_neto_sum_5d",  "Datos bancarios",
+        "Suma rolling 5dh del flujo neto D−R hasta t (semana). "
+        "min_periods=5: NaN si historia < 5 días → imputado por mediana del fold.", 0, None)
+    add("flujo_neto_sum_22d", "Datos bancarios",
+        "Suma rolling 22dh del flujo neto D−R hasta t (mes). "
+        "min_periods=22: NaN si historia < 22 días → imputado por mediana del fold.", 0, None)
+    add("flujo_neto_sum_66d", "Datos bancarios",
+        "Suma rolling 66dh del flujo neto D−R hasta t (trimestre). "
+        "min_periods=66: NaN si historia < 66 días → imputado por mediana del fold.", 0, None)
 
     # ── Confirmados futuros ───────────────────────────────────────────────────
     # Entrenamiento: proxy histórico = valor realizado en t+1/t+2 (shift negativo)
@@ -1469,6 +1648,13 @@ def build_data_dictionary(params):
     add("FED_FUNDS",        "FRED API",       "Tasa de política monetaria de la Fed",             0, None)
     add("diferencial_tasas","Calculado",      "TASA_REF_BCRP - FED_FUNDS",                        0, None)
     add("T10Y",             "Yahoo Finance",  "Rendimiento del bono del Tesoro EE.UU. a 10 años", 0, None)
+
+    # ── Features FFD — diferenciación fraccional (López de Prado Cap. 5) ──────
+    add("EMBI_PERU_frac",   "BCRP Add-In (FFD)",  "EMBI Perú diferenciado fraccionalmente (d mínimo que elimina raíz unitaria). Preserva memoria de largo plazo; más estacionario que el nivel.", None, None)
+    add("T10Y_frac",        "Yahoo Finance (FFD)", "UST 10Y diferenciado fraccionalmente. Alternativa a delta_T10Y con menor pérdida de memoria.", None, None)
+    add("CDS_PERU_5Y_frac", "Bloomberg (FFD)",     "CDS Perú 5Y diferenciado fraccionalmente (d_opt calibrado en TRAIN).", None, None)
+    add("COPPER_frac",      "Bloomberg (FFD)",     "Cobre LME diferenciado fraccionalmente. Indicador de ciclo global.", None, None)
+    add("VIX_frac",         "Yahoo Finance (FFD)", "VIX diferenciado fraccionalmente (d≈0 si ya es estacionario; preserva estructura).", None, None)
 
     # ── Features estacionales (en t+h — fecha futura, siempre conocidas) ─────
     add("dias_al_cierre_mes",    "Calendario", "Días hábiles restantes hasta fin de mes en t+h",          None, "t+h")
