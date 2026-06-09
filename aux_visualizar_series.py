@@ -380,28 +380,33 @@ if not df_banc.empty:
 
     SMOOTH_DIAS_3C = 22
 
-    _df_nc        = (df_filtrado if "df_filtrado" in globals() else df_banc).copy()
-    _nombre_otros = PARAMS.get("nombre_otros", "Otros_bancos")
+    # Top 5 fijos para este plot; el resto se agrupa como residual
+    _TOP5         = ["BBVA", "CREDITO", "CITIBANK", "SCOTIABANK", "INTERBANK"]
+    _nombre_otros = "Otros_bancos"
+    _bancos_disp  = df_banc["banco"].unique()
+    _top5_disp    = [b for b in _TOP5 if b in _bancos_disp]
+    _resto        = [b for b in _bancos_disp if b not in _top5_disp]
 
-    # Pivot: fecha × banco → neto diario (D − R)
+    # Pivot base desde df_banc (todos los bancos, sin filtro previo)
+    _df_nc       = df_banc.copy()
     _df_nc["neto"] = _df_nc["D"] - _df_nc["R"]
-    pivot_nc = (
+    _pivot_base  = (
         _df_nc.groupby(["fecha", "banco"])["neto"]
         .sum()
         .unstack("banco")
         .reindex(sistema.index, fill_value=0)
     )
 
-    # Orden: grandes por flujo absoluto total desc; Otros_bancos siempre al final
-    _gr_cols  = (
-        pivot_nc.drop(columns=[_nombre_otros], errors="ignore")
-        .abs().sum().sort_values(ascending=False).index.tolist()
-    )
-    _all_cols = _gr_cols + ([_nombre_otros] if _nombre_otros in pivot_nc.columns else [])
+    # Construir pivot_nc: top5 individuales + Otros_bancos agregado
+    pivot_nc = _pivot_base[_top5_disp].copy()
+    if _resto:
+        pivot_nc[_nombre_otros] = _pivot_base[_resto].sum(axis=1)
+
+    _all_cols = _top5_disp + ([_nombre_otros] if _nombre_otros in pivot_nc.columns else [])
     pivot_nc  = pivot_nc[_all_cols]
 
-    # Paleta: tab10 para grandes (cicla si >10), gris neutro para Otros_bancos
-    _pal  = [cm.tab10(i % 10) for i in range(len(_gr_cols))]
+    # Paleta: color fijo por banco, gris neutro para Otros_bancos
+    _pal  = [cm.tab10(i) for i in range(len(_top5_disp))]
     _pal += [(0.60, 0.60, 0.60, 1.0)] * int(_nombre_otros in pivot_nc.columns)
 
     # ── Gráfico 03c: historia completa suavizada + participación relativa ──
@@ -431,7 +436,7 @@ if not df_banc.empty:
     ax_hist.set_ylabel(f"MM USD (media {SMOOTH_DIAS_3C}d)")
     ax_hist.set_title(
         f"Flujo Neto (D − R) por Banco — Historia Completa  [media móvil {SMOOTH_DIAS_3C} días]\n"
-        f"Grandes: modelo individual  ·  {_nombre_otros}: bancos < {UMBRAL_PCT:.0%} del volumen",
+        f"Top 5 individuales  ·  {_nombre_otros}: resto del sistema",
         fontweight="bold",
     )
     _ley_hist = [_Patch(fc=clr, alpha=0.8, label=col) for col, clr in zip(_all_cols, _pal)]
@@ -485,7 +490,8 @@ if not df_banc.empty:
     ax3d.set_ylabel("MM USD")
     ax3d.set_title(
         f"Flujo Neto (D − R) por Banco — Zoom Últimos 2 Años "
-        f"({_f_ini.strftime('%b %Y')} – {_f_fin.strftime('%b %Y')})",
+        f"({_f_ini.strftime('%b %Y')} – {_f_fin.strftime('%b %Y')})\n"
+        f"Top 5 individuales  ·  {_nombre_otros}: resto del sistema",
         fontweight="bold",
     )
     ax3d.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
