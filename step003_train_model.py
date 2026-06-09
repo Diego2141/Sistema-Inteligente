@@ -237,6 +237,68 @@ def _garch_vol_s4(serie, train_end):
     for t in range(1, nf): s2[t] = o + a * xf[t-1]**2 + b * s2[t-1]
     return pd.Series(np.sqrt(np.maximum(s2, 0)) * esc, index=sf.index)
 
+def _ffd_weights_s3(d, thresh=1e-5):
+    w, k = [1.0], 1
+    while True:
+        w_k = -w[-1] * (d - k + 1) / k
+        if abs(w_k) < thresh:
+            break
+        w.append(w_k)
+        k += 1
+    return np.array(w[::-1])
+
+def _fracdiff_s3(series, d, thresh=1e-5):
+    w = _ffd_weights_s3(d, thresh); width = len(w)
+    vals = series.values.astype(float); out = np.full(len(vals), np.nan)
+    for i in range(width - 1, len(vals)):
+        chunk = vals[i - width + 1: i + 1]
+        if not np.any(np.isnan(chunk)):
+            out[i] = float(np.dot(w, chunk))
+    return pd.Series(out, index=series.index)
+
+def reemplazar_ffd_sin_leakage(df, train_end):
+    """Re-calibra FFD solo con datos ≤ train_end y propaga hacia adelante."""
+    frac_cols = [c for c in df.columns if c.endswith("_frac")]
+    if not frac_cols:
+        return df
+    df = df.copy()
+    try:
+        from statsmodels.tsa.stattools import adfuller
+        _sm_ok = True
+    except ImportError:
+        _sm_ok = False
+
+    def _find_d(serie):
+        if not _sm_ok or len(serie.dropna()) < 30:
+            return 0.4
+        for d in np.linspace(0.05, 1.0, 20):
+            fd = _fracdiff_s3(serie.dropna(), round(float(d), 4)).dropna()
+            if len(fd) < 20:
+                continue
+            try:
+                if adfuller(fd, maxlag=1, regression="c", autolag=None)[1] <= 0.05:
+                    return round(float(d), 4)
+            except Exception:
+                continue
+        return 1.0
+
+    raw = df[["fecha_t"]].drop_duplicates("fecha_t").set_index("fecha_t").sort_index()
+    for col_frac in frac_cols:
+        col_raw = col_frac.replace("_frac", "")
+        if col_raw not in df.columns:
+            continue
+        raw_serie = (df[["fecha_t", col_raw]].drop_duplicates("fecha_t")
+                     .set_index("fecha_t").sort_index()[col_raw])
+        serie_train = raw_serie[raw_serie.index <= train_end].dropna()
+        if len(serie_train) < 60:
+            continue
+        d_opt = _find_d(serie_train)
+        frac_full = _fracdiff_s3(raw_serie, d_opt)
+        df[col_frac] = df["fecha_t"].map(frac_full)
+        logger.info(f"    {col_frac}  re-calibrado sin leakage  d_opt={d_opt:.4f}")
+    return df
+
+
 def reemplazar_garch_sin_leakage(df, train_end):
     """Re-estima GARCH(1,1) solo con datos ≤ train_end y propaga hacia adelante."""
     df = df.copy()
@@ -626,6 +688,11 @@ def entrenar_banco(banco: str) -> dict | None:
     if USAR_GARCH_SIN_LEAKAGE:
         logger.info(f"  [{banco}] Re-estimando GARCH sin leakage (TRAIN hasta {CORTE_VAL.date()})...")
         df = reemplazar_garch_sin_leakage(df, CORTE_VAL)
+
+    frac_present = [c for c in df.columns if c.endswith("_frac")]
+    if frac_present:
+        logger.info(f"  [{banco}] Re-calibrando FFD sin leakage ({len(frac_present)} cols)...")
+        df = reemplazar_ffd_sin_leakage(df, CORTE_VAL)
 
     df_train, df_val, df_test = split_walk_forward(df, CORTE_VAL, CORTE_TEST)
 
