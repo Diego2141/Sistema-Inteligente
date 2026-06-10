@@ -128,6 +128,20 @@ DIAG_N_REPEATS        = 3     # repeticiones de la permutación
 DIAG_PERM_MAX_SAMPLES = None  # submuestreo contiguo de VAL (None = todo)
 DIAG_SHAP_MAX_SAMPLES = 800   # muestras para SHAP por cuantil
 
+# Pares cíclicos sin/cos que deben permutarse SIMULTÁNEAMENTE (mismo índice de shuffle).
+# Distribuimos el delta combinado D como D/√2 en cada componente para que la norma
+# euclidiana en aux_comparar_features.py reconstruya exactamente D.
+_CICL_BASES_PERM = [
+    "mes", "dias_sem",
+    "dias_al_cierre_mes", "dias_al_cierre_trim", "dias_al_cierre_anio",
+    "elec",
+]
+_CICL_PARES_PERM = {
+    f"{b}_{s}": f"{b}_cyc"
+    for b in _CICL_BASES_PERM
+    for s in ("sin", "cos")
+}
+
 # ── Modelo ────────────────────────────────────────────────────────────────────
 QUANTILES        = [0.01, 0.05, 0.50, 0.95, 0.99]
 S_MIN_FACTOR     = 0.01
@@ -1687,8 +1701,20 @@ def _diag_block_perm_un_cuantil(model, X, y, tau, block_size, n_repeats, rng):
     n = len(X)
     base = pinball_loss(y, _diag_predict_un_modelo(model, X), tau)
     block_starts = np.arange(0, n, block_size)
-    imp = {}
+
+    # Identificar pares sin/cos presentes en X → permutación simultánea
+    grupos_cicl = {}              # nombre_cyc → [col_sin, col_cos]
     for c in X.columns:
+        if c in _CICL_PARES_PERM:
+            grupos_cicl.setdefault(_CICL_PARES_PERM[c], []).append(c)
+    feat_en_par = {c for cols in grupos_cicl.values() for c in cols}
+
+    imp = {}
+
+    # ── Features sueltas: permutación individual (comportamiento original) ──
+    for c in X.columns:
+        if c in feat_en_par:
+            continue
         col = X[c].values
         deltas = []
         for _ in range(n_repeats):
@@ -1697,6 +1723,24 @@ def _diag_block_perm_un_cuantil(model, X, y, tau, block_size, n_repeats, rng):
             Xp = X.copy(); Xp[c] = new_col
             deltas.append(pinball_loss(y, _diag_predict_un_modelo(model, Xp), tau) - base)
         imp[c] = float(np.mean(deltas))
+
+    # ── Pares sin/cos: UN solo shuffle por repetición → delta combinado real ──
+    # Se distribuye como D/√n_comp en cada componente para que la norma euclidiana
+    # en aux_comparar_features.py reconstruya exactamente D = √(I_sin²+I_cos²).
+    for cyc_name, cols in grupos_cicl.items():
+        orig_vals = {c: X[c].values.copy() for c in cols}
+        deltas = []
+        for _ in range(n_repeats):
+            perm_starts = rng.permutation(block_starts)   # mismo shuffle para todo el par
+            Xp = X.copy()
+            for c in cols:
+                Xp[c] = np.concatenate(
+                    [orig_vals[c][s:s + block_size] for s in perm_starts])[:n]
+            deltas.append(pinball_loss(y, _diag_predict_un_modelo(model, Xp), tau) - base)
+        d_comp = float(np.mean(deltas)) / float(np.sqrt(len(cols)))
+        for c in cols:
+            imp[c] = d_comp
+
     return pd.Series(imp)
 
 
