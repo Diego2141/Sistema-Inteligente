@@ -998,6 +998,11 @@ def build_bank_features(df_banco, lags_cortos, lag_semana, lag_mes, ventanas_vol
 
     resultado["garch_vol"] = _garch_vol(flujo)
 
+    # Ratio de volatilidad corta/larga del flujo neto: > 1 → régimen de alta vol reciente
+    resultado["sigma_flujo_ratio"] = (
+        resultado["sigma_flujo_5d"] / resultado["sigma_flujo_20d"].replace(0, np.nan)
+    )
+
     # Acumulado del flujo neto (D−R) desde el primer día hábil del mes hasta t.
     # Lógica: una acumulación de depósitos netos a lo largo del mes anticipa
     # mayores retiros en los últimos días, y viceversa.
@@ -1042,6 +1047,12 @@ def build_macro_features(macro_df):
     retornos_tc = tc.pct_change()
     resultado["tc_vol_5d"] = retornos_tc.rolling(5).std()
     resultado["tc_vol_22d"] = retornos_tc.rolling(22).std()
+
+    # Ratio de volatilidad cambiaria corta/larga: > 1 → estrés cambiario reciente
+    resultado["tc_vol_ratio"] = (
+        resultado["tc_vol_5d"] / resultado["tc_vol_22d"].replace(0, np.nan)
+    )
+
     retornos_log_tc = np.log(tc / tc.shift(1))
     resultado["garch_vol_tc"] = _garch_vol(retornos_log_tc)
 
@@ -1361,7 +1372,6 @@ def _build_seasonal_table(fechas_unicas, peru_holidays, fechas_elecciones, peru_
             "is_pre_eleccion"      : is_pre_eleccion,
             "is_post_eleccion"     : is_post_eleccion,
             # ── Cíclicas (sin/cos) ────────────────────────────────────────────
-            "dias_al_cierre_anio"    : dias_al_cierre_anio,
             "mes_sin"                : mes_sin,
             "mes_cos"                : mes_cos,
             "dias_sem_sin"           : dias_sem_sin,
@@ -1695,6 +1705,9 @@ def build_data_dictionary(params):
             f"Media móvil {v}d del flujo neto D−R (nivel reciente del flujo)", None, None)
     add("garch_vol", "Datos bancarios",
         "Volatilidad condicional GARCH(1,1) del flujo neto D−R (puro NumPy, sin arch)", None, None)
+    add("sigma_flujo_ratio", "Datos bancarios",
+        "sigma_flujo_5d / sigma_flujo_20d — ratio de volatilidad corta/larga del flujo. "
+        "> 1: régimen de alta vol reciente. NaN si sigma_flujo_20d = 0.", None, None)
     add("flujo_neto_acum_mes", "Datos bancarios",
         "Acumulado del flujo neto D−R desde el primer día hábil del mes hasta t. "
         "Captura la lógica de reversión intramensual: acumulación de depósitos netos "
@@ -1724,6 +1737,8 @@ def build_data_dictionary(params):
     add("delta_TC",         "BCRP Add-In",    "Variación diaria del tipo de cambio",              1, None)
     add("tc_vol_5d",        "BCRP Add-In",    "Volatilidad rolling 5d de retornos del TC",        None, None)
     add("tc_vol_22d",       "BCRP Add-In",    "Volatilidad rolling 22d de retornos del TC",       None, None)
+    add("tc_vol_ratio",     "Calculado",      "tc_vol_5d / tc_vol_22d — ratio de vol cambiaria corta/larga. "
+        "> 1: estrés cambiario reciente. NaN si tc_vol_22d = 0.",               None, None)
     add("garch_vol_tc",     "BCRP Add-In",    "Volatilidad condicional GARCH(1,1) de retornos log del TC PEN/USD — detecta estrés cambiario", None, None)
     add("EMBI_PERU",        "BCRP Add-In",    "EMBI Perú (riesgo país)",                          0, None)
     add("delta_EMBI",       "BCRP Add-In",    "Variación diaria del EMBI Perú",                   1, None)
@@ -1759,7 +1774,6 @@ def build_data_dictionary(params):
     add("is_post_feriado",       "Calendario / holidays.Peru + holidays.US", "1 si el día anterior a t+h es feriado PE o US",   None, "t+h")
     add("is_pre_eleccion",       "Calendario", "1 si t+h está dentro de los 7 días previos a elecciones presidenciales",    None, "t+h")
     add("is_post_eleccion",      "Calendario", "1 si t+h está dentro de los 7 días posteriores a elecciones presidenciales", None, "t+h")
-    add("dias_al_cierre_anio",   "Calendario", "Días hábiles restantes hasta fin de año en t+h",                             None, "t+h")
     add("mes_sin",               "Calendario", "sin(2π·mes/12) — proyección cíclica del mes (P=12)",                         None, "t+h")
     add("mes_cos",               "Calendario", "cos(2π·mes/12) — proyección cíclica del mes (P=12)",                         None, "t+h")
     add("dias_sem_sin",          "Calendario", "sin(2π·dia_sem/5) — ciclo semanal en días hábiles (P=5)",                    None, "t+h")
