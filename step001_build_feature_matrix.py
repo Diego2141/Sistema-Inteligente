@@ -75,10 +75,41 @@ _fin_historico = (_hoy - pd.offsets.BDay(1)).strftime("%Y-%m-%d")
 # el nombre aquí. Las columnas identidad (fecha_t, banco, h, target) están
 # protegidas y no pueden eliminarse desde aquí.
 #
-# Lista inicial: redundancias matemáticas confirmadas por análisis de
-# multicolinealidad (ver aux_depuracion_features.py → hoja "Recomendación").
+# Fuente: diccionario_variables_filtro.xlsx — columna "Color":
+#   Rojo  → eliminar sin reemplazo (leakage, redundancia o escala bruta).
+#   Azul  → reemplazadas por transformación sin/cos o ratio (ver abajo).
+#   flujo_neto_acum_mes: re-activado (sin leakage; acumula desde inicio de mes
+#                        usando D(t) conocido en t-1 y R(t) conocido en t-2).
+#
+# NOTA: sigma_flujo_5d/20d y tc_vol_5d/22d se calculan internamente para los
+# ratios antes de que este listado los elimine del parquet final.
 # ─────────────────────────────────────────────────────────────────────────────
-FEATURES_EXCLUIR = ["flujo_neto_acum_mes"]
+FEATURES_EXCLUIR = [
+    # ── Rojo: eliminar sin reemplazo ─────────────────────────────────────────
+    "log_h",
+    "R_t0", "D_t0",
+    "R_t-1", "D_t-1", "R_t-2", "D_t-2", "R_t-3", "D_t-3",
+    "R_t-5", "D_t-5", "R_t-22", "D_t-22",
+    "sigma_R_5d", "sigma_D_5d", "ma_R_5d", "ma_D_5d",
+    "sigma_R_22d", "sigma_D_22d", "ma_R_22d", "ma_D_22d",
+    "delta_R", "delta_D",
+    "VIX_ma22", "TC_PEN_USD", "delta_TC",
+    "EMBI_PERU", "delta_EMBI", "garch_vol_embi",
+    "diferencial_tasas",
+    "EMBI_PERU_frac", "T10Y_frac", "VIX_frac",
+    "dias_desde_cierre_mes", "pos_en_mes", "total_bdays_mes",
+    "is_quincena", "is_cierre_encaje",
+    # ── Azul: reemplazadas por transformación sin/cos o ratio ────────────────
+    "sigma_flujo_5d", "sigma_flujo_20d",              # → sigma_flujo_ratio
+    "tc_vol_5d", "tc_vol_22d",                        # → tc_vol_ratio
+    "dias_al_cierre_mes",                             # → dias_al_cierre_mes_sin/cos
+    "is_penult_bday_trim", "is_ultimo_bday_trim",     # → dias_al_cierre_trim_sin/cos
+    "is_1er_bday_trim", "is_2do_bday_trim", "is_3er_bday_trim",
+    "dia_semana",                                     # → dias_sem_sin/cos
+    "mes",                                            # → mes_sin/cos
+    "is_fin_anio",                                    # → dias_al_cierre_anio_sin/cos
+    "is_pre_eleccion", "is_post_eleccion",            # → elec_sin/cos
+]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DIFERENCIACIÓN FRACCIONAL (FFD) — López de Prado Cap. 5
