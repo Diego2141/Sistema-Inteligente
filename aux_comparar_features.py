@@ -114,6 +114,59 @@ def _leer_diag(path: Path, senal: str) -> pd.DataFrame:
 
 
 # ─────────────────────────────────────────────────────────────────
+# Pares cíclicos sin/cos → norma euclidiana  I_cyc = √(I_sin² + I_cos²)
+# ─────────────────────────────────────────────────────────────────
+_CICL_BASES = [
+    "mes", "dias_sem",
+    "dias_al_cierre_mes", "dias_al_cierre_trim", "dias_al_cierre_anio",
+    "elec",
+]
+CICL_PARES = {
+    f"{b}_{s}": f"{b}_cyc"
+    for b in _CICL_BASES
+    for s in ("sin", "cos")
+}
+
+
+def _consolidar_cicl(df: pd.DataFrame, val_col: str) -> pd.DataFrame:
+    """
+    Reemplaza pares (feature_sin, feature_cos) por un único feature_cyc
+    cuya importancia es la norma euclidiana: sqrt(I_sin² + I_cos²).
+
+    Funciona para cualquier señal no-negativa: gain, perm, SHAP.
+    Si solo aparece uno del par (e.g. _sin sin _cos), usa ese valor solo.
+    """
+    if df.empty or val_col not in df.columns:
+        return df
+
+    df = df.copy()
+    df["_feat_cyc"] = df["feature"].map(CICL_PARES).fillna(df["feature"])
+
+    mask_par = df["feature"].isin(CICL_PARES)
+    df_rest  = df.loc[~mask_par].drop(columns="_feat_cyc")
+    df_par   = df.loc[mask_par].copy()
+
+    if df_par.empty:
+        return df_rest
+
+    # Columnas identidad: todo excepto 'feature', '_feat_cyc' y val_col
+    id_cols = [c for c in df_par.columns
+               if c not in ("feature", "_feat_cyc", val_col)]
+
+    # √( Σ val² ) agrupando por (id_cols + nombre_cyc)
+    df_norm = (
+        df_par.assign(**{val_col: df_par[val_col].fillna(0.0) ** 2})
+        .groupby(id_cols + ["_feat_cyc"])[val_col]
+        .sum()
+        .apply(np.sqrt)
+        .reset_index()
+        .rename(columns={"_feat_cyc": "feature"})
+    )
+
+    return pd.concat([df_rest, df_norm], ignore_index=True)
+
+
+# ─────────────────────────────────────────────────────────────────
 # Cargar todos los modelos
 # ─────────────────────────────────────────────────────────────────
 carpetas = sorted(
@@ -161,6 +214,20 @@ for d in carpetas:
 
 df_imp_all  = pd.concat(imp_long,  ignore_index=True) if imp_long  else pd.DataFrame()
 df_diag_all = pd.concat(diag_long, ignore_index=True) if diag_long else pd.DataFrame()
+
+# ── Consolidar pares sin/cos → _cyc antes de calcular ranks ─────
+if not df_imp_all.empty:
+    df_imp_all = _consolidar_cicl(df_imp_all, "gain_raw")
+
+if not df_diag_all.empty:
+    _senal_cols = [s for s in ("gain_diag", "perm", "shap")
+                   if s in df_diag_all.columns]
+    _partes = []
+    for _sig in _senal_cols:
+        _sub = df_diag_all[df_diag_all[_sig].notna()].copy()
+        _sub = _sub.drop(columns=[s for s in _senal_cols if s != _sig and s in _sub.columns])
+        _partes.append(_consolidar_cicl(_sub, _sig))
+    df_diag_all = pd.concat(_partes, ignore_index=True) if _partes else df_diag_all
 
 n_diag_modelos = df_diag_all["nombre"].nunique() if not df_diag_all.empty else 0
 print(f"Importancias: {len(df_imp_all)} filas — {df_imp_all['nombre'].nunique()} modelos")
