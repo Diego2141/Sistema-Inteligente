@@ -16,6 +16,7 @@ importlib.reload(bfm)
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+import numpy as np
 from pandas.tseries.offsets import CustomBusinessDay
 
 PARAMS = bfm.PARAMS.copy()
@@ -368,6 +369,140 @@ if not df_banc.empty:
 
     plt.tight_layout()
     plt.savefig(DIR_OUTPUT / "03b_flujos_sistema_2y.png", dpi=150, bbox_inches="tight")
+    plt.show()
+
+# ─────────────────────────────────────────────────────────────────
+# BLOQUE 3c: Flujo neto por banco — contribución de cada entidad
+# ─────────────────────────────────────────────────────────────────
+if not df_banc.empty:
+    import matplotlib.cm as cm
+    from matplotlib.patches import Patch as _Patch
+
+    SMOOTH_DIAS_3C = 22
+
+    # Top 5 fijos para este plot; el resto se agrupa como residual
+    _TOP5         = ["BBVA", "CREDITO", "CITIBANK", "SCOTIABANK", "INTERBANK"]
+    _nombre_otros = "Otros_bancos"
+    _bancos_disp  = df_banc["banco"].unique()
+    _top5_disp    = [b for b in _TOP5 if b in _bancos_disp]
+    _resto        = [b for b in _bancos_disp if b not in _top5_disp]
+
+    # Pivot base desde df_banc (todos los bancos, sin filtro previo)
+    _df_nc       = df_banc.copy()
+    _df_nc["neto"] = _df_nc["D"] - _df_nc["R"]
+    _pivot_base  = (
+        _df_nc.groupby(["fecha", "banco"])["neto"]
+        .sum()
+        .unstack("banco")
+        .reindex(sistema.index, fill_value=0)
+    )
+
+    # Construir pivot_nc: top5 individuales + Otros_bancos agregado
+    pivot_nc = _pivot_base[_top5_disp].copy()
+    if _resto:
+        pivot_nc[_nombre_otros] = _pivot_base[_resto].sum(axis=1)
+
+    _all_cols = _top5_disp + ([_nombre_otros] if _nombre_otros in pivot_nc.columns else [])
+    pivot_nc  = pivot_nc[_all_cols]
+
+    # Paleta: color fijo por banco, gris neutro para Otros_bancos
+    _pal  = [cm.tab10(i) for i in range(len(_top5_disp))]
+    _pal += [(0.60, 0.60, 0.60, 1.0)] * int(_nombre_otros in pivot_nc.columns)
+
+    # ── Gráfico 03c: historia completa suavizada + participación relativa ──
+    _piv_sm = pivot_nc.rolling(SMOOTH_DIAS_3C, min_periods=1).mean() / 1e6  # MM USD
+    _net_sm = (sistema["neto"] / 1e6).rolling(SMOOTH_DIAS_3C, min_periods=1).mean()
+    _idx_sm = _piv_sm.index
+
+    fig3c, (ax_hist, ax_share) = plt.subplots(
+        2, 1, figsize=(14, 10),
+        gridspec_kw={"height_ratios": [3, 1]},
+        sharex=True,
+    )
+
+    _pos_acc = np.zeros(len(_piv_sm))
+    _neg_acc = np.zeros(len(_piv_sm))
+    for col, clr in zip(_all_cols, _pal):
+        v  = _piv_sm[col].values
+        vp = np.where(v > 0, v, 0.0)
+        vn = np.where(v < 0, v, 0.0)
+        ax_hist.fill_between(_idx_sm, _pos_acc, _pos_acc + vp, color=clr, alpha=0.80)
+        ax_hist.fill_between(_idx_sm, _neg_acc, _neg_acc + vn, color=clr, alpha=0.80)
+        _pos_acc += vp
+        _neg_acc += vn
+
+    ax_hist.plot(_net_sm.index, _net_sm.values, color="black", lw=1.3, zorder=5)
+    ax_hist.axhline(0, color="black", lw=0.5, zorder=4)
+    ax_hist.set_ylabel(f"MM USD (media {SMOOTH_DIAS_3C}d)")
+    ax_hist.set_title(
+        f"Flujo Neto (D − R) por Banco — Historia Completa  [media móvil {SMOOTH_DIAS_3C} días]\n"
+        f"Top 5 individuales  ·  {_nombre_otros}: resto del sistema",
+        fontweight="bold",
+    )
+    _ley_hist = [_Patch(fc=clr, alpha=0.8, label=col) for col, clr in zip(_all_cols, _pal)]
+    _ley_hist.append(plt.Line2D([0], [0], color="black", lw=1.5, label="Neto total"))
+    ax_hist.legend(handles=_ley_hist, fontsize=7.5, loc="upper left", ncol=3, framealpha=0.9)
+    ax_hist.grid(True, alpha=0.3)
+
+    # Panel inferior: participación relativa (% del flujo absoluto)
+    _abs_tot = _piv_sm.abs().sum(axis=1).replace(0, np.nan)
+    _shares  = _piv_sm.abs().div(_abs_tot, axis=0).fillna(0) * 100
+    _sh_acc  = np.zeros(len(_piv_sm))
+    for col, clr in zip(_all_cols, _pal):
+        _s = _shares[col].values
+        ax_share.fill_between(_idx_sm, _sh_acc, _sh_acc + _s, color=clr, alpha=0.80)
+        _sh_acc += _s
+
+    ax_share.set_ylim(0, 100)
+    ax_share.set_ylabel("Part. (%)")
+    ax_share.set_title("Participación en el flujo neto (valor absoluto)", fontsize=9)
+    ax_share.xaxis.set_major_locator(mdates.YearLocator(2))
+    ax_share.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+    ax_share.tick_params(axis="x", rotation=0)
+    ax_share.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(DIR_OUTPUT / "03c_neto_por_banco.png", dpi=150, bbox_inches="tight")
+    plt.show()
+
+    # ── Gráfico 03d: zoom últimos 2 años, barras diarias apiladas ──
+    _f_fin  = sistema.index.max()
+    _f_ini  = _f_fin - pd.DateOffset(years=2)
+    _mask2y = (pivot_nc.index >= _f_ini) & (pivot_nc.index <= _f_fin)
+    _piv2y  = pivot_nc[_mask2y] / 1e6
+    _idx2y  = _piv2y.index
+
+    fig3d, ax3d = plt.subplots(figsize=(14, 6))
+    _pb2 = np.zeros(len(_idx2y))
+    _nb2 = np.zeros(len(_idx2y))
+    for col, clr in zip(_all_cols, _pal):
+        v2  = _piv2y[col].values
+        vp2 = np.where(v2 > 0, v2, 0.0)
+        vn2 = np.where(v2 < 0, v2, 0.0)
+        ax3d.bar(_idx2y, vp2, bottom=_pb2, color=clr, alpha=0.85, width=1)
+        ax3d.bar(_idx2y, vn2, bottom=_nb2, color=clr, alpha=0.85, width=1)
+        _pb2 += vp2
+        _nb2 += vn2
+
+    _neto2y = (sistema["neto"] / 1e6)[_mask2y]
+    ax3d.plot(_neto2y.index, _neto2y.values, color="black", lw=0.9, zorder=5)
+    ax3d.axhline(0, color="black", lw=0.5)
+    ax3d.set_ylabel("MM USD")
+    ax3d.set_title(
+        f"Flujo Neto (D − R) por Banco — Zoom Últimos 2 Años "
+        f"({_f_ini.strftime('%b %Y')} – {_f_fin.strftime('%b %Y')})\n"
+        f"Top 5 individuales  ·  {_nombre_otros}: resto del sistema",
+        fontweight="bold",
+    )
+    ax3d.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
+    ax3d.xaxis.set_major_formatter(mdates.DateFormatter("%b\n%Y"))
+    _ley3d = [_Patch(fc=clr, alpha=0.85, label=col) for col, clr in zip(_all_cols, _pal)]
+    _ley3d.append(plt.Line2D([0], [0], color="black", lw=1.5, label="Neto total"))
+    ax3d.legend(handles=_ley3d, fontsize=7.5, loc="upper left", ncol=3, framealpha=0.9)
+    ax3d.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(DIR_OUTPUT / "03d_neto_por_banco_2y.png", dpi=150, bbox_inches="tight")
     plt.show()
 
 # ─────────────────────────────────────────────────────────────────

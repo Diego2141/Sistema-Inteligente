@@ -39,7 +39,7 @@ BANCO_FOCO = "BCP"
 
 # h=1 y h=2 tienen datos confirmados (R_conf, D_conf) → no aportan señal incremental.
 # El interés real de la CC está en h=3 en adelante.
-H_EVALUAR = [3, 5, 10, 22, 45, 90]
+H_EVALUAR = [3, 5, 10, 22, 45, 75]
 
 DIR_OUT.mkdir(parents=True, exist_ok=True)
 
