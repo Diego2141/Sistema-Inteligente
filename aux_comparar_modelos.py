@@ -322,7 +322,7 @@ if por_h_test:
 
     _cmap = mcolors.LinearSegmentedColormap.from_list(
         "cov", ["#d73027", "#fee090", "#91cf60", "#1a9850"], N=256)
-    _norm = mcolors.Normalize(vmin=0.60, vmax=1.0)
+    _norm = mcolors.Normalize(vmin=0.70, vmax=1.0)
 
     plot_idx = 0
     for nombre in nombres_ord:
