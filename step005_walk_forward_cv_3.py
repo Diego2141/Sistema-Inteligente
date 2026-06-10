@@ -1694,6 +1694,30 @@ def _diag_gain_promedio(modelos, cols_feat):
     return pd.Series(acum)
 
 
+def _consolidar_cicl_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Consolida columnas sin/cos → _cyc con norma euclidiana sqrt(I_sin²+I_cos²).
+    Opera sobre DataFrame folds × features (una fila por fold).
+    Reutiliza _CICL_PARES_PERM definido junto a los constants de diagnóstico.
+    """
+    if df.empty:
+        return df
+    grupos = {}
+    for feat in df.columns:
+        if feat in _CICL_PARES_PERM:
+            grupos.setdefault(_CICL_PARES_PERM[feat], []).append(feat)
+    if not grupos:
+        return df
+    feat_en_par = {f for cols in grupos.values() for f in cols}
+    result = df[[c for c in df.columns if c not in feat_en_par]].copy()
+    for cyc_name, cols in grupos.items():
+        present = [c for c in cols if c in df.columns]
+        if present:
+            result[cyc_name] = np.sqrt(
+                (df[present].fillna(0.0) ** 2).sum(axis=1))
+    return result
+
+
 def _diag_block_perm_un_cuantil(model, X, y, tau, block_size, n_repeats, rng):
     n = len(X)
     base = pinball_loss(y, _diag_predict_un_modelo(model, X), tau)
@@ -1860,6 +1884,10 @@ def consolidar_diagnostico(diag_por_fold, cols_feat, banco, top_n=25):
     }
     matrices = {s: _diag_matriz(diag_por_fold, s, cols_feat) for s in senales}
 
+    # Consolidar pares sin/cos → _cyc (norma euclidiana) en las 3 señales
+    matrices = {s: _consolidar_cicl_df(m) for s, m in matrices.items()}
+    cols_feat_cyc = matrices["gain_train"].columns.tolist()
+
     for s, m in matrices.items():
         ruta = DIR_MODO / f"diag_{s}_{banco}.csv"
         m.to_csv(ruta)
@@ -1870,7 +1898,7 @@ def consolidar_diagnostico(diag_por_fold, cols_feat, banco, top_n=25):
         if m.dropna(how="all").empty:
             continue
         ranks = m.rank(axis=1, ascending=False, method="min")
-        for feat in cols_feat:
+        for feat in cols_feat_cyc:
             estab_rows.append({
                 "senal"    : s,
                 "feature"  : feat,
