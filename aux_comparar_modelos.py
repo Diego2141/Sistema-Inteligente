@@ -359,6 +359,53 @@ if por_h_test:
     plt.show()
 
 # ─────────────────────────────────────────────────────────────────
+# 5b. HEATMAP coverage(fold × h) — VAL
+# ─────────────────────────────────────────────────────────────────
+if por_h_val:
+    n_mod = len([n for n in nombres_ord if n in por_h_val])
+    ncols = 4
+    nrows = int(np.ceil(n_mod / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 5, nrows * 3.5))
+    axes_flat = axes.flatten() if n_mod > 1 else [axes]
+
+    _cmap = mcolors.LinearSegmentedColormap.from_list(
+        "cov", ["#d73027", "#fee090", "#91cf60", "#1a9850"], N=256)
+    _norm = mcolors.Normalize(vmin=0.70, vmax=1.0)
+
+    plot_idx = 0
+    for nombre in nombres_ord:
+        if nombre not in por_h_val:
+            continue
+        ax    = axes_flat[plot_idx]
+        df_ph = por_h_val[nombre]
+        pivot = (df_ph.groupby(["fold", "h"])["coverage_90"]
+                 .mean()
+                 .unstack("h")
+                 .sort_index())
+        im = ax.imshow(pivot.values, aspect="auto", cmap=_cmap, norm=_norm,
+                       origin="lower")
+        ax.set_xticks(np.arange(0, pivot.shape[1], 10))
+        ax.set_xticklabels(pivot.columns[::10], fontsize=6, rotation=45)
+        ax.set_yticks(np.arange(len(pivot.index)))
+        ax.set_yticklabels([f"F{f}" for f in pivot.index], fontsize=6)
+        ax.set_title(nombre.replace("_", " "), fontsize=8, fontweight="bold")
+        ax.set_xlabel("h (días hábiles)", fontsize=7)
+        ax.set_ylabel("Fold", fontsize=7)
+        plt.colorbar(im, ax=ax,
+                     format=mticker.FuncFormatter(lambda x, _: f"{x:.0%}"),
+                     shrink=0.8)
+        plot_idx += 1
+
+    for j in range(plot_idx, len(axes_flat)):
+        axes_flat[j].set_visible(False)
+
+    plt.suptitle(f"Heatmap Coverage 90%  (fold × horizonte) — VAL — {BANCO}",
+                 fontsize=12, fontweight="bold")
+    plt.tight_layout()
+    plt.savefig(DIR_OUT / "04b_heatmap_coverage_fold_h_val.png", dpi=150, bbox_inches="tight")
+    plt.show()
+
+# ─────────────────────────────────────────────────────────────────
 # 6. EVOLUCIÓN TEMPORAL: Coverage TEST por fold (líneas)
 # ─────────────────────────────────────────────────────────────────
 fig, axes = plt.subplots(1, 2, figsize=(16, 5))
