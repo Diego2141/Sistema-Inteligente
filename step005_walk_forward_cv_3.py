@@ -145,7 +145,7 @@ _CICL_PARES_PERM = {
 # ── Modelo ────────────────────────────────────────────────────────────────────
 QUANTILES        = [0.01, 0.05, 0.50, 0.95, 0.99]
 S_MIN_FACTOR     = 0.01
-S_MAX_FACTOR     = 1.0
+S_MAX_FACTOR     = 0.20   # >0.3 → s≈std_y → pérdida pierde asimetría → sub-cobertura
 
 # ── Trials Optuna ─────────────────────────────────────────────────────────────
 # True  → número de trials varía por cuantil (TRIALS_POR_TAU)
