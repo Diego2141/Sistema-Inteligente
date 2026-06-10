@@ -21,6 +21,18 @@ from datetime import datetime
 
 warnings.filterwarnings("ignore")
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Constantes para codificación cíclica de variables de calendario
+# ─────────────────────────────────────────────────────────────────────────────
+_P_ELEC = 1260  # 5 años × ~252 días hábiles
+
+# Primeras vueltas de elecciones generales peruanas (cada 5 años, sin extraordinarias)
+_ELECCIONES_GENERALES_NP = np.array([
+    "2001-04-08", "2006-04-09", "2011-04-10",
+    "2016-04-10", "2021-04-11", "2026-04-12",
+    "2031-04-13", "2036-04-12", "2041-04-14",
+], dtype="datetime64[D]")
+
 # ---------------------------------------------------------------------------
 # Proxy corporativo: lee credenciales de variable de entorno o las pide
 # ---------------------------------------------------------------------------
@@ -1048,10 +1060,26 @@ def _build_seasonal_table(fechas_unicas, peru_holidays, fechas_elecciones, peru_
         fin    = q.end_time
         bdays_por_trim[q] = pd.bdate_range(start=inicio, end=fin, freq=peru_bday)
 
+    # Mapa: año → días hábiles + dict de posición O(1)
+    anios_unicos = pd.PeriodIndex(fechas_unicas, freq="Y").unique()
+    bdays_por_anio     = {}
+    bdays_pos_por_anio = {}
+    for _a in anios_unicos:
+        _bd = pd.bdate_range(start=_a.start_time, end=_a.end_time, freq=peru_bday)
+        bdays_por_anio[_a]     = _bd
+        bdays_pos_por_anio[_a] = {d: i + 1 for i, d in enumerate(_bd)}
+
     # Sets para lookups rápidos
     hols_set  = set(peru_holidays)
     elec_set  = set(pd.DatetimeIndex(fechas_elecciones)) if fechas_elecciones else set()
     elec_arr  = np.array(sorted(elec_set), dtype="datetime64[D]") if elec_set else np.array([], dtype="datetime64[D]")
+
+    # Feriados en formato numpy para np.busday_count (ciclo electoral)
+    hols_np = (peru_holidays.values.astype("datetime64[D]")
+               if len(peru_holidays) > 0
+               else np.array([], dtype="datetime64[D]"))
+
+    TWO_PI = 2.0 * np.pi
 
     registros = []
     for fecha in fechas_unicas:
@@ -1101,6 +1129,48 @@ def _build_seasonal_table(fechas_unicas, peru_holidays, fechas_elecciones, peru_
             is_pre_eleccion = is_post_eleccion = 0
 
         mes = ts.month
+
+        # ── Posición en el año (días hábiles) ────────────────────────────────
+        _a               = ts.to_period("Y")
+        total_bdays_anio = len(bdays_por_anio.get(_a, []))
+        pos_en_anio      = bdays_pos_por_anio.get(_a, {}).get(ts, 1)
+        dias_al_cierre_anio = total_bdays_anio - pos_en_anio
+
+        # ── Días hábiles desde última elección general ────────────────────────
+        _ts64     = np.datetime64(ts, "D")
+        _pasados  = _ELECCIONES_GENERALES_NP[_ELECCIONES_GENERALES_NP <= _ts64]
+        n_bd_elec = (int(np.busday_count(_pasados[-1], _ts64, holidays=hols_np))
+                     if len(_pasados) > 0 else 0)
+
+        # ── Codificaciones cíclicas (sin/cos) ─────────────────────────────────
+        # mes (P=12, calendario)
+        mes_sin = float(np.sin(TWO_PI * mes / 12))
+        mes_cos = float(np.cos(TWO_PI * mes / 12))
+
+        # día de semana (P=5 hábiles; dayofweek 0=lun→4=vie, usamos 1-5)
+        _dsem        = ts.dayofweek + 1
+        dias_sem_sin = float(np.sin(TWO_PI * _dsem / 5))
+        dias_sem_cos = float(np.cos(TWO_PI * _dsem / 5))
+
+        # cierre de mes (P=total_bdays_mes hábiles)
+        _p_mes = total_bdays_mes or 1
+        dias_al_cierre_mes_sin = float(np.sin(TWO_PI * pos_en_mes / _p_mes))
+        dias_al_cierre_mes_cos = float(np.cos(TWO_PI * pos_en_mes / _p_mes))
+
+        # cierre de trimestre (P=total_bdays_trim hábiles)
+        _p_trim = total_bdays_trim or 1
+        dias_al_cierre_trim_sin = float(np.sin(TWO_PI * pos_en_trim / _p_trim))
+        dias_al_cierre_trim_cos = float(np.cos(TWO_PI * pos_en_trim / _p_trim))
+
+        # cierre de año (P=total_bdays_anio hábiles)
+        _p_anio = total_bdays_anio or 1
+        dias_al_cierre_anio_sin = float(np.sin(TWO_PI * pos_en_anio / _p_anio))
+        dias_al_cierre_anio_cos = float(np.cos(TWO_PI * pos_en_anio / _p_anio))
+
+        # ciclo electoral (P=1260 hábiles ≈ 5 años, solo elecciones generales)
+        elec_sin = float(np.sin(TWO_PI * n_bd_elec / _P_ELEC))
+        elec_cos = float(np.cos(TWO_PI * n_bd_elec / _P_ELEC))
+
         registros.append({
             "fecha_th"             : ts,
             "dias_al_cierre_mes"   : dias_al_cierre_mes,
@@ -1121,6 +1191,20 @@ def _build_seasonal_table(fechas_unicas, peru_holidays, fechas_elecciones, peru_
             "is_post_feriado"      : is_post_feriado,
             "is_pre_eleccion"      : is_pre_eleccion,
             "is_post_eleccion"     : is_post_eleccion,
+            # ── Cíclicas (sin/cos) ────────────────────────────────────────────
+            "dias_al_cierre_anio"    : dias_al_cierre_anio,
+            "mes_sin"                : mes_sin,
+            "mes_cos"                : mes_cos,
+            "dias_sem_sin"           : dias_sem_sin,
+            "dias_sem_cos"           : dias_sem_cos,
+            "dias_al_cierre_mes_sin" : dias_al_cierre_mes_sin,
+            "dias_al_cierre_mes_cos" : dias_al_cierre_mes_cos,
+            "dias_al_cierre_trim_sin": dias_al_cierre_trim_sin,
+            "dias_al_cierre_trim_cos": dias_al_cierre_trim_cos,
+            "dias_al_cierre_anio_sin": dias_al_cierre_anio_sin,
+            "dias_al_cierre_anio_cos": dias_al_cierre_anio_cos,
+            "elec_sin"               : elec_sin,
+            "elec_cos"               : elec_cos,
         })
 
     return pd.DataFrame(registros).set_index("fecha_th")
@@ -1489,6 +1573,19 @@ def build_data_dictionary(params):
     add("is_post_feriado",       "Calendario / holidays.Peru + holidays.US", "1 si el día anterior a t+h es feriado PE o US",   None, "t+h")
     add("is_pre_eleccion",       "Calendario", "1 si t+h está dentro de los 7 días previos a elecciones presidenciales",    None, "t+h")
     add("is_post_eleccion",      "Calendario", "1 si t+h está dentro de los 7 días posteriores a elecciones presidenciales", None, "t+h")
+    add("dias_al_cierre_anio",   "Calendario", "Días hábiles restantes hasta fin de año en t+h",                             None, "t+h")
+    add("mes_sin",               "Calendario", "sin(2π·mes/12) — proyección cíclica del mes (P=12)",                         None, "t+h")
+    add("mes_cos",               "Calendario", "cos(2π·mes/12) — proyección cíclica del mes (P=12)",                         None, "t+h")
+    add("dias_sem_sin",          "Calendario", "sin(2π·dia_sem/5) — ciclo semanal en días hábiles (P=5)",                    None, "t+h")
+    add("dias_sem_cos",          "Calendario", "cos(2π·dia_sem/5) — ciclo semanal en días hábiles (P=5)",                    None, "t+h")
+    add("dias_al_cierre_mes_sin","Calendario", "sin(2π·pos_mes/P_mes) — ciclo mensual hábil dinámico",                       None, "t+h")
+    add("dias_al_cierre_mes_cos","Calendario", "cos(2π·pos_mes/P_mes) — ciclo mensual hábil dinámico",                       None, "t+h")
+    add("dias_al_cierre_trim_sin","Calendario","sin(2π·pos_trim/P_trim) — ciclo trimestral hábil dinámico",                  None, "t+h")
+    add("dias_al_cierre_trim_cos","Calendario","cos(2π·pos_trim/P_trim) — ciclo trimestral hábil dinámico",                  None, "t+h")
+    add("dias_al_cierre_anio_sin","Calendario","sin(2π·pos_anio/P_anio) — ciclo anual hábil dinámico",                       None, "t+h")
+    add("dias_al_cierre_anio_cos","Calendario","cos(2π·pos_anio/P_anio) — ciclo anual hábil dinámico",                       None, "t+h")
+    add("elec_sin",              "Calendario", "sin(2π·bd_desde_elec/1260) — ciclo electoral 5 años (solo 1ras vueltas)",    None, "t+h")
+    add("elec_cos",              "Calendario", "cos(2π·bd_desde_elec/1260) — ciclo electoral 5 años (solo 1ras vueltas)",    None, "t+h")
 
     # ── Target ────────────────────────────────────────────────────────────────
     add("target", "Datos bancarios", "Flujo neto = D(b, t+h) - R(b, t+h). NaN si no hay datos.", None, "t+h")
