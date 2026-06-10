@@ -192,6 +192,13 @@ assert MODELO_CV in ("xgb", "lgbm", "xgb_qt"), \
 FIX_REG_ALPHA  = False
 FIX_REG_LAMBDA = False
 
+# ── Parámetro s (suavizado Pinball-Arctan) ────────────────────────────────────
+# True  → s fijo en S_FACTOR_FIJO × std_y (recomendado por el paper 2406.02293)
+#          Optuna no busca s; libera trials para otros hiperparámetros
+# False → Optuna busca s en [S_MIN_FACTOR, S_MAX_FACTOR] × std_y
+S_FIJO         = True
+S_FACTOR_FIJO  = 0.05   # equivale a s=0.05 en datos estandarizados (centro del rango paper)
+
 # ── Fan chart TEST: número de snapshots por fold ──────────────────────────────
 FANCHART_N_SNAPSHOTS = 4   # 1 cada ~3 meses para TEST de 1 año
 
@@ -661,7 +668,8 @@ def make_pinball_metric(tau):
 
 
 def _objective_optuna(trial, X_tr, y_tr, X_va, y_va, std_y):
-    s = trial.suggest_float("s", std_y * S_MIN_FACTOR, std_y * S_MAX_FACTOR, log=True)
+    s = (std_y * S_FACTOR_FIJO if S_FIJO
+         else trial.suggest_float("s", std_y * S_MIN_FACTOR, std_y * S_MAX_FACTOR, log=True))
     params = {
         "learning_rate"   : trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
         "max_depth"       : trial.suggest_int("max_depth", 3, 10),
@@ -804,7 +812,8 @@ def predecir_lgbm(modelos, X):
 # ── XGBoost QT ────────────────────────────────────────────────────────────────
 
 def _objetivo_optuna_xgb_qt_tau(trial, tau, X_tr, y_tr, X_va, y_va, std_y):
-    s = trial.suggest_float("s", std_y * S_MIN_FACTOR, std_y * S_MAX_FACTOR, log=True)
+    s = (std_y * S_FACTOR_FIJO if S_FIJO
+         else trial.suggest_float("s", std_y * S_MIN_FACTOR, std_y * S_MAX_FACTOR, log=True))
     params = {
         "learning_rate"   : trial.suggest_float("learning_rate",   0.01,  0.3,  log=True),
         "max_depth"       : trial.suggest_int(  "max_depth",         3,    10),
