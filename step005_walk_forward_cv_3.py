@@ -155,15 +155,12 @@ ADAPTIVE_TRIALS  = True
 TRIALS_FLAT      = 60        # usado cuando ADAPTIVE_TRIALS = False
 
 TRIALS_POR_TAU   = {         # usado cuando ADAPTIVE_TRIALS = True
-    0.1: 110,
-    0.2:  95,
-    0.3:  90,
-    0.4:  90,
-    0.5:  90,
-    0.6:  90,
-    0.7:  90,
-    0.8:  95,
-    0.9: 110,
+    # Llaves = round(tau, 1) para QUANTILES = [0.01, 0.05, 0.50, 0.95, 0.99]
+    0.0: 110,   # τ=0.01 → colas extremas, más difíciles de calibrar
+    0.1: 110,   # τ=0.05
+    0.5:  90,   # τ=0.50 → cuantil central, converge más rápido
+    0.9: 110,   # τ=0.95
+    1.0: 110,   # τ=0.99 → colas extremas
 }
 
 # ── Opciones de salida ────────────────────────────────────────────────────────
