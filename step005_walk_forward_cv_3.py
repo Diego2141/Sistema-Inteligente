@@ -1286,6 +1286,98 @@ def graficar_fanchart_acum_test_fold(
     logger.info(f"  Fan chart ACUMULADO TEST fold {fold['fold']}: {nombre.name}")
 
 
+def graficar_fanchart_acum_punto_test_fold(
+    preds_test: dict,
+    y_test: np.ndarray,
+    h_test: np.ndarray,
+    fechas_t_test,
+    fold: dict,
+    banco: str,
+    dir_out: Path | None = None,
+):
+    """
+    Fan chart acumulado mostrando SOLO realizado, media y mediana (sin bandas).
+    Permite evaluar la calidad del punto central sin ruido visual de intervalos.
+    """
+    fechas_unicas = pd.DatetimeIndex(sorted(set(fechas_t_test)))
+    if len(fechas_unicas) == 0:
+        return
+
+    test_start = fold["test_start"]
+    n_snap     = FANCHART_N_SNAPSHOTS
+    meses_paso = 12.0 / n_snap
+
+    origenes = []
+    for i in range(n_snap):
+        target  = test_start + pd.DateOffset(months=int(round(i * meses_paso)))
+        diffs   = np.abs((fechas_unicas - target).total_seconds())
+        nearest = fechas_unicas[np.argmin(diffs)]
+        if nearest not in origenes:
+            origenes.append(nearest)
+
+    if not origenes:
+        return
+
+    ncols = 2
+    nrows = int(np.ceil(len(origenes) / ncols))
+    modo  = "EXPANDING" if EXPANDING else "ROLLING"
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 7, nrows * 5), sharey=False)
+    axes_flat = axes.flatten() if len(origenes) > 1 else [axes]
+
+    fig.suptitle(
+        f"Acumulado TEST OOS — Realizado vs Media vs Mediana — Fold {fold['fold']} — {banco} [{modo}]\n"
+        f"TEST: {fold['test_start'].date()} → {fold['test_end'].date()}  |  "
+        f"TRAIN hasta: {fold['train_end'].date()}",
+        fontweight="bold", fontsize=11,
+    )
+
+    for ax, t0 in zip(axes_flat, origenes):
+        mask = np.array([pd.Timestamp(f) == t0 for f in fechas_t_test])
+        if mask.sum() == 0:
+            ax.set_visible(False)
+            continue
+
+        h_s = h_test[mask]
+        y_s = y_test[mask]
+        p_s = {tau: arr[mask] for tau, arr in preds_test.items()}
+
+        order = np.argsort(h_s)
+        h_s   = h_s[order]
+        y_s   = y_s[order]
+        p_s   = {tau: arr[order] for tau, arr in p_s.items()}
+
+        y_cum = np.cumsum(y_s)
+        p_cum = {tau: np.cumsum(arr) for tau, arr in p_s.items()}
+
+        ax.plot(h_s, y_cum / 1e6, color="dimgray", lw=2.0, ls="--",
+                zorder=4, label="Realizado acum.")
+        if 0.50 in p_cum:
+            ax.plot(h_s, p_cum[0.50] / 1e6, color="steelblue", lw=2.0,
+                    ls="--", zorder=3, label="Mediana Q50 (CV)")
+        if "mean" in p_cum:
+            ax.plot(h_s, p_cum["mean"] / 1e6, color="crimson", lw=2.0,
+                    zorder=4, label="Media (CV)")
+
+        ax.axhline(0, color="black", lw=0.5, alpha=0.3, ls="--")
+        ax.set_title(f"Origen: {t0.strftime('%Y-%m-%d')}", fontsize=9, fontweight="bold")
+        ax.set_xlabel("Horizonte h (días hábiles)", fontsize=8)
+        ax.set_ylabel("Flujo acumulado D-R (MM USD)", fontsize=8)
+        ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:,.0f}"))
+        ax.legend(fontsize=8, loc="best")
+        ax.grid(True, alpha=0.25)
+
+    for ax in axes_flat[len(origenes):]:
+        ax.set_visible(False)
+
+    plt.tight_layout()
+    _dir = dir_out if dir_out is not None else DIR_FANCHARTS
+    nombre = _dir / f"fanchart_acum_punto_test_fold{fold['fold']:02d}_{banco}.png"
+    plt.savefig(nombre, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    logger.info(f"  Fan chart ACUMULADO PUNTO TEST fold {fold['fold']}: {nombre.name}")
+
+
 def graficar_cobertura_por_h(df_por_h, banco, sufijo="test"):
     if df_por_h.empty or "coverage_90" not in df_por_h.columns:
         return
@@ -2346,6 +2438,10 @@ def evaluar_banco(banco: str):
             dir_out=_fanchart_dir,
         )
         graficar_fanchart_acum_test_fold(
+            preds_test, y_test.values, h_test, fechas_t_test, fold, banco,
+            dir_out=_fanchart_dir,
+        )
+        graficar_fanchart_acum_punto_test_fold(
             preds_test, y_test.values, h_test, fechas_t_test, fold, banco,
             dir_out=_fanchart_dir,
         )
