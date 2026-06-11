@@ -708,6 +708,8 @@ def optimizar_hiperparametros(X_tr, y_tr, X_va, y_va, std_y, n_trials, fold_num)
         n_trials=n_trials, show_progress_bar=False,
     )
     bp = study.best_params
+    if S_FIJO:
+        bp["s"] = std_y * S_FACTOR_FIJO
     logger.info(f"    Fold {fold_num} best pinball(Q50/VAL)={study.best_value:.4f} "
                 f"n_est={bp['n_estimators']} lr={bp['learning_rate']:.4f} s={bp['s']:.2f}")
     return bp
@@ -856,6 +858,8 @@ def _worker_optuna_tau(args):
         n_trials=n_trials, show_progress_bar=False,
     )
     bp    = study.best_params
+    if S_FIJO:
+        bp["s"] = std_y * S_FACTOR_FIJO
     s     = bp["s"]
     n_est = bp["n_estimators"]
     params = {k: v for k, v in bp.items() if k not in ("s", "n_estimators")}
