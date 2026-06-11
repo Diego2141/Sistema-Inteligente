@@ -32,6 +32,10 @@ import step005_walk_forward_cv_3 as _s5
 #   xgb_qt_rolling_51.01  → xgb_qt, rolling,   VAL=1.0, TEST=1
 ###############################################################################
 
+#  Version del pipeline  | "v3" → sin normalizacion de target
+#                        | "v4" → con normalizacion de target (recomendado)
+VERSION             = "v4"
+
 #  Modelo         | "xgb"    → XGBoost estandar
 #                 | "xgb_qt" → XGBoost con tuning cuantilico independiente
 MODELO_REPLOT       = "xgb"
@@ -48,7 +52,7 @@ VENTANA_TEST_REPLOT  = 1      # 1 año
 VENTANA_TRAIN_REPLOT = 5      # 5 años
 
 # Ruta manual — anula todos los parametros de arriba si se define
-# Ejemplo: CARPETA_MANUAL = r"H:\...\step005_wfcv_v3\xgb_rolling_50.51"
+# Ejemplo: CARPETA_MANUAL = r"H:\...\step005_wfcv_v4\xgb_rolling_50.51"
 CARPETA_MANUAL = None
 
 # ── Formato de exportacion de pronosticos ─────────────────────────────────────
@@ -59,7 +63,7 @@ EXPORTAR_POR_FOLD   = False    # False = 1 archivo por banco | True = 1 por fold
 # NO MODIFICAR DESDE AQUI
 ###############################################################################
 
-DIR_OUTPUT = _s5.DIR_OUTPUT
+DIR_OUTPUT = _s5.BASE_SISTEMA / "2. Output" / f"step005_wfcv_{VERSION}"
 
 
 def _construir_dir_modo():
@@ -67,9 +71,7 @@ def _construir_dir_modo():
     if CARPETA_MANUAL is not None:
         return Path(CARPETA_MANUAL)
     _modo_r = "expanding" if EXPANDING_REPLOT else "rolling"
-    # El nombre usa la representacion Python de cada valor (int o float)
-    # Para que VAL=1.0 genere "1.0" en lugar de "1", usar float explicitamente
-    _val = float(VENTANA_VAL_REPLOT)   # 0.5 → "0.5", 1.0 → "1.0"
+    _val = float(VENTANA_VAL_REPLOT)
     _vent_r = f"{VENTANA_TRAIN_REPLOT}{_val}{VENTANA_TEST_REPLOT}"
     return DIR_OUTPUT / f"{MODELO_REPLOT}_{_modo_r}_{_vent_r}"
 
