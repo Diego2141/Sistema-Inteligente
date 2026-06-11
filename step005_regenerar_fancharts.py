@@ -260,8 +260,10 @@ def regenerar_fancharts_banco(banco: str) -> None:
         else:
             rows_global.extend(rows_fold)
 
-        # 4f. Carpeta de fan charts
-        _dir_out = DIR_FANCHARTS_MANUALES if fold.get("_manual") else None
+        # 4f. Carpeta de fan charts — siempre explicita para usar DIR_MODO del selector
+        # (si fuera None, las funciones usarian DIR_FANCHARTS del modulo principal)
+        _dir_out = DIR_FANCHARTS_MANUALES if fold.get("_manual") else DIR_FANCHARTS
+        _dir_out.mkdir(parents=True, exist_ok=True)
 
         # ── 1. Flujos normales
         graficar_fanchart_test_fold(
