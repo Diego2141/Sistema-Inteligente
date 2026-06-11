@@ -1,13 +1,14 @@
+# -*- coding: utf-8 -*-
 """
-Regenera ÚNICAMENTE los fan charts a partir de los modelos ya entrenados.
-No ejecuta Optuna ni reentrenamiento — requiere que step005_walk_forward_cv_3.py
+Regenera UNICAMENTE los fan charts a partir de los modelos ya entrenados.
+No ejecuta Optuna ni reentrenamiento -- requiere que step005_walk_forward_cv_3.py
 haya corrido antes con GUARDAR_MODELOS_TODOS_FOLDS=True.
 
-Orden de generación por fold:
+Orden de generacion por fold:
   1. Fan chart flujos normales   (fanchart_test_fold*)
   2. Fan chart acumulado bandas  (fanchart_acum_test_fold*)
-  3. Fan chart acumulado punto   (fanchart_acum_punto_test_fold*) — realizado / media / mediana
-  4. Fan chart acumulado estresado (fanchart_acum_puntq05_test_fold*) — + escenario Q05 terminal
+  3. Fan chart acumulado punto   (fanchart_acum_punto_test_fold*) -- realizado / media / mediana
+  4. Fan chart acumulado estresado (fanchart_acum_puntq05_test_fold*) -- + escenario Q05 terminal
 
 Uso:
     python step005_regenerar_fancharts.py
@@ -17,41 +18,40 @@ import time
 import logging
 from pathlib import Path
 
-# ── El script principal tiene guard __main__, así que importar es seguro ──────
+# El script principal tiene guard __main__, asi que importar es seguro
 sys.path.insert(0, str(Path(__file__).parent))
 
-from step005_walk_forward_cv_3 import (
-    # ── Constantes de configuración ──────────────────────────────────────────
-    BANCOS_A_EVALUAR,
-    EXPANDING,
-    MODELO_CV,
-    VENTANA_TRAIN_AÑOS,
-    VENTANA_VAL_AÑOS,
-    VENTANA_TEST_AÑOS,
-    PASO_AÑOS,
-    PURGE_DIAS_HAB,
-    PURGE_VAL_TEST,
-    N_MAX_FOLDS,
-    FOLDS_MANUALES,
-    SOLO_FOLDS_MANUALES,
-    RUTA_MATRIZ,
-    DIR_FANCHARTS,
-    DIR_FANCHARTS_MANUALES,
-    # ── Funciones de datos ───────────────────────────────────────────────────
-    generar_folds,
-    resolver_folds_manuales,
-    preparar_fold_data,
-    get_feature_cols,
-    predecir_fold,
-    # ── Carga de modelos desde disco ─────────────────────────────────────────
-    _cargar_metadata_disco,
-    _cargar_modelos_fold_disco,
-    # ── Fan chart functions (en orden de generación) ─────────────────────────
-    graficar_fanchart_test_fold,
-    graficar_fanchart_acum_test_fold,
-    graficar_fanchart_acum_punto_test_fold,
-    graficar_fanchart_acum_punto_q05_test_fold,
-)
+import step005_walk_forward_cv_3 as _s5
+
+# Constantes de configuracion (acceso por modulo para evitar problemas de encoding)
+BANCOS_A_EVALUAR       = _s5.BANCOS_A_EVALUAR
+EXPANDING              = _s5.EXPANDING
+MODELO_CV              = _s5.MODELO_CV
+VENTANA_TRAIN          = _s5.__dict__["VENTANA_TRAIN_A\xd1OS"]   # VENTANA_TRAIN_ANOS
+VENTANA_VAL            = _s5.__dict__["VENTANA_VAL_A\xd1OS"]     # VENTANA_VAL_ANOS
+VENTANA_TEST           = _s5.__dict__["VENTANA_TEST_A\xd1OS"]    # VENTANA_TEST_ANOS
+PASO                   = _s5.__dict__["PASO_A\xd1OS"]            # PASO_ANOS
+PURGE_DIAS_HAB         = _s5.PURGE_DIAS_HAB
+PURGE_VAL_TEST         = _s5.PURGE_VAL_TEST
+N_MAX_FOLDS            = _s5.N_MAX_FOLDS
+FOLDS_MANUALES         = _s5.FOLDS_MANUALES
+SOLO_FOLDS_MANUALES    = _s5.SOLO_FOLDS_MANUALES
+RUTA_MATRIZ            = _s5.RUTA_MATRIZ
+DIR_FANCHARTS          = _s5.DIR_FANCHARTS
+DIR_FANCHARTS_MANUALES = _s5.DIR_FANCHARTS_MANUALES
+
+# Funciones
+generar_folds                        = _s5.generar_folds
+resolver_folds_manuales              = _s5.resolver_folds_manuales
+preparar_fold_data                   = _s5.preparar_fold_data
+get_feature_cols                     = _s5.get_feature_cols
+predecir_fold                        = _s5.predecir_fold
+_cargar_metadata_disco               = _s5._cargar_metadata_disco
+_cargar_modelos_fold_disco           = _s5._cargar_modelos_fold_disco
+graficar_fanchart_test_fold          = _s5.graficar_fanchart_test_fold
+graficar_fanchart_acum_test_fold     = _s5.graficar_fanchart_acum_test_fold
+graficar_fanchart_acum_punto_test_fold     = _s5.graficar_fanchart_acum_punto_test_fold
+graficar_fanchart_acum_punto_q05_test_fold = _s5.graficar_fanchart_acum_punto_q05_test_fold
 
 import pandas as pd
 
@@ -104,10 +104,10 @@ def regenerar_fancharts_banco(banco: str) -> None:
     # ── 3. Generar mismos folds que el script principal ───────────────────────
     folds = generar_folds(
         fechas_disponibles=fechas,
-        ventana_train_años=VENTANA_TRAIN_AÑOS,
-        ventana_val_años=VENTANA_VAL_AÑOS,
-        ventana_test_años=VENTANA_TEST_AÑOS,
-        paso_años=PASO_AÑOS,
+        ventana_train_años=VENTANA_TRAIN,
+        ventana_val_años=VENTANA_VAL,
+        ventana_test_años=VENTANA_TEST,
+        paso_años=PASO,
         purge_dias_hab=PURGE_DIAS_HAB,
         purge_val_test=PURGE_VAL_TEST,
         expanding=EXPANDING,
