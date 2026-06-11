@@ -22,37 +22,60 @@ sys.path.insert(0, str(Path(__file__).parent))
 import step005_walk_forward_cv_3 as _s5
 
 ###############################################################################
-# CONFIGURACION — ajustar segun necesidad
+# SELECTOR DE CARPETA
+# Elige la configuracion a regenerar cambiando los parametros de abajo.
+# Al arrancar el script se imprime la carpeta que se usara y las disponibles.
 ###############################################################################
 
-# Directorio raiz donde viven los outputs del step005 (subcarpetas por modo)
-DIR_OUTPUT = _s5.DIR_OUTPUT          # H:/.../2. Output/step005_wfcv_v3
+#  Modelo         | "xgb"   → XGBoost estandar
+#                 | "xgb_qt"→ XGBoost con tuning cuantilico independiente
+MODELO_REPLOT       = "xgb"
 
-# Subcarpeta de modo activo (xgb_rolling_051, xgb_expanding_051, etc.)
-DIR_MODO   = _s5.DIR_MODO
+#  Ventana        | True  → expanding window
+#                 | False → rolling window
+EXPANDING_REPLOT    = True
 
-# Carpetas de fan charts (se puede cambiar a una ruta personalizada)
-DIR_FANCHARTS          = _s5.DIR_FANCHARTS           # .../fancharts_test
-DIR_FANCHARTS_MANUALES = _s5.DIR_FANCHARTS_MANUALES  # .../fancharts_manuales
+#  Ventana VAL    | 0.5 → 6 meses   | 1 → 1 año
+VENTANA_VAL_REPLOT  = 0.5
 
-# Carpeta donde se guardan los CSVs/parquets de pronosticos
-DIR_PRONOSTICOS = DIR_MODO / "pronosticos_test"
+#  Ventana TEST   | normalmente 1 año (no cambia)
+VENTANA_TEST_REPLOT = 1
 
-# Formato de exportacion: "csv" o "parquet"
-FORMATO_EXPORTACION = "csv"
+#  Ventana TRAIN  | normalmente 5 años (no cambia)
+VENTANA_TRAIN_REPLOT = 5
 
-# Guardar un archivo por fold (True) o un unico archivo por banco (False)
-EXPORTAR_POR_FOLD = False
+# Ruta manual (anula todos los parametros de arriba si se define)
+# Ejemplo: CARPETA_MANUAL = r"H:\...\step005_wfcv_v3\xgb_rolling_50.51"
+CARPETA_MANUAL = None
+
+# ── Formato de exportacion de pronosticos ─────────────────────────────────────
+FORMATO_EXPORTACION = "csv"    # "csv" o "parquet"
+EXPORTAR_POR_FOLD   = False    # False = 1 archivo por banco | True = 1 por fold
 
 ###############################################################################
+# NO MODIFICAR DESDE AQUI
+###############################################################################
 
-# Constantes heredadas del script principal
+DIR_OUTPUT = _s5.DIR_OUTPUT
+
+if CARPETA_MANUAL is not None:
+    DIR_MODO = Path(CARPETA_MANUAL)
+else:
+    _modo_r  = "expanding" if EXPANDING_REPLOT else "rolling"
+    _vent_r  = f"{VENTANA_TRAIN_REPLOT}{VENTANA_VAL_REPLOT}{VENTANA_TEST_REPLOT}"
+    DIR_MODO = DIR_OUTPUT / f"{MODELO_REPLOT}_{_modo_r}_{_vent_r}"
+
+DIR_FANCHARTS          = DIR_MODO / "fancharts_test"
+DIR_FANCHARTS_MANUALES = DIR_MODO / "fancharts_manuales"
+DIR_PRONOSTICOS        = DIR_MODO / "pronosticos_test"
+
+# Constantes heredadas del script principal (algunas sobreescritas por el selector)
 BANCOS_A_EVALUAR    = _s5.BANCOS_A_EVALUAR
-EXPANDING           = _s5.EXPANDING
-MODELO_CV           = _s5.MODELO_CV
-VENTANA_TRAIN       = _s5.__dict__["VENTANA_TRAIN_A\xd1OS"]
-VENTANA_VAL         = _s5.__dict__["VENTANA_VAL_A\xd1OS"]
-VENTANA_TEST        = _s5.__dict__["VENTANA_TEST_A\xd1OS"]
+EXPANDING           = EXPANDING_REPLOT
+MODELO_CV           = MODELO_REPLOT
+VENTANA_TRAIN       = VENTANA_TRAIN_REPLOT
+VENTANA_VAL         = VENTANA_VAL_REPLOT
+VENTANA_TEST        = VENTANA_TEST_REPLOT
 PASO                = _s5.__dict__["PASO_A\xd1OS"]
 PURGE_DIAS_HAB      = _s5.PURGE_DIAS_HAB
 PURGE_VAL_TEST      = _s5.PURGE_VAL_TEST
@@ -263,12 +286,37 @@ def regenerar_fancharts_banco(banco: str) -> None:
 
 
 # =============================================================================
+def _listar_carpetas_disponibles() -> None:
+    """Imprime las subcarpetas de modelos disponibles en DIR_OUTPUT."""
+    if not DIR_OUTPUT.exists():
+        return
+    carpetas = sorted(
+        p for p in DIR_OUTPUT.iterdir()
+        if p.is_dir() and (p / "modelos").exists()
+    )
+    if carpetas:
+        log.info("  Carpetas disponibles en DIR_OUTPUT:")
+        for c in carpetas:
+            marca = "  <<< SELECCIONADA" if c == DIR_MODO else ""
+            log.info(f"    {c.name}{marca}")
+    else:
+        log.info("  (No se encontraron carpetas con modelos en DIR_OUTPUT)")
+
+
 def main():
     t0 = time.time()
     log.info("STEP005 — Regenerar fan charts + exportar pronosticos TEST")
+    log.info(f"  Carpeta      : {DIR_MODO}")
     log.info(f"  Bancos       : {BANCOS_A_EVALUAR}")
     log.info(f"  Modo         : {'EXPANDING' if EXPANDING else 'ROLLING'}  [{MODELO_CV.upper()}]")
     log.info(f"  Pronosticos  : {DIR_PRONOSTICOS}  [{FORMATO_EXPORTACION}]")
+    _listar_carpetas_disponibles()
+
+    if not DIR_MODO.exists():
+        log.error(f"  Carpeta no encontrada: {DIR_MODO}")
+        log.error("  Ajusta MODELO_REPLOT / EXPANDING_REPLOT / VENTANA_VAL_REPLOT "
+                  "o usa CARPETA_MANUAL.")
+        return
 
     for banco in BANCOS_A_EVALUAR:
         regenerar_fancharts_banco(banco)
