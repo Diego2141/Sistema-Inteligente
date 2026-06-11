@@ -23,28 +23,31 @@ import step005_walk_forward_cv_3 as _s5
 
 ###############################################################################
 # SELECTOR DE CARPETA
-# Elige la configuracion a regenerar cambiando los parametros de abajo.
-# Al arrancar el script se imprime la carpeta que se usara y las disponibles.
+# Carpetas disponibles siguen el patron: {modelo}_{modo}_{train}{val}{test}
+# Ejemplos reales:
+#   xgb_expanding_50.51   → xgb,    expanding, VAL=0.5, TEST=1
+#   xgb_rolling_50.51     → xgb,    rolling,   VAL=0.5, TEST=1
+#   xgb_expanding_51.01   → xgb,    expanding, VAL=1.0, TEST=1
+#   xgb_qt_rolling_50.51  → xgb_qt, rolling,   VAL=0.5, TEST=1
+#   xgb_qt_rolling_51.01  → xgb_qt, rolling,   VAL=1.0, TEST=1
 ###############################################################################
 
-#  Modelo         | "xgb"   → XGBoost estandar
-#                 | "xgb_qt"→ XGBoost con tuning cuantilico independiente
+#  Modelo         | "xgb"    → XGBoost estandar
+#                 | "xgb_qt" → XGBoost con tuning cuantilico independiente
 MODELO_REPLOT       = "xgb"
 
-#  Ventana        | True  → expanding window
-#                 | False → rolling window
-EXPANDING_REPLOT    = True
+#  Ventana        | True  → expanding   |  False → rolling
+EXPANDING_REPLOT    = False
 
-#  Ventana VAL    | 0.5 → 6 meses   | 1 → 1 año
+#  Ventana VAL    | 0.5 → 6 meses (carpeta ...50.51)
+#                 | 1.0 → 1 año   (carpeta ...51.01)  <- USAR 1.0, NO 1
 VENTANA_VAL_REPLOT  = 0.5
 
-#  Ventana TEST   | normalmente 1 año (no cambia)
-VENTANA_TEST_REPLOT = 1
+#  Normalmente fijos — solo cambiar si se entrenaron con otros valores
+VENTANA_TEST_REPLOT  = 1      # 1 año
+VENTANA_TRAIN_REPLOT = 5      # 5 años
 
-#  Ventana TRAIN  | normalmente 5 años (no cambia)
-VENTANA_TRAIN_REPLOT = 5
-
-# Ruta manual (anula todos los parametros de arriba si se define)
+# Ruta manual — anula todos los parametros de arriba si se define
 # Ejemplo: CARPETA_MANUAL = r"H:\...\step005_wfcv_v3\xgb_rolling_50.51"
 CARPETA_MANUAL = None
 
@@ -58,12 +61,20 @@ EXPORTAR_POR_FOLD   = False    # False = 1 archivo por banco | True = 1 por fold
 
 DIR_OUTPUT = _s5.DIR_OUTPUT
 
-if CARPETA_MANUAL is not None:
-    DIR_MODO = Path(CARPETA_MANUAL)
-else:
-    _modo_r  = "expanding" if EXPANDING_REPLOT else "rolling"
-    _vent_r  = f"{VENTANA_TRAIN_REPLOT}{VENTANA_VAL_REPLOT}{VENTANA_TEST_REPLOT}"
-    DIR_MODO = DIR_OUTPUT / f"{MODELO_REPLOT}_{_modo_r}_{_vent_r}"
+
+def _construir_dir_modo():
+    """Construye DIR_MODO replicando el formato del script principal."""
+    if CARPETA_MANUAL is not None:
+        return Path(CARPETA_MANUAL)
+    _modo_r = "expanding" if EXPANDING_REPLOT else "rolling"
+    # El nombre usa la representacion Python de cada valor (int o float)
+    # Para que VAL=1.0 genere "1.0" en lugar de "1", usar float explicitamente
+    _val = float(VENTANA_VAL_REPLOT)   # 0.5 → "0.5", 1.0 → "1.0"
+    _vent_r = f"{VENTANA_TRAIN_REPLOT}{_val}{VENTANA_TEST_REPLOT}"
+    return DIR_OUTPUT / f"{MODELO_REPLOT}_{_modo_r}_{_vent_r}"
+
+
+DIR_MODO = _construir_dir_modo()
 
 DIR_FANCHARTS          = DIR_MODO / "fancharts_test"
 DIR_FANCHARTS_MANUALES = DIR_MODO / "fancharts_manuales"
