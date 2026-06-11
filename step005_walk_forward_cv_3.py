@@ -1443,6 +1443,15 @@ def graficar_fanchart_acum_punto_q05_test_fold(
         y_cum = np.cumsum(y_s)
         p_cum = {tau: np.cumsum(arr) for tau, arr in p_s.items()}
 
+        # Escenario estresado: cumsum de la mediana ajustado por el Q05 del
+        # día terminal h. En cada horizonte h muestra cuánto sería el flujo
+        # acumulado si todos los días previos son a su mediana pero el día h
+        # cierra en su peor 5%. La severidad no se acumula porque solo
+        # interviene el Q05 de UN día, no de todos.
+        med_stress_cum = None
+        if 0.50 in p_s and 0.05 in p_s:
+            med_stress_cum = np.cumsum(p_s[0.50]) + p_s[0.05]
+
         ax.plot(h_s, y_cum / 1e6, color="dimgray", lw=2.0, ls="--",
                 zorder=5, label="Realizado acum.")
         if 0.50 in p_cum:
@@ -1451,9 +1460,9 @@ def graficar_fanchart_acum_punto_q05_test_fold(
         if "mean" in p_cum:
             ax.plot(h_s, p_cum["mean"] / 1e6, color="crimson", lw=2.0,
                     zorder=4, label="Media acum.")
-        if 0.05 in p_cum:
-            ax.plot(h_s, p_cum[0.05] / 1e6, color="darkorange", lw=1.8,
-                    ls=":", zorder=2, label="Q05 acum. (sum diario)")
+        if med_stress_cum is not None:
+            ax.plot(h_s, med_stress_cum / 1e6, color="darkorange", lw=1.8,
+                    ls=":", zorder=2, label="Mediana acum. − riesgo P5 día h")
 
         ax.axhline(0, color="black", lw=0.5, alpha=0.3, ls="--")
         ax.set_title(f"Origen: {t0.strftime('%Y-%m-%d')}", fontsize=9, fontweight="bold")
