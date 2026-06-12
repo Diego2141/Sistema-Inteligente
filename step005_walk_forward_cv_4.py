@@ -2417,6 +2417,7 @@ def evaluar_banco(banco: str):
     diag_por_fold      = []
     modelos_ultimo    = None
     params_ultimo     = None
+    std_y_ultimo      = None
     folds_manifest    = []   # registro de todos los folds para fan chart histórico
     fecha_hoy         = pd.Timestamp.today().strftime("%Y%m%d")
 
@@ -2586,6 +2587,7 @@ def evaluar_banco(banco: str):
 
         modelos_ultimo = modelos
         params_ultimo  = best_params
+        std_y_ultimo   = std_y
 
         if not SOLO_REGENERAR_PLOTS:
             # ── Guardar modelo del fold + manifest ───────────────────────────
@@ -2724,6 +2726,7 @@ def evaluar_banco(banco: str):
                 "train_end"  : str(ultimo["train_end"].date()),
                 "test_start" : str(ultimo["test_start"].date()),
                 "test_end"   : str(ultimo["test_end"].date()),
+                "std_y"      : std_y_ultimo,
             },
             "garch_produccion": {
                 "train_end" : str(ultimo["train_end"].date()),
