@@ -4,7 +4,8 @@ Regenera UNICAMENTE los fan charts a partir de los modelos ya entrenados
 y exporta los pronosticos TEST (realizados + cuantiles) a CSV/parquet.
 
 No ejecuta Optuna ni reentrenamiento -- requiere que step005_walk_forward_cv_3.py
-haya corrido antes con GUARDAR_MODELOS_TODOS_FOLDS=True.
+o step005_walk_forward_cv_4.py hayan corrido antes con GUARDAR_MODELOS_TODOS_FOLDS=True.
+Para v4 las predicciones se denormalizan automaticamente (× std_y del fold de entrenamiento).
 
 Uso:
     python step005_regenerar_fancharts.py
@@ -17,9 +18,7 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 
-# El script principal tiene guard __main__, asi que importar es seguro
 sys.path.insert(0, str(Path(__file__).parent))
-import step005_walk_forward_cv_3 as _s5
 
 ###############################################################################
 # SELECTOR DE CARPETA
@@ -35,6 +34,12 @@ import step005_walk_forward_cv_3 as _s5
 #  Version del pipeline  | "v3" → sin normalizacion de target
 #                        | "v4" → con normalizacion de target (recomendado)
 VERSION             = "v4"
+
+# Importar el modulo correcto segun VERSION (ambos tienen las mismas funciones)
+if VERSION == "v4":
+    import step005_walk_forward_cv_4 as _s5
+else:
+    import step005_walk_forward_cv_3 as _s5
 
 #  Modelo         | "xgb"    → XGBoost estandar
 #                 | "xgb_qt" → XGBoost con tuning cuantilico independiente
@@ -214,7 +219,7 @@ def regenerar_fancharts_banco(banco: str) -> None:
 
         # 4a. Preparar datos del fold
         try:
-            (_, _, _, _, X_test, y_test,
+            (X_train_f, y_train_f, _, _, X_test, y_test,
              _, _, h_test, fechas_t_test) = preparar_fold_data(df, fold, cols_feat)
         except Exception as e:
             log.warning(f"  Fold {fold_num}: error preparando datos — {e}")
@@ -235,8 +240,15 @@ def regenerar_fancharts_banco(banco: str) -> None:
             log.warning(f"  Fold {fold_num}: {e} — omitiendo")
             continue
 
-        # 4c. Predecir
-        preds_test = predecir_fold(modelos, X_test)
+        # 4c. Predecir + denormalizar si es v4
+        # std_y: primero desde manifest (futuras corridas), si no desde y_train
+        std_y_fold = fold_info.get("std_y") or float(y_train_f.std())
+        preds_raw  = predecir_fold(modelos, X_test)
+        if VERSION == "v4" and std_y_fold > 0:
+            preds_test = {tau: arr * std_y_fold for tau, arr in preds_raw.items()}
+            log.info(f"    [DENORM] predicciones × std_y={std_y_fold:,.0f}")
+        else:
+            preds_test = preds_raw
 
         # 4d. Construir filas de pronosticos
         rows_fold: list[dict] = []

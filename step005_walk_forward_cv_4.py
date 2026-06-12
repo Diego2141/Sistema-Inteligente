@@ -2618,6 +2618,7 @@ def evaluar_banco(banco: str):
                 "test_end"   : str(fold["test_end"].date()),
                 "fecha_hoy"  : fecha_hoy,
                 "garch"      : garch_fold,
+                "std_y"      : std_y,
             })
 
         del X_train, y_train, X_val, y_val, X_test, y_test
