@@ -27,7 +27,9 @@ import pandas as pd
 
 VERSION = "v4"   # "v3" → sin normalización de target  |  "v4" → con normalización
 
-if VERSION == "v4":
+if VERSION == "v5":
+    import step005_walk_forward_cv_5 as s5
+elif VERSION == "v4":
     import step005_walk_forward_cv_4 as s5
 else:
     import step005_walk_forward_cv_3 as s5
