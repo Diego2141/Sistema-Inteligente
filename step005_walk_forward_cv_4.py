@@ -152,7 +152,7 @@ S_MAX_FACTOR     = 0.10   # paper recomienda s∈[0.05,0.10] sobre targets estan
 # False → número fijo para todos los cuantiles (TRIALS_FLAT)
 ADAPTIVE_TRIALS  = True
 
-TRIALS_FLAT      = 60        # usado cuando ADAPTIVE_TRIALS = False
+TRIALS_FLAT      = 150       # usado cuando ADAPTIVE_TRIALS = False
 
 TRIALS_POR_TAU   = {         # usado cuando ADAPTIVE_TRIALS = True
     # Llaves = round(tau, 1) para QUANTILES = [0.01, 0.05, 0.50, 0.95, 0.99]
@@ -687,12 +687,12 @@ def _objective_optuna(trial, X_tr, y_tr, X_va, y_va, std_y):
          else trial.suggest_float("s", std_y * S_MIN_FACTOR, std_y * S_MAX_FACTOR, log=True))
     params = {
         "learning_rate"   : trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
-        "max_depth"       : trial.suggest_int("max_depth", 3, 10),
+        "max_depth"       : trial.suggest_int("max_depth", 3, 6),
         "min_child_weight": trial.suggest_int("min_child_weight", 10, 200),
         "colsample_bytree": trial.suggest_float("colsample_bytree", 0.4, 1.0),
         "subsample"       : trial.suggest_float("subsample", 0.5, 1.0),
-        "reg_alpha"       : 0.0 if FIX_REG_ALPHA else trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True),
-        "reg_lambda"      : trial.suggest_float("reg_lambda", 0.1, 5.0) if FIX_REG_LAMBDA else trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
+        "reg_alpha"       : 0.0 if FIX_REG_ALPHA else trial.suggest_float("reg_alpha", 0.01, 1.0, log=True),
+        "reg_lambda"      : trial.suggest_float("reg_lambda", 0.1, 5.0) if FIX_REG_LAMBDA else trial.suggest_float("reg_lambda", 0.01, 1.0, log=True),
         "tree_method"     : "hist",
         "nthread"         : _XGB_NTHREAD,
         "seed"            : 42,
@@ -780,12 +780,12 @@ def _objetivo_optuna_lgbm(trial, X_tr, y_tr, X_va, y_va):
         "objective": "quantile", "alpha": tau, "verbosity": -1, "seed": 42,
         "learning_rate"    : trial.suggest_float("learning_rate",    0.01,  0.3,  log=True),
         "num_leaves"       : trial.suggest_int(  "num_leaves",        15,   255),
-        "max_depth"        : trial.suggest_int(  "max_depth",          3,    10),
+        "max_depth"        : trial.suggest_int(  "max_depth",          3,     6),
         "min_child_samples": trial.suggest_int(  "min_child_samples", 10,   200),
         "subsample"        : trial.suggest_float("subsample",         0.5,   1.0),
         "colsample_bytree" : trial.suggest_float("colsample_bytree",  0.4,  1.0),
-        "reg_alpha"        : 0.0 if FIX_REG_ALPHA else trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True),
-        "reg_lambda"       : trial.suggest_float("reg_lambda", 0.1, 5.0) if FIX_REG_LAMBDA else trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
+        "reg_alpha"        : 0.0 if FIX_REG_ALPHA else trial.suggest_float("reg_alpha", 0.01, 1.0, log=True),
+        "reg_lambda"       : trial.suggest_float("reg_lambda", 0.1, 5.0) if FIX_REG_LAMBDA else trial.suggest_float("reg_lambda", 0.01, 1.0, log=True),
         "subsample_freq"   : 1,
     }
     n_est  = trial.suggest_int("n_estimators", 100, 1000)
@@ -839,12 +839,12 @@ def _objetivo_optuna_xgb_qt_tau(trial, tau, X_tr, y_tr, X_va, y_va, std_y):
          else trial.suggest_float("s", std_y * S_MIN_FACTOR, std_y * S_MAX_FACTOR, log=True))
     params = {
         "learning_rate"   : trial.suggest_float("learning_rate",   0.01,  0.3,  log=True),
-        "max_depth"       : trial.suggest_int(  "max_depth",         3,    10),
+        "max_depth"       : trial.suggest_int(  "max_depth",         3,     6),
         "min_child_weight": trial.suggest_int(  "min_child_weight", 10,   200),
         "colsample_bytree": trial.suggest_float("colsample_bytree",  0.4,  1.0),
         "subsample"       : trial.suggest_float("subsample",         0.5,  1.0),
-        "reg_alpha"       : 0.0 if FIX_REG_ALPHA else trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True),
-        "reg_lambda"      : trial.suggest_float("reg_lambda", 0.1, 5.0) if FIX_REG_LAMBDA else trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
+        "reg_alpha"       : 0.0 if FIX_REG_ALPHA else trial.suggest_float("reg_alpha", 0.01, 1.0, log=True),
+        "reg_lambda"      : trial.suggest_float("reg_lambda", 0.1, 5.0) if FIX_REG_LAMBDA else trial.suggest_float("reg_lambda", 0.01, 1.0, log=True),
         "tree_method"     : "hist",
         "nthread"         : _XGB_NTHREAD,   # limita threads por trial en paralelo
         "seed"            : 42,
