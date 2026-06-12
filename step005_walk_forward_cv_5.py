@@ -706,6 +706,44 @@ def _predecir_prophet(model, fechas: pd.DatetimeIndex) -> np.ndarray:
     return fc["yhat"].values
 
 
+# Alias for interface compatibility
+_predecir_prophet_fechas = _predecir_prophet
+
+
+def _predecir_hmm(model_hmm, sorted_states, y_norm: np.ndarray, vol_norm: np.ndarray):
+    """
+    Predice estados HMM y retorna (estados_reordenados, prob_stress).
+    estados_reordenados: 0=calm, 2=severe stress (re-mapeados por varianza)
+    prob_stress: probabilidad del estado de mayor varianza
+    """
+    if model_hmm is None or sorted_states is None:
+        n = len(y_norm)
+        return np.zeros(n, dtype=int), np.zeros(n)
+    try:
+        X = np.column_stack([y_norm, vol_norm]).astype(float)
+        n = len(X)
+        estados = np.zeros(n, dtype=int)
+        probs   = np.zeros(n)
+        mask    = ~np.isnan(X).any(axis=1)
+        if mask.sum() < 3:
+            return estados, probs
+        X_clean    = X[mask]
+        raw_states = model_hmm.predict(X_clean)
+        raw_probs  = model_hmm.predict_proba(X_clean)
+        n_states   = len(sorted_states)
+        state_map  = {int(sorted_states[i]): i for i in range(n_states)}
+        mapped_states = np.array([state_map.get(int(s), 0) for s in raw_states])
+        stress_orig   = int(sorted_states[-1])
+        stress_probs  = raw_probs[:, stress_orig]
+        estados[mask] = mapped_states
+        probs[mask]   = stress_probs
+        return estados, probs
+    except Exception as e:
+        logger.warning(f"    [HMM] Predicción falló: {e}")
+        n = len(y_norm)
+        return np.zeros(n, dtype=int), np.zeros(n)
+
+
 def _entrenar_hmm_fold(y_norm: np.ndarray, vol_norm: np.ndarray,
                         n_states: int = 3):
     """Ajusta GaussianHMM con n_states estados. Devuelve (model, state_order)
@@ -1299,7 +1337,7 @@ def graficar_metricas_wfcv(df_test_m, banco):
 
     fig, axes = plt.subplots(1, 4, figsize=(18, 4))
     fig.suptitle(
-        f"Walk-forward CV v3 [{modo}] — {banco}  [métricas TEST out-of-sample]\n"
+        f"Walk-forward CV v5 [{modo}] — {banco}  [métricas TEST out-of-sample]\n"
         f"TRAIN {VENTANA_TRAIN_AÑOS}yr{'(min)' if EXPANDING else ''} / "
         f"VAL {VENTANA_VAL_AÑOS}yr (Optuna) / TEST {VENTANA_TEST_AÑOS}yr / "
         f"paso {PASO_AÑOS}yr / purge {PURGE_DIAS_HAB}dh / burn-in {BURN_IN_DIAS_HAB}dh",
@@ -1747,7 +1785,7 @@ def graficar_hiperparametros_wfcv(df_test_m, banco):
                              gridspec_kw={"hspace": 0.55, "wspace": 0.35})
     axes_flat = axes.flatten() if n > 1 else [axes]
     fig.suptitle(
-        f"Estabilidad HP — Walk-forward CV v3 [{' EXPANDING' if EXPANDING else 'ROLLING'}] — {banco}\n"
+        f"Estabilidad HP — Walk-forward CV v5 [{' EXPANDING' if EXPANDING else 'ROLLING'}] — {banco}\n"
         f"TRAIN {VENTANA_TRAIN_AÑOS}yr / VAL {VENTANA_VAL_AÑOS}yr / TEST {VENTANA_TEST_AÑOS}yr  "
         f"({len(folds)} folds)",
         fontweight="bold", fontsize=11,
@@ -2530,7 +2568,7 @@ def _cargar_modelos_step004(banco: str) -> dict | None:
 def evaluar_banco(banco: str):
     modo = "EXPANDING" if EXPANDING else "ROLLING"
     logger.info(f"\n{'='*65}")
-    logger.info(f"BANCO: {banco}  — Walk-Forward CV v3  [{modo}]  [TEST OOS]")
+    logger.info(f"BANCO: {banco}  — Walk-Forward CV v5  [{modo}]  [TEST OOS]")
     logger.info(f"{'='*65}")
     logger.info(
         f"  TRAIN {VENTANA_TRAIN_AÑOS}yr{'(min)' if EXPANDING else ''} | "
@@ -3074,7 +3112,7 @@ def evaluar_banco(banco: str):
         metadata = {
             "banco": banco, "modelo": f"{MODELO_CV}_wfcv_v5",
             "fecha_entrenamiento": pd.Timestamp.today().strftime("%Y-%m-%d"),
-            "version": "v3 — expanding/rolling + TEST OOS",
+            "version": "v5 — expanding/rolling + TEST OOS + Prophet/SADF/HMM",
             "config": {
                 "expanding"          : EXPANDING,
                 "ventana_train_años" : VENTANA_TRAIN_AÑOS,
@@ -3115,6 +3153,13 @@ def evaluar_banco(banco: str):
             "features": cols_feat, "best_params_ultimo_fold": params_ultimo,
             "folds_manifest": folds_manifest,
             "guardar_todos_folds": GUARDAR_MODELOS_TODOS_FOLDS,
+            "v5_config": {
+                "usar_prophet"            : USAR_PROPHET,
+                "usar_sadf"               : USAR_SADF,
+                "usar_hmm"                : USAR_HMM,
+                "prophet_changepoints"    : PROPHET_CHANGEPOINTS,
+                "prophet_changepoint_prior": PROPHET_CHANGEPOINT_PRIOR,
+            },
         }
         ruta_meta = DIR_MODELOS / f"metadata_{MODELO_CV}_wfcv_v5_{banco}_{fecha_hoy}.json"
         with open(ruta_meta, "w", encoding="utf-8") as fh:
@@ -3150,7 +3195,7 @@ def evaluar_banco(banco: str):
 def main():
     modo = "EXPANDING" if EXPANDING else "ROLLING"
     logger.info("=" * 65)
-    logger.info(f"STEP005 v3 — Walk-Forward CV [{modo}] + TEST OOS  [{MODELO_CV.upper()}]")
+    logger.info(f"STEP005 v5 — Walk-Forward CV [{modo}] + TEST OOS  [{MODELO_CV.upper()}]")
     logger.info("=" * 65)
     logger.info(f"  EXPANDING={EXPANDING}  TRAIN_min={VENTANA_TRAIN_AÑOS}yr  "
                 f"VAL={VENTANA_VAL_AÑOS}yr  TEST={VENTANA_TEST_AÑOS}yr  "
