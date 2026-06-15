@@ -53,11 +53,12 @@ VENTANAS     = [60, 120, 252]
 LAGS         = 1
 
 # HMM params
-N_ESTADOS        = 3
-HMM_INICIO       = "2010-01-01"   # usar toda la historia disponible
-HMM_MIN_AÑOS     = 2              # mínimo de historia antes de etiquetar (expanding)
-                                  # → primeros labels desde 2012 (entrenado en 2010-2011)
-HMM_ROLLING_AÑOS = 6              # tamaño ventana rolling fija (en años)
+N_ESTADOS           = 3
+HMM_INICIO          = "2010-01-01"
+HMM_PRIMER_VENTANA  = 6    # años del primer bloque de entrenamiento (= primer fold train)
+                            # → modelo 1: 2010-2015 (in-sample) + etiqueta 2016
+                            # → modelo 2: 2010-2016 → etiqueta 2017  (expanding)
+HMM_ROLLING_AÑOS    = 6    # tamaño ventana rolling fija (en años, para comparar)
 
 # Episodios de stress conocidos
 EPISODIOS = [
@@ -254,54 +255,69 @@ def hmm_rolling(df: pd.DataFrame, inicio: str,
 
 
 def hmm_expanding(df: pd.DataFrame, inicio: str,
-                  min_años: int = 2) -> tuple:
+                  primer_ventana: int = 6) -> tuple:
     """
-    VERSION SIN LEAKAGE — expanding window por año con mínimo de historia.
+    VERSION SIN LEAKAGE — igual que GARCH:
 
-    Para etiquetar el año Y:
-      - Requiere al menos `min_años` de historia previa
-      - Entrena HMM en datos desde `inicio` hasta fin del año Y-1
-      - Predice estados del año Y con ese modelo
+      Paso 1 — Primer bloque (in-sample):
+        Entrena en [inicio, inicio + primer_ventana - 1]
+        Etiqueta ESE mismo periodo (como GARCH da valores fitted en train)
 
-    Con min_años=2 e inicio=2010:
-      - Primer entrenamiento: 2010-2011 (2 años) → etiqueta 2012
-      - 2do entrenamiento:    2010-2012 (3 años) → etiqueta 2013
-      - ...y así sucesivamente (historia siempre crece)
+      Paso 2 — Expanding año a año:
+        Para etiquetar año Y (Y > inicio + primer_ventana - 1):
+          Entrena en [inicio, Y-1] → etiqueta año Y
+
+    Con primer_ventana=6 e inicio=2010:
+      - Modelo 1: entrena 2010-2015 → etiqueta 2010-2015 (in-sample) + 2016
+      - Modelo 2: entrena 2010-2016 → etiqueta 2017
+      - ...
+      → SIN huecos: toda la historia desde 2010 tiene etiqueta
     """
-    df_base       = df[df.index >= inicio][["target", "garch_vol"]].dropna()
-    año_inicio    = df_base.index.year.min()
-    años          = sorted(df_base.index.year.unique())
+    df_base    = df[df.index >= inicio][["target", "garch_vol"]].dropna()
+    año_inicio = df_base.index.year.min()
+    año_fin_prim = año_inicio + primer_ventana - 1
+    años       = sorted(df_base.index.year.unique())
     todos_idx     = []
     todos_estados = []
 
-    print(f"\n  [EXPANDING] HMM año a año | inicio={inicio} | min_años={min_años}")
-    print(f"  Primeras etiquetas desde {año_inicio + min_años} "
-          f"(entrenado en {año_inicio}-{año_inicio + min_años - 1})")
+    print(f"\n  [EXPANDING] HMM | inicio={inicio} | primer_ventana={primer_ventana}a")
+    print(f"  Modelo 1: entrena {año_inicio}-{año_fin_prim} → etiqueta {año_inicio}-{año_fin_prim} "
+          f"(in-sample) + {año_fin_prim + 1}")
+    print(f"  Modelo 2+: expanding año a año desde {año_fin_prim + 1}")
 
+    # ── Paso 1: primer bloque in-sample ───────────────────────────────────────
+    df_prim = df_base[df_base.index.year <= año_fin_prim]
+    if not df_prim.empty:
+        try:
+            modelo, scaler, sorted_states = _fit_hmm_single(df_prim.values)
+            estados_prim = _predecir_estados(modelo, scaler, sorted_states, df_prim.values)
+            todos_idx.extend(df_prim.index.tolist())
+            todos_estados.extend(estados_prim.tolist())
+            pct_sev = (estados_prim == 2).mean() * 100
+            print(f"    {año_inicio}-{año_fin_prim}: in-sample ({len(df_prim):,} obs) → "
+                  f"severo={pct_sev:.0f}%")
+        except Exception as e:
+            print(f"    Paso 1 falló — {e}")
+
+    # ── Paso 2: expanding desde año_fin_prim + 1 ──────────────────────────────
     for año in años:
-        años_historia = año - año_inicio
-        if años_historia < min_años:
-            print(f"    {año}: historia insuficiente ({años_historia} años < {min_años}) — omitiendo")
+        if año <= año_fin_prim:
             continue
-
         X_train = df_base[df_base.index.year < año].values
+        df_año  = df_base[df_base.index.year == año]
+        if df_año.empty or len(X_train) < 50:
+            continue
         try:
             modelo, scaler, sorted_states = _fit_hmm_single(X_train)
+            estados_año = _predecir_estados(modelo, scaler, sorted_states, df_año.values)
+            todos_idx.extend(df_año.index.tolist())
+            todos_estados.extend(estados_año.tolist())
+            pct_sev = (estados_año == 2).mean() * 100
+            años_train = año - año_inicio
+            print(f"    {año}: entrenado en {len(X_train):,} obs ({años_train}a) → "
+                  f"severo={pct_sev:.0f}%")
         except Exception as e:
             print(f"    {año}: HMM falló — {e}")
-            continue
-
-        df_año = df_base[df_base.index.year == año]
-        if df_año.empty:
-            continue
-
-        estados_año = _predecir_estados(modelo, scaler, sorted_states,
-                                        df_año.values)
-        todos_idx.extend(df_año.index.tolist())
-        todos_estados.extend(estados_año.tolist())
-        pct_severo = (np.array(estados_año) == 2).mean() * 100
-        print(f"    {año}: entrenado en {len(X_train):,} obs ({años_historia} años) → "
-              f"severo={pct_severo:.0f}%")
 
     return pd.DatetimeIndex(todos_idx), np.array(todos_estados)
 
@@ -352,7 +368,7 @@ def graficar(df: pd.DataFrame, sadf_dict: dict,
     fig.suptitle(
         f"Validación SADF y HMM — {BANCO}\n"
         f"SADF: tau_min={TAU_MIN} dh | ventanas {ventanas_str}  |  "
-        f"HMM: {N_ESTADOS} estados | expanding (mín {HMM_MIN_AÑOS}a) vs rolling ({HMM_ROLLING_AÑOS}a)",
+        f"HMM: {N_ESTADOS} estados | expanding (mín {HMM_PRIMER_VENTANA}a) vs rolling ({HMM_ROLLING_AÑOS}a)",
         fontsize=12, fontweight="bold"
     )
 
@@ -457,7 +473,7 @@ def reportar_estadisticas(df, sadf_dict, hmm_completo=None,
 
     variantes = [
         ("MUESTRA COMPLETA (leakage)    ", hmm_completo),
-        (f"EXPANDING  mín {HMM_MIN_AÑOS}a (sin leak)", hmm_expanding_),
+        (f"EXPANDING  mín {HMM_PRIMER_VENTANA}a (sin leak)", hmm_expanding_),
         (f"ROLLING    {HMM_ROLLING_AÑOS}a  (sin leak) ", hmm_rolling_),
     ]
     for tag, hmm_res in variantes:
@@ -487,12 +503,12 @@ def precomputar_hmm_features(df: pd.DataFrame) -> pd.Series:
     calcula hmm_estado[t] una sola vez con expanding window y lo devuelve
     como Serie indexada por fecha — lista para añadir al parquet.
 
-    Para cada año Y desde (HMM_INICIO + HMM_MIN_AÑOS):
+    Para cada año Y desde (HMM_INICIO + HMM_PRIMER_VENTANA):
         hmm_estado[Y] = Viterbi( HMM entrenado en [HMM_INICIO, Y-1] )
 
-    Años anteriores a (HMM_INICIO + HMM_MIN_AÑOS) → NaN (burn-in).
+    Años anteriores a (HMM_INICIO + HMM_PRIMER_VENTANA) → NaN (burn-in).
     """
-    idx, estados = hmm_expanding(df, HMM_INICIO, min_años=HMM_MIN_AÑOS)
+    idx, estados = hmm_expanding(df, HMM_INICIO, primer_ventana=HMM_PRIMER_VENTANA)
     return pd.Series(estados, index=idx, name="hmm_estado", dtype="Int8")
 
 
@@ -528,7 +544,7 @@ def mostrar_como_feature(df: pd.DataFrame, hmm_serie: pd.Series,
             fechas_muestra.append(rng[-1])
 
     # Añadir algunas fechas de calma para contraste
-    año_calma = str(df_base_year(HMM_INICIO) + HMM_MIN_AÑOS + 1)
+    año_calma = str(df_base_year(HMM_INICIO) + HMM_PRIMER_VENTANA + 1)
     rng_calma = comp.loc[año_calma:año_calma].index
     if len(rng_calma) >= 2:
         fechas_muestra = rng_calma[:2].tolist() + fechas_muestra

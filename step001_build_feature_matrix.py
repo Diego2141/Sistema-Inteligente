@@ -986,57 +986,77 @@ def _find_min_d(
     return round(max_d, 4)
 
 
-def _calcular_hmm_expanding(flujo: pd.Series, garch_vol: pd.Series) -> pd.Series:
+def _calcular_hmm_expanding(flujo: pd.Series, garch_vol: pd.Series,
+                            primer_ventana_años: int = 6) -> pd.Series:
     """
     Pre-computa hmm_estado[t] para todo t con expanding window, sin leakage.
 
-    Para etiquetar el año Y:
-      - Entrena HMM en [HMM_INICIO, fin de Y-1]  (historia completa hasta ayer)
-      - Requiere al menos HMM_MIN_AÑOS de historia
-      - Predice estados de todos los días del año Y con ese modelo
+    Alineado con la estructura walk-forward (igual que GARCH):
+      1. Primer modelo: entrena en [HMM_INICIO, HMM_INICIO + primer_ventana_años - 1]
+         → etiqueta ESE mismo periodo (in-sample, como GARCH) + el siguiente año
+      2. Años siguientes: expanding, entrena en [HMM_INICIO, Y-1] → etiqueta Y
+
+    Con primer_ventana_años=6 e HMM_INICIO=2010:
+      - Modelo 1: 2010-2015 → etiqueta 2010-2015 (in-sample) + 2016
+      - Modelo 2: 2010-2016 → etiqueta 2017
+      - Modelo 3: 2010-2017 → etiqueta 2018
+      - ...
 
     Estados ordenados por det(Σ_i) ascendente: 0=calma, 1=moderado, 2=severo.
-    Devuelve pd.Series de Int8 con NaN en años de burn-in o si HMM falla.
+    Devuelve pd.Series de Int8 sin NaN (toda la historia desde HMM_INICIO etiquetada).
     """
     if not _HMM_DISPONIBLE:
         return pd.Series(pd.NA, index=flujo.index, dtype="Int8", name="hmm_estado")
 
-    # Alinear flujo y garch_vol en un DataFrame limpio
     df_base = pd.concat([flujo.rename("flujo"), garch_vol.rename("garch_vol")],
                         axis=1).dropna()
     df_base = df_base[df_base.index >= HMM_INICIO]
     if df_base.empty:
         return pd.Series(pd.NA, index=flujo.index, dtype="Int8", name="hmm_estado")
 
-    año_inicio = df_base.index.year.min()
-    años       = sorted(df_base.index.year.unique())
-    resultado  = pd.Series(pd.NA, index=df_base.index, dtype="Int8", name="hmm_estado")
+    año_inicio    = df_base.index.year.min()
+    año_fin_prim  = año_inicio + primer_ventana_años - 1   # último año del primer bloque
+    años          = sorted(df_base.index.year.unique())
+    resultado     = pd.Series(pd.NA, index=df_base.index, dtype="Int8", name="hmm_estado")
 
-    for año in años:
-        años_historia = año - año_inicio
-        if años_historia < HMM_MIN_AÑOS:
-            continue
+    def _fit_and_label(X_train, df_target):
+        """Ajusta HMM en X_train y predice estados para df_target."""
+        scaler = _StandardScaler()
+        Xs     = scaler.fit_transform(X_train)
+        modelo = _hmmlearn.GaussianHMM(
+            n_components=HMM_N_ESTADOS, covariance_type="full",
+            n_iter=1000, random_state=42,
+        )
+        modelo.fit(Xs)
+        varianzas     = [np.linalg.det(modelo.covars_[s]) for s in range(HMM_N_ESTADOS)]
+        sorted_states = np.argsort(varianzas)
+        mapa          = {sorted_states[i]: i for i in range(HMM_N_ESTADOS)}
+        Xs_target     = scaler.transform(df_target.values)
+        estados_raw   = modelo.predict(Xs_target)
+        return np.array([mapa[e] for e in estados_raw], dtype="int8")
 
-        X_train = df_base[df_base.index.year < año].values
+    # ── Paso 1: primer bloque (in-sample, alineado con primer fold de train) ──
+    df_prim = df_base[df_base.index.year <= año_fin_prim]
+    if len(df_prim) >= 50:
         try:
-            scaler = _StandardScaler()
-            Xs     = scaler.fit_transform(X_train)
-            modelo = _hmmlearn.GaussianHMM(
-                n_components=HMM_N_ESTADOS, covariance_type="full",
-                n_iter=1000, random_state=42,
-            )
-            modelo.fit(Xs)
-            varianzas     = [np.linalg.det(modelo.covars_[s]) for s in range(HMM_N_ESTADOS)]
-            sorted_states = np.argsort(varianzas)   # 0=calma, 2=severo
-            mapa          = {sorted_states[i]: i for i in range(HMM_N_ESTADOS)}
-
-            df_año     = df_base[df_base.index.year == año]
-            Xs_año     = scaler.transform(df_año.values)
-            estados_raw = modelo.predict(Xs_año)
-            estados_map = np.array([mapa[e] for e in estados_raw], dtype="int8")
-            resultado.loc[df_año.index] = pd.array(estados_map, dtype="Int8")
+            estados_prim = _fit_and_label(df_prim.values, df_prim)
+            resultado.loc[df_prim.index] = pd.array(estados_prim, dtype="Int8")
         except Exception:
-            continue   # año sin etiquetar si HMM falla
+            pass
+
+    # ── Paso 2: expanding año a año desde año_fin_prim + 1 ───────────────────
+    for año in años:
+        if año <= año_fin_prim:
+            continue
+        X_train = df_base[df_base.index.year < año].values
+        df_año  = df_base[df_base.index.year == año]
+        if df_año.empty or len(X_train) < 50:
+            continue
+        try:
+            estados_año = _fit_and_label(X_train, df_año)
+            resultado.loc[df_año.index] = pd.array(estados_año, dtype="Int8")
+        except Exception:
+            continue
 
     return resultado
 
@@ -1711,7 +1731,8 @@ def build_full_matrix(
                 f"{NOMBRE_SISTEMA}_R" in df_bancarios.columns:
             flujo_sis = (df_bancarios[f"{NOMBRE_SISTEMA}_D"]
                          - df_bancarios[f"{NOMBRE_SISTEMA}_R"])
-            hmm_sistema = _calcular_hmm_expanding(flujo_sis, bf_sis["garch_vol"])
+            hmm_sistema = _calcular_hmm_expanding(flujo_sis, bf_sis["garch_vol"],
+                                              primer_ventana_años=6)
             n_etiq = hmm_sistema.notna().sum()
             logger.info(f"    SISTEMA: hmm_estado calculado — {n_etiq:,} días etiquetados")
         else:
