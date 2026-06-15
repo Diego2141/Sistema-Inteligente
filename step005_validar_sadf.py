@@ -365,10 +365,12 @@ def graficar(df: pd.DataFrame, sadf_dict: dict,
     axes = list(axes)
 
     ventanas_str = ", ".join(f"{v}d" for v in VENTANAS)
+    año_ini      = df_base_year(HMM_INICIO)
+    año_fin_prim = año_ini + HMM_PRIMER_VENTANA - 1
     fig.suptitle(
         f"Validación SADF y HMM — {BANCO}\n"
         f"SADF: tau_min={TAU_MIN} dh | ventanas {ventanas_str}  |  "
-        f"HMM: {N_ESTADOS} estados | expanding (mín {HMM_PRIMER_VENTANA}a) vs rolling ({HMM_ROLLING_AÑOS}a)",
+        f"HMM: {N_ESTADOS} estados | expanding (como GARCH) vs rolling ({HMM_ROLLING_AÑOS}a)",
         fontsize=12, fontweight="bold"
     )
 
@@ -421,8 +423,9 @@ def graficar(df: pd.DataFrame, sadf_dict: dict,
         vol_e = df.loc[df.index.isin(idx_e), "garch_vol"]
         _pintar_regimen(ax4, idx_e, est_e, vol_e.index, vol_e.values)
         ax4.set_title(
-            f"OPCIÓN A — pre-computado en step001 (expanding, SIN leakage): "
-            f"hmm_estado[Y] = Viterbi( HMM entrenado en [2010, Y-1] )",
+            f"OPCIÓN A — como GARCH (SIN leakage):  "
+            f"{año_ini}–{año_fin_prim} in-sample  |  "
+            f"{año_fin_prim+1}+ expanding: hmm_estado[Y] = Viterbi( HMM[{año_ini}, Y-1] )",
             fontsize=9, color="#1B5E20"
         )
 
@@ -503,10 +506,13 @@ def precomputar_hmm_features(df: pd.DataFrame) -> pd.Series:
     calcula hmm_estado[t] una sola vez con expanding window y lo devuelve
     como Serie indexada por fecha — lista para añadir al parquet.
 
-    Para cada año Y desde (HMM_INICIO + HMM_PRIMER_VENTANA):
-        hmm_estado[Y] = Viterbi( HMM entrenado en [HMM_INICIO, Y-1] )
+    Paso 1 — Bloque inicial in-sample (como GARCH):
+        Entrena en [HMM_INICIO, HMM_INICIO+HMM_PRIMER_VENTANA-1]
+        → etiqueta ESE mismo periodo con Viterbi (sin hueco al inicio)
 
-    Años anteriores a (HMM_INICIO + HMM_PRIMER_VENTANA) → NaN (burn-in).
+    Paso 2 — Expanding año a año:
+        Para año Y > HMM_INICIO+HMM_PRIMER_VENTANA-1:
+        hmm_estado[Y] = Viterbi( HMM entrenado en [HMM_INICIO, Y-1] )
     """
     idx, estados = hmm_expanding(df, HMM_INICIO, primer_ventana=HMM_PRIMER_VENTANA)
     return pd.Series(estados, index=idx, name="hmm_estado", dtype="Int8")
