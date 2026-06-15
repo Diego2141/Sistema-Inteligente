@@ -1701,27 +1701,21 @@ def build_full_matrix(
         else:
             bank_features_dict[banco] = pd.DataFrame()
 
-    # Pre-computar HMM expanding por banco (una sola vez, sin leakage)
-    hmm_dict = {}
+    # Pre-computar HMM expanding SOLO para SISTEMA (régimen sistémico, no por banco)
+    # El mismo hmm_estado se aplica a todos los bancos individuales.
+    hmm_sistema = pd.Series(dtype="Int8")
     if _HMM_DISPONIBLE:
-        logger.info("  Pre-computando HMM expanding por banco...")
-        for banco in lista_bancos_full:
-            bf = bank_features_dict.get(banco, pd.DataFrame())
-            if bf.empty or "garch_vol" not in bf.columns:
-                hmm_dict[banco] = pd.Series(dtype="Int8")
-                continue
-            if not df_bancarios.empty and f"{banco}_R" in df_bancarios.columns:
-                flujo = (df_bancarios[f"{banco}_D"] - df_bancarios[f"{banco}_R"])
-            else:
-                hmm_dict[banco] = pd.Series(dtype="Int8")
-                continue
-            garch = bf["garch_vol"]
-            hmm_dict[banco] = _calcular_hmm_expanding(flujo, garch)
-            n_etiq = hmm_dict[banco].notna().sum()
-            logger.info(f"    {banco}: hmm_estado calculado — {n_etiq:,} días etiquetados")
-    else:
-        for banco in lista_bancos_full:
-            hmm_dict[banco] = pd.Series(dtype="Int8")
+        logger.info("  Pre-computando HMM expanding sobre SISTEMA...")
+        bf_sis = bank_features_dict.get(NOMBRE_SISTEMA, pd.DataFrame())
+        if not bf_sis.empty and "garch_vol" in bf_sis.columns and \
+                f"{NOMBRE_SISTEMA}_R" in df_bancarios.columns:
+            flujo_sis = (df_bancarios[f"{NOMBRE_SISTEMA}_D"]
+                         - df_bancarios[f"{NOMBRE_SISTEMA}_R"])
+            hmm_sistema = _calcular_hmm_expanding(flujo_sis, bf_sis["garch_vol"])
+            n_etiq = hmm_sistema.notna().sum()
+            logger.info(f"    SISTEMA: hmm_estado calculado — {n_etiq:,} días etiquetados")
+        else:
+            logger.warning("  HMM: no se pudo calcular hmm_estado para SISTEMA (datos insuficientes)")
 
     # Escribir banco por banco al Parquet de salida — peak RAM = 1 banco a la vez
     pq_writer   = None
@@ -1739,7 +1733,7 @@ def build_full_matrix(
             fechas_elecciones=fechas_elecciones,
             h_min=params["h_min"],
             h_max=params["h_max"],
-            hmm_features=hmm_dict.get(banco),
+            hmm_features=hmm_sistema,   # mismo régimen sistémico para todos los bancos
         )
         if df_banco_mat.empty:
             continue
