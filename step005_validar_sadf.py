@@ -563,18 +563,23 @@ def hmm_evolucion(df: pd.DataFrame, primer_ventana: int = HMM_PRIMER_VENTANA) ->
 
 def graficar_evolucion(df: pd.DataFrame, evol: dict) -> None:
     """
-    Un panel por año: muestra cómo el HMM re-etiqueta toda la historia
-    a medida que se añade cada año de datos nuevos.
+    Fila 0: flujo neto diario (referencia visual).
+    Filas 1..N: un panel por año — re-etiqueta toda la historia con el
+    modelo entrenado hasta ese año.
     """
-    años   = sorted(evol.keys())
-    n      = len(años)
+    años = sorted(evol.keys())
+    n    = len(años)
     if n == 0:
         return
 
-    fig, axes = plt.subplots(n, 1, figsize=(19, 2.5 * n),
-                             sharex=True, gridspec_kw={"hspace": 0.05})
-    if n == 1:
-        axes = [axes]
+    n_rows   = 1 + n
+    h_ratios = [2.0] + [1.0] * n
+
+    fig, axes = plt.subplots(
+        n_rows, 1, figsize=(19, 2.0 + 2.5 * n),
+        sharex=True,
+        gridspec_kw={"height_ratios": h_ratios, "hspace": 0.05}
+    )
 
     fig.suptitle(
         f"Evolución del HMM — {BANCO}  |  {N_ESTADOS} estados\n"
@@ -584,25 +589,45 @@ def graficar_evolucion(df: pd.DataFrame, evol: dict) -> None:
 
     colores_hmm = {0: "#4CAF50", 1: "#FFC107", 2: "#F44336"}
 
-    for ax, año in zip(axes, años):
-        idx_a, est_a = evol[año]
-        vol_a = df.loc[df.index.isin(idx_a), "garch_vol"]
+    # ── Panel 0: flujo neto diario ────────────────────────────────────────────
+    ax_flujo  = axes[0]
+    flujo     = df["target"].values
+    fechas    = df.index
+    colores_f = np.where(flujo >= 0, "#2196F3", "#F44336")
+    ax_flujo.bar(fechas, flujo, color=colores_f, alpha=0.65, width=1.2)
+    ax_flujo.axhline(0, color="k", lw=0.7, ls="--")
+    ax_flujo.set_ylabel("Flujo neto", fontsize=9)
+    ax_flujo.yaxis.set_major_formatter(
+        mticker.FuncFormatter(lambda x, _: f"{x/1e9:.1f}B"))
+    ax_flujo.set_title("Flujo neto diario (azul=entradas, rojo=salidas netas)", fontsize=9)
+    for ini, fin, etiqueta in EPISODIOS:
+        ax_flujo.axvspan(pd.Timestamp(ini), pd.Timestamp(fin),
+                         alpha=0.10, color="navy", zorder=0)
+        mid  = pd.Timestamp(ini) + (pd.Timestamp(fin) - pd.Timestamp(ini)) / 2
+        ymax = ax_flujo.get_ylim()[1]
+        ax_flujo.text(mid, ymax * 0.88, etiqueta, ha="center", fontsize=8,
+                      color="#1A237E",
+                      bbox=dict(boxstyle="round,pad=0.2", fc="lavender", alpha=0.8))
 
-        # Fondo por régimen
+    # ── Paneles HMM por año ───────────────────────────────────────────────────
+    for i, año in enumerate(años):
+        ax           = axes[1 + i]
+        idx_a, est_a = evol[año]
+        vol_a        = df.loc[df.index.isin(idx_a), "garch_vol"]
+
         for estado, color in colores_hmm.items():
             fechas_e = idx_a[est_a == estado]
             for f in fechas_e:
                 ax.axvspan(f, f + pd.offsets.BusinessDay(1),
                            alpha=0.55, color=color, linewidth=0)
 
-        # garch_vol normalizada encima
         vol_n = (vol_a.values - np.nanmean(vol_a.values)) / (np.nanstd(vol_a.values) + 1e-12)
         ax.plot(vol_a.index, vol_n, color="k", lw=0.5, alpha=0.5)
 
-        # Episodios de stress
-        for ini, fin, etiqueta in EPISODIOS:
+        for ini, fin, _ in EPISODIOS:
             if pd.Timestamp(ini) <= idx_a.max():
-                ax.axvspan(pd.Timestamp(ini), min(pd.Timestamp(fin), idx_a.max()),
+                ax.axvspan(pd.Timestamp(ini),
+                           min(pd.Timestamp(fin), idx_a.max()),
                            alpha=0.12, color="navy", zorder=0)
 
         pct_sev = (est_a == 2).mean() * 100
@@ -611,11 +636,10 @@ def graficar_evolucion(df: pd.DataFrame, evol: dict) -> None:
                      f"severo={pct_sev:.0f}%", fontsize=8, loc="left", pad=2)
         ax.set_yticks([])
 
-        # Leyenda solo en primer panel
-        if ax is axes[0]:
+        if i == 0:
             parches = [mpatches.Patch(color=c, label=l)
-                       for c, l in zip(["#4CAF50","#FFC107","#F44336"],
-                                       ["Calma","Moderado","Severo"])]
+                       for c, l in zip(["#4CAF50", "#FFC107", "#F44336"],
+                                       ["Calma", "Moderado", "Severo"])]
             ax.legend(handles=parches, fontsize=7, loc="upper left", ncol=3)
 
     plt.tight_layout()
