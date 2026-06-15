@@ -127,83 +127,172 @@ def cargar_datos(ruta: Path, banco: str, h_ref: int) -> pd.DataFrame:
 
 
 # ── HMM ───────────────────────────────────────────────────────────────────────
+#
+# Modelo: Gaussian HMM de K=3 estados ocultos S_t ∈ {0,1,2}
+#
+# Componentes:
+#   π_i   = P(S_1 = i)                         distribución inicial
+#   a_ij  = P(S_t = j | S_{t-1} = i)           matriz de transición A (3×3)
+#   b_i(x)= N(x | μ_i, Σ_i)                   emisión Gaussiana por estado
+#
+# Observación: X_t = [flujo_neto_norm, garch_vol_norm]  (vector 2D)
+#
+# Entrenamiento (Baum-Welch / EM):
+#   Maximiza  P(X_1,...,X_T | π, A, {μ_i,Σ_i})  iterando:
+#     E-step: calcular γ_t(i) = P(S_t=i | X_{1:T})  con forward-backward
+#     M-step: actualizar π, A, μ_i, Σ_i usando γ_t(i)
+#
+# Predicción de estados (Viterbi):
+#   S*_{1:T} = argmax P(S_{1:T} | X_{1:T}, π, A, {μ_i,Σ_i})
+#   Algoritmo de programación dinámica O(K²·T)
+#
+# Ordenamiento post-entrenamiento:
+#   Estados reordenados por det(Σ_i) ascendente → 0=calma, 2=severo
 
-def entrenar_hmm(df: pd.DataFrame, inicio: str) -> tuple:
-    """
-    Entrena HMM de 3 estados sobre [flujo_norm, vol_norm] desde `inicio`.
-    Devuelve (modelo, estados_toda_serie, sorted_states).
-    sorted_states[0] = calma, sorted_states[2] = stress severo.
-    """
+
+def _fit_hmm_single(X_train: np.ndarray) -> tuple:
+    """Ajusta un HMM y devuelve (modelo, scaler, sorted_states)."""
     from sklearn.preprocessing import StandardScaler
-
-    df_train = df[df.index >= inicio].copy()
-    df_train = df_train[["target", "garch_vol"]].dropna()
-
     scaler = StandardScaler()
-    X_train = scaler.fit_transform(df_train.values)
-
+    Xs = scaler.fit_transform(X_train)
     modelo = hmmlearn_hmm.GaussianHMM(
-        n_components=N_ESTADOS,
-        covariance_type="full",
-        n_iter=1000,
-        random_state=42,
+        n_components=N_ESTADOS, covariance_type="full",
+        n_iter=1000, random_state=42,
     )
-    modelo.fit(X_train)
+    modelo.fit(Xs)
+    varianzas     = [np.linalg.det(modelo.covars_[s]) for s in range(N_ESTADOS)]
+    sorted_states = np.argsort(varianzas)   # 0=calma, 2=severo
+    return modelo, scaler, sorted_states
 
-    # Ordenar estados por varianza ascendente: 0=calma, 2=stress severo
-    varianzas   = [np.linalg.det(modelo.covars_[s]) for s in range(N_ESTADOS)]
-    sorted_states = np.argsort(varianzas)   # índices de menor a mayor varianza
 
-    # Predecir sobre toda la serie disponible (no solo desde inicio)
-    df_full  = df[["target", "garch_vol"]].dropna()
-    X_full   = scaler.transform(df_full.values)
-    estados_raw = modelo.predict(X_full)
+def _predecir_estados(modelo, scaler, sorted_states, X: np.ndarray) -> np.ndarray:
+    """Predice estados reordenados (0=calma, 2=severo) para X."""
+    Xs          = scaler.transform(X)
+    estados_raw = modelo.predict(Xs)
+    mapa        = {sorted_states[i]: i for i in range(N_ESTADOS)}
+    return np.array([mapa[e] for e in estados_raw])
 
-    # Reasignar etiquetas: 0=calma, 1=moderado, 2=severo
-    mapa = {sorted_states[i]: i for i in range(N_ESTADOS)}
-    estados = np.array([mapa[e] for e in estados_raw])
 
-    # Estadísticas de la matriz de transición
+def hmm_muestra_completa(df: pd.DataFrame, inicio: str) -> tuple:
+    """
+    VERSION CON LEAKAGE — entrena en 2016→hoy y etiqueta toda la serie.
+    Solo para comparación visual.
+    """
+    df_base = df[df.index >= inicio][["target", "garch_vol"]].dropna()
+    modelo, scaler, sorted_states = _fit_hmm_single(df_base.values)
+
+    df_full = df[["target", "garch_vol"]].dropna()
+    estados = _predecir_estados(modelo, scaler, sorted_states, df_full.values)
+
     trans = modelo.transmat_
-    print(f"\n  Matriz de transición HMM (estados ordenados por varianza):")
-    labels_orden = [f"E{sorted_states[i]}" for i in range(N_ESTADOS)]
+    print(f"\n  [MUESTRA COMPLETA] Matriz de transición:")
     for i in range(N_ESTADOS):
-        fila = "  ".join([f"{trans[sorted_states[i], sorted_states[j]]:.2f}"
-                          for j in range(N_ESTADOS)])
-        nombre = ["Calma     ", "Moderado  ", "Severo    "][i]
+        fila   = "  ".join([f"{trans[sorted_states[i], sorted_states[j]]:.2f}"
+                             for j in range(N_ESTADOS)])
+        nombre = ["Calma    ", "Moderado ", "Severo   "][i]
         print(f"    {nombre}: {fila}")
 
-    return modelo, df_full.index, estados, sorted_states
+    return df_full.index, estados
 
 
-# ── Gráfico 3 paneles ─────────────────────────────────────────────────────────
+def hmm_expanding(df: pd.DataFrame, inicio: str) -> tuple:
+    """
+    VERSION SIN LEAKAGE — expanding window por año.
+
+    Para etiquetar el año Y:
+      - Entrena HMM en datos desde `inicio` hasta fin del año Y-1
+      - Predice estados del año Y con ese modelo
+    Garantiza que el HMM nunca usa información futura al clasificar.
+    """
+    df_base  = df[df.index >= inicio][["target", "garch_vol"]].dropna()
+    años     = sorted(df_base.index.year.unique())
+    todos_idx    = []
+    todos_estados = []
+
+    print(f"\n  [EXPANDING] Reentrenando HMM por año ({años[0]}→{años[-1]}):")
+
+    for i, año in enumerate(años):
+        # Necesitamos al menos 1 año completo de historia para entrenar
+        if i == 0:
+            # Primer año: no hay historia previa suficiente → usar solo ese año
+            X_train = df_base[df_base.index.year <= año].values
+        else:
+            X_train = df_base[df_base.index.year < año].values
+
+        if len(X_train) < 60:
+            print(f"    {año}: datos insuficientes ({len(X_train)}) — omitiendo")
+            continue
+
+        try:
+            modelo, scaler, sorted_states = _fit_hmm_single(X_train)
+        except Exception as e:
+            print(f"    {año}: HMM falló — {e}")
+            continue
+
+        # Predecir solo el año actual
+        df_año = df_base[df_base.index.year == año]
+        if df_año.empty:
+            continue
+
+        estados_año = _predecir_estados(modelo, scaler, sorted_states,
+                                        df_año.values)
+        todos_idx.extend(df_año.index.tolist())
+        todos_estados.extend(estados_año.tolist())
+        pct_severo = (np.array(estados_año) == 2).mean() * 100
+        print(f"    {año}: entrenado en {len(X_train):,} obs → "
+              f"severo={pct_severo:.0f}%")
+
+    return pd.DatetimeIndex(todos_idx), np.array(todos_estados)
+
+
+# ── Gráfico 4 paneles ─────────────────────────────────────────────────────────
+
+def _pintar_regimen(ax, idx, estados, vol_ref_idx, vol_ref_vals):
+    """Pinta fondo por régimen HMM y superpone garch_vol normalizada."""
+    colores_hmm = {0: "#4CAF50", 1: "#FFC107", 2: "#F44336"}
+    for estado, color in colores_hmm.items():
+        fechas_e = idx[estados == estado]
+        for f in fechas_e:
+            ax.axvspan(f, f + pd.offsets.BusinessDay(1),
+                       alpha=0.55, color=color, linewidth=0)
+    vol_n = (vol_ref_vals - np.nanmean(vol_ref_vals)) / (np.nanstd(vol_ref_vals) + 1e-12)
+    ax.plot(vol_ref_idx, vol_n, color="k", lw=0.6, alpha=0.55)
+    parches = [
+        mpatches.Patch(color="#4CAF50", label="Calma"),
+        mpatches.Patch(color="#FFC107", label="Moderado"),
+        mpatches.Patch(color="#F44336", label="Severo"),
+    ]
+    ax.legend(handles=parches, fontsize=8, loc="upper left")
+    ax.set_ylabel("Régimen HMM", fontsize=9)
+
 
 def graficar(df: pd.DataFrame, sadf_dict: dict,
-             hmm_result=None) -> None:
+             hmm_completo=None, hmm_expanding_=None) -> None:
 
-    n_panels = 3 if hmm_result is not None else 2
-    h_ratios = [1.8, 1, 1] if n_panels == 3 else [2, 1]
+    tiene_hmm = hmm_completo is not None or hmm_expanding_ is not None
+    n_panels  = 2 + (1 if hmm_completo   is not None else 0) \
+                  + (1 if hmm_expanding_  is not None else 0)
+    h_ratios  = [2.0] + [1.0] * (n_panels - 1)
 
     fig, axes = plt.subplots(
-        n_panels, 1, figsize=(19, 10 if n_panels == 3 else 8),
+        n_panels, 1, figsize=(19, 4 * n_panels),
         sharex=True, gridspec_kw={"height_ratios": h_ratios}
     )
-    if n_panels == 2:
-        axes = list(axes) + [None]
-    ax1, ax2, ax3 = axes
+    axes = list(axes)
 
     fig.suptitle(
-        f"Validación SADF (sobre volatilidad) y HMM — {BANCO}\n"
-        f"SADF: tau_min={TAU_MIN} dh | ventanas {VENTANAS[0]} y {VENTANAS[1]} dh  |  "
-        f"HMM: {N_ESTADOS} estados, entrenado desde {HMM_INICIO}",
+        f"Validación SADF y HMM — {BANCO}\n"
+        f"SADF: tau_min={TAU_MIN} dh | ventanas {VENTANAS[0]}d y {VENTANAS[1]}d  |  "
+        f"HMM: {N_ESTADOS} estados (verde=calma / amarillo=moderado / rojo=severo)",
         fontsize=12, fontweight="bold"
     )
 
+    ax_idx = 0
     fechas = df.index
     flujo  = df["target"].values
-    vol    = df["garch_vol"].values
 
     # ── Panel 1: flujo neto ────────────────────────────────────────────────────
+    ax1 = axes[ax_idx]; ax_idx += 1
     colores = np.where(flujo >= 0, "#2196F3", "#F44336")
     ax1.bar(fechas, flujo, color=colores, alpha=0.65, width=1.2)
     ax1.axhline(0, color="k", lw=0.7, ls="--")
@@ -212,56 +301,50 @@ def graficar(df: pd.DataFrame, sadf_dict: dict,
         mticker.FuncFormatter(lambda x, _: f"{x/1e9:.1f}B"))
     ax1.set_title("Flujo neto diario (azul=entradas, rojo=salidas netas)", fontsize=9)
 
-    # ── Panel 2: SADF sobre volatilidad ───────────────────────────────────────
+    # ── Panel 2: SADF ─────────────────────────────────────────────────────────
+    ax2 = axes[ax_idx]; ax_idx += 1
     colores_s = ["#E91E63", "#FF6F00"]
     for (nombre, svals), color in zip(sadf_dict.items(), colores_s):
         ax2.plot(fechas, svals, lw=1.0, color=color, label=nombre, alpha=0.85)
         p95 = np.nanpercentile(svals, 95)
         p99 = np.nanpercentile(svals, 99)
-        ax2.axhline(p95, color=color, lw=0.9, ls=":",
-                    label=f"{nombre} P95={p95:.2f}")
+        ax2.axhline(p95, color=color, lw=0.9, ls=":", label=f"P95={p95:.2f}")
         ax2.axhline(p99, color=color, lw=0.9, ls="--", alpha=0.6,
-                    label=f"{nombre} P99={p99:.2f}")
-
+                    label=f"P99={p99:.2f}")
     ax2.axhline(0, color="k", lw=0.6, ls="--", alpha=0.4)
     ax2.set_ylabel("SADF (t-stat sup.)", fontsize=9)
-    ax2.set_title(
-        "SADF sobre garch_vol — spikes positivos = volatilidad explosiva", fontsize=9)
+    ax2.set_title("SADF sobre garch_vol — spikes positivos = volatilidad explosiva",
+                  fontsize=9)
     ax2.legend(fontsize=8, loc="upper left", ncol=2)
 
-    # ── Panel 3: HMM regímenes ─────────────────────────────────────────────────
-    if ax3 is not None and hmm_result is not None:
-        idx_hmm, estados = hmm_result
-        colores_hmm = {0: "#4CAF50", 1: "#FFC107", 2: "#F44336"}
-        nombres_hmm = {0: "Calma", 1: "Stress moderado", 2: "Stress severo"}
+    # ── Panel 3: HMM muestra completa (con leakage) ───────────────────────────
+    if hmm_completo is not None:
+        ax3 = axes[ax_idx]; ax_idx += 1
+        idx_c, est_c = hmm_completo
+        vol_c = df.loc[df.index.isin(idx_c), "garch_vol"]
+        _pintar_regimen(ax3, idx_c, est_c, vol_c.index, vol_c.values)
+        ax3.set_title(
+            "HMM muestra completa (CON leakage) — entrenado en 2016→hoy, etiqueta toda la historia",
+            fontsize=9, color="#B71C1C"
+        )
 
-        # Colorear fondo por régimen
-        for estado, color in colores_hmm.items():
-            mask = estados == estado
-            fechas_e = idx_hmm[mask]
-            for f in fechas_e:
-                ax3.axvspan(f, f + pd.offsets.BusinessDay(1),
-                            alpha=0.6, color=color, linewidth=0)
+    # ── Panel 4: HMM expanding (sin leakage) ──────────────────────────────────
+    if hmm_expanding_ is not None:
+        ax4 = axes[ax_idx]; ax_idx += 1
+        idx_e, est_e = hmm_expanding_
+        vol_e = df.loc[df.index.isin(idx_e), "garch_vol"]
+        _pintar_regimen(ax4, idx_e, est_e, vol_e.index, vol_e.values)
+        ax4.set_title(
+            "HMM expanding (SIN leakage) — para etiquetar año Y, entrena solo en años anteriores",
+            fontsize=9, color="#1B5E20"
+        )
 
-        # Superponer garch_vol normalizada para referencia
-        vol_full = df.loc[idx_hmm, "garch_vol"].values
-        vol_norm = (vol_full - np.nanmean(vol_full)) / (np.nanstd(vol_full) + 1e-12)
-        ax3.plot(idx_hmm, vol_norm, color="k", lw=0.7, alpha=0.6,
-                 label="garch_vol (norm.)")
-
-        ax3.set_ylabel("Régimen HMM", fontsize=9)
-        ax3.set_title("Régimen HMM: verde=calma  amarillo=moderado  rojo=severo", fontsize=9)
-
-        parches = [mpatches.Patch(color=c, label=nombres_hmm[e])
-                   for e, c in colores_hmm.items()]
-        ax3.legend(handles=parches, fontsize=8, loc="upper left")
-
-    # ── Bandas de episodios en todos los paneles ───────────────────────────────
+    # ── Bandas de episodios ────────────────────────────────────────────────────
     for ini, fin, etiqueta in EPISODIOS:
-        for ax in [ax1, ax2] + ([ax3] if ax3 else []):
+        for ax in axes:
             ax.axvspan(pd.Timestamp(ini), pd.Timestamp(fin),
                        alpha=0.10, color="navy", zorder=0)
-        mid = pd.Timestamp(ini) + (pd.Timestamp(fin) - pd.Timestamp(ini)) / 2
+        mid  = pd.Timestamp(ini) + (pd.Timestamp(fin) - pd.Timestamp(ini)) / 2
         ymax = ax1.get_ylim()[1]
         ax1.text(mid, ymax * 0.88, etiqueta, ha="center", fontsize=8,
                  color="#1A237E",
@@ -277,7 +360,7 @@ def graficar(df: pd.DataFrame, sadf_dict: dict,
 
 # ── Estadísticas de validación ────────────────────────────────────────────────
 
-def reportar_estadisticas(df, sadf_dict, hmm_result=None):
+def reportar_estadisticas(df, sadf_dict, hmm_completo=None, hmm_expanding_=None):
     print("\n── SADF: % días sobre P95 en episodios de stress ───────────────────")
     for nombre, svals in sadf_dict.items():
         p95 = np.nanpercentile(svals, 95)
@@ -286,7 +369,25 @@ def reportar_estadisticas(df, sadf_dict, hmm_result=None):
             sub = s[(s.index >= ini) & (s.index <= fin)]
             if len(sub) > 0:
                 pct = (sub > p95).mean() * 100
-                print(f"  {nombre:<12} | {etiqueta:<15}: {pct:5.1f}% sobre P95")
+                print(f"  {nombre:<15} | {etiqueta:<15}: {pct:5.1f}% sobre P95")
+
+    for tag, hmm_res in [("MUESTRA COMPLETA (leakage)", hmm_completo),
+                          ("EXPANDING (sin leakage)   ", hmm_expanding_)]:
+        if hmm_res is None:
+            continue
+        idx_h, estados = hmm_res
+        total = len(estados)
+        print(f"\n── HMM {tag}: distribución de estados ──────────────────────")
+        for e, nom in enumerate(["Calma   ", "Moderado", "Severo  "]):
+            n = (estados == e).sum()
+            print(f"  Estado {e} {nom}: {n:,} días ({n/total*100:.1f}%)")
+        print(f"  % días en stress severo (E2) por episodio:")
+        for ini, fin, etiqueta in EPISODIOS:
+            mask = (idx_h >= ini) & (idx_h <= fin)
+            sub  = estados[mask]
+            if len(sub) > 0:
+                pct = (sub == 2).mean() * 100
+                print(f"    {etiqueta:<20}: {pct:5.1f}% en estado severo")
 
     if hmm_result is not None:
         idx_hmm, estados = hmm_result
@@ -324,23 +425,30 @@ def main():
         p99 = np.nanpercentile(sadf_dict[nombre], 99)
         print(f"  P95={p95:.2f} | P99={p99:.2f}")
 
-    # 3. HMM (si hmmlearn disponible)
-    hmm_result = None
+    # 3. HMM — dos versiones
+    hmm_c  = None   # muestra completa (con leakage)
+    hmm_ex = None   # expanding (sin leakage)
+
     if _HMM_OK:
-        print(f"\nEntrenando HMM ({N_ESTADOS} estados, desde {HMM_INICIO})…")
+        print(f"\nEntrenando HMM muestra completa (con leakage)…")
         try:
-            _, idx_hmm, estados, sorted_states = entrenar_hmm(df, HMM_INICIO)
-            hmm_result = (idx_hmm, estados)
-            print("  HMM OK")
+            hmm_c = hmm_muestra_completa(df, HMM_INICIO)
+            print("  OK")
         except Exception as e:
-            print(f"  HMM falló: {e}")
-            hmm_result = None
+            print(f"  Falló: {e}")
+
+        print(f"\nEntrenando HMM expanding (sin leakage, año a año)…")
+        try:
+            hmm_ex = hmm_expanding(df, HMM_INICIO)
+            print("  OK")
+        except Exception as e:
+            print(f"  Falló: {e}")
 
     # 4. Estadísticas
-    reportar_estadisticas(df, sadf_dict, hmm_result)
+    reportar_estadisticas(df, sadf_dict, hmm_c, hmm_ex)
 
-    # 5. Gráfico
-    graficar(df, sadf_dict, hmm_result)
+    # 5. Gráfico (4 paneles si HMM disponible)
+    graficar(df, sadf_dict, hmm_c, hmm_ex)
 
 
 if __name__ == "__main__":
