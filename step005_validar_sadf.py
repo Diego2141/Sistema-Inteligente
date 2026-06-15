@@ -389,22 +389,6 @@ def reportar_estadisticas(df, sadf_dict, hmm_completo=None, hmm_expanding_=None)
                 pct = (sub == 2).mean() * 100
                 print(f"    {etiqueta:<20}: {pct:5.1f}% en estado severo")
 
-    if hmm_result is not None:
-        idx_hmm, estados = hmm_result
-        print("\n── HMM: distribución de días por estado ────────────────────────────")
-        nombres = {0: "Calma    ", 1: "Moderado ", 2: "Severo   "}
-        total   = len(estados)
-        for e in range(N_ESTADOS):
-            n = (estados == e).sum()
-            print(f"  Estado {e} {nombres[e]}: {n:,} días ({n/total*100:.1f}%)")
-
-        print("\n── HMM: % días en stress severo (estado 2) por episodio ────────────")
-        for ini, fin, etiqueta in EPISODIOS:
-            mask = (idx_hmm >= ini) & (idx_hmm <= fin)
-            sub  = estados[mask]
-            if len(sub) > 0:
-                pct = (sub == 2).mean() * 100
-                print(f"  {etiqueta:<20}: {pct:5.1f}% días en estado severo")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
