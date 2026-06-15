@@ -4,10 +4,10 @@ step005_validar_sadf.py
 =======================
 Valida dos detectores de régimen antes de integrarlos en la matriz de features:
 
-  1. SADF sobre sigma_flujo_20d (volatilidad del flujo neto)
+  1. SADF sobre garch_vol (volatilidad del flujo neto)
      — detecta explosividad en la volatilidad (stress auto-reforzado)
 
-  2. HMM de 3 estados sobre [flujo_neto, sigma_flujo_20d]
+  2. HMM de 3 estados sobre [flujo_neto, garch_vol]
      — clasifica el régimen oculto: calma / stress moderado / stress severo
 
 Gráfico de 3 paneles:
@@ -45,9 +45,9 @@ RUTA_MATRIZ  = BASE_SISTEMA / "1. Data" / "Clean" / "matriz_features.parquet"
 DIR_OUTPUT   = BASE_SISTEMA / "2. Output"
 
 BANCO        = "SISTEMA"
-H_REF        = 2          # h mínimo — usamos target y sigma_flujo_20d de este h
+H_REF        = 2          # h mínimo — usamos target y garch_vol de este h
 
-# SADF params (aplicado sobre sigma_flujo_20d)
+# SADF params (aplicado sobre garch_vol)
 TAU_MIN      = 30
 VENTANAS     = [60, 120]
 LAGS         = 1
@@ -104,11 +104,11 @@ def calcular_sadf(values: np.ndarray, tau_min: int = 30,
 
 def cargar_datos(ruta: Path, banco: str, h_ref: int) -> pd.DataFrame:
     """
-    Carga flujo neto (target) y sigma_flujo_20d para un banco y h_ref dados.
+    Carga flujo neto (target) y garch_vol para un banco y h_ref dados.
     Indexa por fecha_flujo = fecha_t + h_ref días hábiles.
     """
     print(f"Cargando matriz: {ruta}")
-    cols = ["fecha_t", "banco", "h", "target", "sigma_flujo_20d"]
+    cols = ["fecha_t", "banco", "h", "target", "garch_vol"]
     df   = pd.read_parquet(
         ruta,
         columns=cols,
@@ -137,7 +137,7 @@ def entrenar_hmm(df: pd.DataFrame, inicio: str) -> tuple:
     from sklearn.preprocessing import StandardScaler
 
     df_train = df[df.index >= inicio].copy()
-    df_train = df_train[["target", "sigma_flujo_20d"]].dropna()
+    df_train = df_train[["target", "garch_vol"]].dropna()
 
     scaler = StandardScaler()
     X_train = scaler.fit_transform(df_train.values)
@@ -155,7 +155,7 @@ def entrenar_hmm(df: pd.DataFrame, inicio: str) -> tuple:
     sorted_states = np.argsort(varianzas)   # índices de menor a mayor varianza
 
     # Predecir sobre toda la serie disponible (no solo desde inicio)
-    df_full  = df[["target", "sigma_flujo_20d"]].dropna()
+    df_full  = df[["target", "garch_vol"]].dropna()
     X_full   = scaler.transform(df_full.values)
     estados_raw = modelo.predict(X_full)
 
@@ -201,7 +201,7 @@ def graficar(df: pd.DataFrame, sadf_dict: dict,
 
     fechas = df.index
     flujo  = df["target"].values
-    vol    = df["sigma_flujo_20d"].values
+    vol    = df["garch_vol"].values
 
     # ── Panel 1: flujo neto ────────────────────────────────────────────────────
     colores = np.where(flujo >= 0, "#2196F3", "#F44336")
@@ -226,7 +226,7 @@ def graficar(df: pd.DataFrame, sadf_dict: dict,
     ax2.axhline(0, color="k", lw=0.6, ls="--", alpha=0.4)
     ax2.set_ylabel("SADF (t-stat sup.)", fontsize=9)
     ax2.set_title(
-        "SADF sobre sigma_flujo_20d — spikes positivos = volatilidad explosiva", fontsize=9)
+        "SADF sobre garch_vol — spikes positivos = volatilidad explosiva", fontsize=9)
     ax2.legend(fontsize=8, loc="upper left", ncol=2)
 
     # ── Panel 3: HMM regímenes ─────────────────────────────────────────────────
@@ -243,11 +243,11 @@ def graficar(df: pd.DataFrame, sadf_dict: dict,
                 ax3.axvspan(f, f + pd.offsets.BusinessDay(1),
                             alpha=0.6, color=color, linewidth=0)
 
-        # Superponer sigma_flujo_20d normalizada para referencia
-        vol_full = df.loc[idx_hmm, "sigma_flujo_20d"].values
+        # Superponer garch_vol normalizada para referencia
+        vol_full = df.loc[idx_hmm, "garch_vol"].values
         vol_norm = (vol_full - np.nanmean(vol_full)) / (np.nanstd(vol_full) + 1e-12)
         ax3.plot(idx_hmm, vol_norm, color="k", lw=0.7, alpha=0.6,
-                 label="sigma_flujo_20d (norm.)")
+                 label="garch_vol (norm.)")
 
         ax3.set_ylabel("Régimen HMM", fontsize=9)
         ax3.set_title("Régimen HMM: verde=calma  amarillo=moderado  rojo=severo", fontsize=9)
@@ -312,8 +312,8 @@ def main():
     # 1. Cargar datos
     df = cargar_datos(RUTA_MATRIZ, BANCO, H_REF)
 
-    # 2. SADF sobre sigma_flujo_20d
-    vol = df["sigma_flujo_20d"].fillna(method="ffill").values
+    # 2. SADF sobre garch_vol
+    vol = df["garch_vol"].fillna(method="ffill").values
     sadf_dict = {}
     for ventana in VENTANAS:
         nombre = f"sadf_vol_{ventana}d"
