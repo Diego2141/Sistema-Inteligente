@@ -99,6 +99,8 @@ FEATURES_EXCLUIR = [
     "EMBI_PERU_frac", "T10Y_frac", "VIX_frac",
     "dias_desde_cierre_mes", "pos_en_mes", "total_bdays_mes",
     "is_quincena", "is_cierre_encaje",
+    # ── SADF: sin señal en episodios de stress (hit rate P95 < 5%) ───────────
+    "sadf_vol_60d", "sadf_vol_120d", "sadf_vol_252d",
     # ── Azul: reemplazadas por transformación sin/cos o ratio ────────────────
     "sigma_flujo_5d", "sigma_flujo_20d",              # → sigma_flujo_ratio
     "tc_vol_5d", "tc_vol_22d",                        # → tc_vol_ratio
