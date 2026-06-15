@@ -49,7 +49,7 @@ H_REF        = 2          # h mínimo — usamos target y garch_vol de este h
 
 # SADF params (aplicado sobre garch_vol)
 TAU_MIN      = 30
-VENTANAS     = [60, 120]
+VENTANAS     = [60, 120, 252]
 LAGS         = 1
 
 # HMM params
@@ -284,9 +284,10 @@ def graficar(df: pd.DataFrame, sadf_dict: dict,
     )
     axes = list(axes)
 
+    ventanas_str = ", ".join(f"{v}d" for v in VENTANAS)
     fig.suptitle(
         f"Validación SADF y HMM — {BANCO}\n"
-        f"SADF: tau_min={TAU_MIN} dh | ventanas {VENTANAS[0]}d y {VENTANAS[1]}d  |  "
+        f"SADF: tau_min={TAU_MIN} dh | ventanas {ventanas_str}  |  "
         f"HMM: {N_ESTADOS} estados | expanding desde {HMM_INICIO} con mín {HMM_MIN_AÑOS} años",
         fontsize=12, fontweight="bold"
     )
@@ -307,7 +308,7 @@ def graficar(df: pd.DataFrame, sadf_dict: dict,
 
     # ── Panel 2: SADF ─────────────────────────────────────────────────────────
     ax2 = axes[ax_idx]; ax_idx += 1
-    colores_s = ["#E91E63", "#FF6F00"]
+    colores_s = ["#E91E63", "#FF6F00", "#7B1FA2"]
     for (nombre, svals), color in zip(sadf_dict.items(), colores_s):
         ax2.plot(fechas, svals, lw=1.0, color=color, label=nombre, alpha=0.85)
         p95 = np.nanpercentile(svals, 95)
