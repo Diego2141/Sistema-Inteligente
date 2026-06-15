@@ -53,14 +53,15 @@ VENTANAS     = [60, 120]
 LAGS         = 1
 
 # HMM params
-N_ESTADOS    = 3
-HMM_INICIO   = "2016-01-01"   # entrenar solo post-cambio estructural
+N_ESTADOS     = 3
+HMM_INICIO    = "2010-01-01"   # usar toda la historia disponible
+HMM_MIN_AÑOS  = 6              # años mínimos de historia antes de empezar a etiquetar
+                               # → primeros labels desde 2016 (entrenado en 2010-2015)
 
-# Episodios de stress conocidos (ajustar fechas según datos reales)
+# Episodios de stress conocidos
 EPISODIOS = [
-    ("2018-09-01", "2018-12-31", "Stress 2018"),
-    ("2020-03-01", "2020-06-30", "COVID"),
-    ("2022-01-01", "2022-06-30", "Estrés 2022"),
+    ("2020-03-01", "2020-12-31", "COVID-19"),
+    ("2021-03-01", "2021-08-31", "Elecciones 2021"),
 ]
 
 # ── SADF (numpy vectorizado) ───────────────────────────────────────────────────
@@ -195,41 +196,44 @@ def hmm_muestra_completa(df: pd.DataFrame, inicio: str) -> tuple:
     return df_full.index, estados
 
 
-def hmm_expanding(df: pd.DataFrame, inicio: str) -> tuple:
+def hmm_expanding(df: pd.DataFrame, inicio: str,
+                  min_años: int = 6) -> tuple:
     """
-    VERSION SIN LEAKAGE — expanding window por año.
+    VERSION SIN LEAKAGE — expanding window por año con mínimo de historia.
 
     Para etiquetar el año Y:
+      - Requiere al menos `min_años` de historia previa
       - Entrena HMM en datos desde `inicio` hasta fin del año Y-1
       - Predice estados del año Y con ese modelo
-    Garantiza que el HMM nunca usa información futura al clasificar.
+
+    Con min_años=6 e inicio=2010:
+      - Primer entrenamiento: 2010-2015 (6 años) → etiqueta 2016
+      - 2do entrenamiento:    2010-2016 (7 años) → etiqueta 2017
+      - ...y así sucesivamente
     """
-    df_base  = df[df.index >= inicio][["target", "garch_vol"]].dropna()
-    años     = sorted(df_base.index.year.unique())
-    todos_idx    = []
+    df_base       = df[df.index >= inicio][["target", "garch_vol"]].dropna()
+    año_inicio    = df_base.index.year.min()
+    años          = sorted(df_base.index.year.unique())
+    todos_idx     = []
     todos_estados = []
 
-    print(f"\n  [EXPANDING] Reentrenando HMM por año ({años[0]}→{años[-1]}):")
+    print(f"\n  [EXPANDING] HMM año a año | inicio={inicio} | min_años={min_años}")
+    print(f"  Primeras etiquetas desde {año_inicio + min_años} "
+          f"(entrenado en {año_inicio}–{año_inicio + min_años - 1})")
 
-    for i, año in enumerate(años):
-        # Necesitamos al menos 1 año completo de historia para entrenar
-        if i == 0:
-            # Primer año: no hay historia previa suficiente → usar solo ese año
-            X_train = df_base[df_base.index.year <= año].values
-        else:
-            X_train = df_base[df_base.index.year < año].values
-
-        if len(X_train) < 60:
-            print(f"    {año}: datos insuficientes ({len(X_train)}) — omitiendo")
+    for año in años:
+        años_historia = año - año_inicio
+        if años_historia < min_años:
+            print(f"    {año}: historia insuficiente ({años_historia} años < {min_años}) — omitiendo")
             continue
 
+        X_train = df_base[df_base.index.year < año].values
         try:
             modelo, scaler, sorted_states = _fit_hmm_single(X_train)
         except Exception as e:
             print(f"    {año}: HMM falló — {e}")
             continue
 
-        # Predecir solo el año actual
         df_año = df_base[df_base.index.year == año]
         if df_año.empty:
             continue
@@ -239,7 +243,7 @@ def hmm_expanding(df: pd.DataFrame, inicio: str) -> tuple:
         todos_idx.extend(df_año.index.tolist())
         todos_estados.extend(estados_año.tolist())
         pct_severo = (np.array(estados_año) == 2).mean() * 100
-        print(f"    {año}: entrenado en {len(X_train):,} obs → "
+        print(f"    {año}: entrenado en {len(X_train):,} obs ({años_historia} años) → "
               f"severo={pct_severo:.0f}%")
 
     return pd.DatetimeIndex(todos_idx), np.array(todos_estados)
@@ -283,7 +287,7 @@ def graficar(df: pd.DataFrame, sadf_dict: dict,
     fig.suptitle(
         f"Validación SADF y HMM — {BANCO}\n"
         f"SADF: tau_min={TAU_MIN} dh | ventanas {VENTANAS[0]}d y {VENTANAS[1]}d  |  "
-        f"HMM: {N_ESTADOS} estados (verde=calma / amarillo=moderado / rojo=severo)",
+        f"HMM: {N_ESTADOS} estados | expanding desde {HMM_INICIO} con mín {HMM_MIN_AÑOS} años",
         fontsize=12, fontweight="bold"
     )
 
@@ -421,9 +425,9 @@ def main():
         except Exception as e:
             print(f"  Falló: {e}")
 
-        print(f"\nEntrenando HMM expanding (sin leakage, año a año)…")
+        print(f"\nEntrenando HMM expanding (sin leakage, mín {HMM_MIN_AÑOS} años)…")
         try:
-            hmm_ex = hmm_expanding(df, HMM_INICIO)
+            hmm_ex = hmm_expanding(df, HMM_INICIO, min_años=HMM_MIN_AÑOS)
             print("  OK")
         except Exception as e:
             print(f"  Falló: {e}")
