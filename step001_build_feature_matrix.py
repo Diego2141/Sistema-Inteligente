@@ -118,6 +118,27 @@ FEATURES_EXCLUIR = [
 # ─────────────────────────────────────────────────────────────────────────────
 _FD_TRAIN_CUTOFF = "2010-12-31"   # calibrar d en ventana histórica inicial
 
+# ─────────────────────────────────────────────────────────────────────────────
+# HMM — Gaussian Hidden Markov Model (3 estados: calma / moderado / severo)
+# Se pre-computa UNA SOLA VEZ por banco con ventana expanding (sin leakage).
+# Para etiquetar el año Y se entrena en [HMM_INICIO, Y-1].
+# Requiere hmmlearn y sklearn. Si no están instalados, la columna queda en NaN.
+# Si no aporta señal, agregar "hmm_estado" a FEATURES_EXCLUIR.
+# ─────────────────────────────────────────────────────────────────────────────
+HMM_N_ESTADOS = 3
+HMM_INICIO    = "2010-01-01"   # primer año de historia disponible
+HMM_MIN_AÑOS  = 2              # mínimo de años antes de etiquetar
+                               # → primeras etiquetas desde HMM_INICIO + 2 años
+
+try:
+    from hmmlearn import hmm as _hmmlearn
+    from sklearn.preprocessing import StandardScaler as _StandardScaler
+    _HMM_DISPONIBLE = True
+except ImportError:
+    _HMM_DISPONIBLE = False
+    logger.warning("hmmlearn/sklearn no instalados — hmm_estado quedará en NaN. "
+                   "Instalar: pip install hmmlearn scikit-learn")
+
 PARAMS = {
     # Fechas
     "fecha_inicio_historico": "2010-01-01",
@@ -965,6 +986,61 @@ def _find_min_d(
     return round(max_d, 4)
 
 
+def _calcular_hmm_expanding(flujo: pd.Series, garch_vol: pd.Series) -> pd.Series:
+    """
+    Pre-computa hmm_estado[t] para todo t con expanding window, sin leakage.
+
+    Para etiquetar el año Y:
+      - Entrena HMM en [HMM_INICIO, fin de Y-1]  (historia completa hasta ayer)
+      - Requiere al menos HMM_MIN_AÑOS de historia
+      - Predice estados de todos los días del año Y con ese modelo
+
+    Estados ordenados por det(Σ_i) ascendente: 0=calma, 1=moderado, 2=severo.
+    Devuelve pd.Series de Int8 con NaN en años de burn-in o si HMM falla.
+    """
+    if not _HMM_DISPONIBLE:
+        return pd.Series(pd.NA, index=flujo.index, dtype="Int8", name="hmm_estado")
+
+    # Alinear flujo y garch_vol en un DataFrame limpio
+    df_base = pd.concat([flujo.rename("flujo"), garch_vol.rename("garch_vol")],
+                        axis=1).dropna()
+    df_base = df_base[df_base.index >= HMM_INICIO]
+    if df_base.empty:
+        return pd.Series(pd.NA, index=flujo.index, dtype="Int8", name="hmm_estado")
+
+    año_inicio = df_base.index.year.min()
+    años       = sorted(df_base.index.year.unique())
+    resultado  = pd.Series(pd.NA, index=df_base.index, dtype="Int8", name="hmm_estado")
+
+    for año in años:
+        años_historia = año - año_inicio
+        if años_historia < HMM_MIN_AÑOS:
+            continue
+
+        X_train = df_base[df_base.index.year < año].values
+        try:
+            scaler = _StandardScaler()
+            Xs     = scaler.fit_transform(X_train)
+            modelo = _hmmlearn.GaussianHMM(
+                n_components=HMM_N_ESTADOS, covariance_type="full",
+                n_iter=1000, random_state=42,
+            )
+            modelo.fit(Xs)
+            varianzas     = [np.linalg.det(modelo.covars_[s]) for s in range(HMM_N_ESTADOS)]
+            sorted_states = np.argsort(varianzas)   # 0=calma, 2=severo
+            mapa          = {sorted_states[i]: i for i in range(HMM_N_ESTADOS)}
+
+            df_año     = df_base[df_base.index.year == año]
+            Xs_año     = scaler.transform(df_año.values)
+            estados_raw = modelo.predict(Xs_año)
+            estados_map = np.array([mapa[e] for e in estados_raw], dtype="int8")
+            resultado.loc[df_año.index] = pd.array(estados_map, dtype="Int8")
+        except Exception:
+            continue   # año sin etiquetar si HMM falla
+
+    return resultado
+
+
 def build_bank_features(df_banco, lags_cortos, lag_semana, lag_mes, ventanas_vol):
     """
     Recibe serie temporal de un banco con columnas R y D.
@@ -1430,6 +1506,7 @@ def build_feature_matrix(
     fechas_elecciones,
     h_min,
     h_max,
+    hmm_features=None,   # pd.Series(hmm_estado, index=fecha_t) pre-computada
 ):
     """
     Construye el dataset de entrenamiento para un banco de forma vectorizada.
@@ -1519,6 +1596,19 @@ def build_feature_matrix(
         fechas_th_unicas, peru_holidays, fechas_elecciones, peru_bday
     )
     df = df.merge(df_seasonal, left_on="fecha_th", right_index=True, how="left")
+
+    # ── 7. HMM estado de régimen (pre-computado, sin leakage) ────────────────
+    # hmm_estado es una Serie indexada por fecha_t calculada una sola vez en
+    # build_full_matrix con expanding window. El merge por fecha_t es seguro:
+    # hmm_estado[Y] fue calculado con datos hasta Y-1, exactamente lo que el
+    # fold vería como train. Años de burn-in quedan en NaN.
+    if hmm_features is not None and not hmm_features.empty:
+        df = df.merge(
+            hmm_features.rename("hmm_estado").to_frame(),
+            left_on="fecha_t", right_index=True, how="left",
+        )
+    else:
+        df["hmm_estado"] = pd.NA
 
     # ── Reducir a float32 antes de reordenar ────────────────────────────────
     # Mitad de memoria y evita el OOM en la consolidación interna de pandas
@@ -1611,6 +1701,28 @@ def build_full_matrix(
         else:
             bank_features_dict[banco] = pd.DataFrame()
 
+    # Pre-computar HMM expanding por banco (una sola vez, sin leakage)
+    hmm_dict = {}
+    if _HMM_DISPONIBLE:
+        logger.info("  Pre-computando HMM expanding por banco...")
+        for banco in lista_bancos_full:
+            bf = bank_features_dict.get(banco, pd.DataFrame())
+            if bf.empty or "garch_vol" not in bf.columns:
+                hmm_dict[banco] = pd.Series(dtype="Int8")
+                continue
+            if not df_bancarios.empty and f"{banco}_R" in df_bancarios.columns:
+                flujo = (df_bancarios[f"{banco}_D"] - df_bancarios[f"{banco}_R"])
+            else:
+                hmm_dict[banco] = pd.Series(dtype="Int8")
+                continue
+            garch = bf["garch_vol"]
+            hmm_dict[banco] = _calcular_hmm_expanding(flujo, garch)
+            n_etiq = hmm_dict[banco].notna().sum()
+            logger.info(f"    {banco}: hmm_estado calculado — {n_etiq:,} días etiquetados")
+    else:
+        for banco in lista_bancos_full:
+            hmm_dict[banco] = pd.Series(dtype="Int8")
+
     # Escribir banco por banco al Parquet de salida — peak RAM = 1 banco a la vez
     pq_writer   = None
     total_filas = 0
@@ -1627,6 +1739,7 @@ def build_full_matrix(
             fechas_elecciones=fechas_elecciones,
             h_min=params["h_min"],
             h_max=params["h_max"],
+            hmm_features=hmm_dict.get(banco),
         )
         if df_banco_mat.empty:
             continue
@@ -1736,6 +1849,12 @@ def build_data_dictionary(params):
             f"Media móvil {v}d del flujo neto D−R (nivel reciente del flujo)", None, None)
     add("garch_vol", "Datos bancarios",
         "Volatilidad condicional GARCH(1,1) del flujo neto D−R (puro NumPy, sin arch)", None, None)
+    add("hmm_estado", "Calculado (HMM expanding)",
+        f"Estado de régimen oculto: 0=calma, 1=moderado, 2=severo. "
+        f"Gaussian HMM {HMM_N_ESTADOS} estados sobre [flujo_neto, garch_vol]. "
+        f"Pre-computado con expanding window sin leakage (mín {HMM_MIN_AÑOS}a). "
+        f"NaN en burn-in ({HMM_INICIO}→+{HMM_MIN_AÑOS}a) o si hmmlearn no instalado. "
+        f"Si no aporta señal, agregar a FEATURES_EXCLUIR.", None, None)
     add("sigma_flujo_ratio", "Datos bancarios",
         "sigma_flujo_5d / sigma_flujo_20d — ratio de volatilidad corta/larga del flujo. "
         "> 1: régimen de alta vol reciente. NaN si sigma_flujo_20d = 0.", None, None)
