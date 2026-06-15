@@ -518,6 +518,113 @@ def precomputar_hmm_features(df: pd.DataFrame) -> pd.Series:
     return pd.Series(estados, index=idx, name="hmm_estado", dtype="Int8")
 
 
+def hmm_evolucion(df: pd.DataFrame, primer_ventana: int = HMM_PRIMER_VENTANA) -> dict:
+    """
+    Para cada año Y desde (HMM_INICIO + primer_ventana) hasta el último año:
+      - Entrena HMM en [HMM_INICIO, Y]  (toda la historia disponible hasta Y)
+      - Re-etiqueta TODOS los días de [HMM_INICIO, Y] con ese modelo
+
+    Devuelve dict {año_fin: (DatetimeIndex, np.array estados)}
+    → permite ver cómo evoluciona/estabiliza la clasificación al añadir cada año.
+    """
+    df_base    = df[df.index >= HMM_INICIO][["target", "garch_vol"]].dropna()
+    año_inicio = df_base.index.year.min()
+    año_fin_prim = año_inicio + primer_ventana - 1
+    años_oos   = sorted(y for y in df_base.index.year.unique() if y > año_fin_prim)
+
+    resultados = {}
+    print(f"\n  [EVOLUCIÓN] Re-etiquetando cada año con modelo acumulado...")
+
+    # Año base: modelo entrenado en primer bloque
+    df_prim = df_base[df_base.index.year <= año_fin_prim]
+    try:
+        modelo, scaler, sorted_states = _fit_hmm_single(df_prim.values)
+        estados = _predecir_estados(modelo, scaler, sorted_states, df_prim.values)
+        resultados[año_fin_prim] = (df_prim.index, estados)
+        pct_sev = (estados == 2).mean() * 100
+        print(f"    hasta {año_fin_prim}: {len(df_prim):,} obs → severo={pct_sev:.0f}%")
+    except Exception as e:
+        print(f"    Modelo base falló: {e}")
+
+    # Cada año siguiente: re-entrena con toda la historia hasta ese año
+    for año in años_oos:
+        df_hasta = df_base[df_base.index.year <= año]
+        try:
+            modelo, scaler, sorted_states = _fit_hmm_single(df_hasta.values)
+            estados = _predecir_estados(modelo, scaler, sorted_states, df_hasta.values)
+            resultados[año] = (df_hasta.index, estados)
+            pct_sev = (estados == 2).mean() * 100
+            print(f"    hasta {año}: {len(df_hasta):,} obs → severo={pct_sev:.0f}%")
+        except Exception as e:
+            print(f"    {año}: falló — {e}")
+
+    return resultados
+
+
+def graficar_evolucion(df: pd.DataFrame, evol: dict) -> None:
+    """
+    Un panel por año: muestra cómo el HMM re-etiqueta toda la historia
+    a medida que se añade cada año de datos nuevos.
+    """
+    años   = sorted(evol.keys())
+    n      = len(años)
+    if n == 0:
+        return
+
+    fig, axes = plt.subplots(n, 1, figsize=(19, 2.5 * n),
+                             sharex=True, gridspec_kw={"hspace": 0.05})
+    if n == 1:
+        axes = [axes]
+
+    fig.suptitle(
+        f"Evolución del HMM — {BANCO}  |  {N_ESTADOS} estados\n"
+        f"Cada panel re-etiqueta TODA la historia con el modelo entrenado hasta ese año",
+        fontsize=12, fontweight="bold"
+    )
+
+    colores_hmm = {0: "#4CAF50", 1: "#FFC107", 2: "#F44336"}
+
+    for ax, año in zip(axes, años):
+        idx_a, est_a = evol[año]
+        vol_a = df.loc[df.index.isin(idx_a), "garch_vol"]
+
+        # Fondo por régimen
+        for estado, color in colores_hmm.items():
+            fechas_e = idx_a[est_a == estado]
+            for f in fechas_e:
+                ax.axvspan(f, f + pd.offsets.BusinessDay(1),
+                           alpha=0.55, color=color, linewidth=0)
+
+        # garch_vol normalizada encima
+        vol_n = (vol_a.values - np.nanmean(vol_a.values)) / (np.nanstd(vol_a.values) + 1e-12)
+        ax.plot(vol_a.index, vol_n, color="k", lw=0.5, alpha=0.5)
+
+        # Episodios de stress
+        for ini, fin, etiqueta in EPISODIOS:
+            if pd.Timestamp(ini) <= idx_a.max():
+                ax.axvspan(pd.Timestamp(ini), min(pd.Timestamp(fin), idx_a.max()),
+                           alpha=0.12, color="navy", zorder=0)
+
+        pct_sev = (est_a == 2).mean() * 100
+        ax.set_ylabel(str(año), fontsize=8, rotation=0, labelpad=35, va="center")
+        ax.set_title(f"Modelo entrenado hasta {año}  ({len(idx_a):,} obs)  —  "
+                     f"severo={pct_sev:.0f}%", fontsize=8, loc="left", pad=2)
+        ax.set_yticks([])
+
+        # Leyenda solo en primer panel
+        if ax is axes[0]:
+            parches = [mpatches.Patch(color=c, label=l)
+                       for c, l in zip(["#4CAF50","#FFC107","#F44336"],
+                                       ["Calma","Moderado","Severo"])]
+            ax.legend(handles=parches, fontsize=7, loc="upper left", ncol=3)
+
+    plt.tight_layout()
+    ruta = DIR_OUTPUT / f"evolucion_hmm_{BANCO}.png"
+    fig.savefig(ruta, dpi=130, bbox_inches="tight")
+    print(f"\n  Gráfico evolución guardado: {ruta}")
+    plt.show()
+
+
 def mostrar_como_feature(df: pd.DataFrame, hmm_serie: pd.Series,
                          hmm_leakage: tuple) -> None:
     """
@@ -657,8 +764,14 @@ def main():
     # 4. Estadísticas
     reportar_estadisticas(df, sadf_dict, hmm_c, hmm_ex, hmm_ro)
 
-    # 5. Gráfico (hasta 5 paneles)
+    # 5. Gráfico comparativo (hasta 5 paneles)
     graficar(df, sadf_dict, hmm_c, hmm_ex, hmm_ro)
+
+    # 6. Gráfico de evolución: cómo se re-etiqueta la historia al añadir cada año
+    if _HMM_OK:
+        print(f"\nGenerando gráfico de evolución HMM...")
+        evol = hmm_evolucion(df, primer_ventana=HMM_PRIMER_VENTANA)
+        graficar_evolucion(df, evol)
 
 
 if __name__ == "__main__":
