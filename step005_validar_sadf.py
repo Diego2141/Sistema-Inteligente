@@ -53,10 +53,11 @@ VENTANAS     = [60, 120, 252]
 LAGS         = 1
 
 # HMM params
-N_ESTADOS     = 3
-HMM_INICIO    = "2010-01-01"   # usar toda la historia disponible
-HMM_MIN_AÑOS  = 6              # años mínimos de historia antes de empezar a etiquetar
-                               # → primeros labels desde 2016 (entrenado en 2010-2015)
+N_ESTADOS        = 3
+HMM_INICIO       = "2010-01-01"   # usar toda la historia disponible
+HMM_MIN_AÑOS     = 2              # mínimo de historia antes de etiquetar (expanding)
+                                  # → primeros labels desde 2012 (entrenado en 2010-2011)
+HMM_ROLLING_AÑOS = 6              # tamaño ventana rolling fija (en años)
 
 # Episodios de stress conocidos
 EPISODIOS = [
@@ -196,8 +197,64 @@ def hmm_muestra_completa(df: pd.DataFrame, inicio: str) -> tuple:
     return df_full.index, estados
 
 
+def hmm_rolling(df: pd.DataFrame, inicio: str,
+                ventana_años: int = 6) -> tuple:
+    """
+    VERSION SIN LEAKAGE — rolling window de longitud fija.
+
+    Para etiquetar el año Y:
+      - Entrena HMM en [Y - ventana_años, Y-1]  (ventana fija)
+      - Requiere que haya al menos ventana_años de historia desde `inicio`
+      - Predice estados del año Y con ese modelo
+
+    Con ventana_años=6 e inicio=2010:
+      - Primer entrenamiento: 2010-2015 (6 años) → etiqueta 2016
+      - 2do entrenamiento:    2011-2016 (6 años) → etiqueta 2017
+      - ...y así sucesivamente
+    """
+    df_base    = df[df.index >= inicio][["target", "garch_vol"]].dropna()
+    año_inicio = df_base.index.year.min()
+    años       = sorted(df_base.index.year.unique())
+    todos_idx     = []
+    todos_estados = []
+
+    print(f"\n  [ROLLING {ventana_años}a] HMM año a año | inicio={inicio}")
+    print(f"  Primeras etiquetas desde {año_inicio + ventana_años} "
+          f"(ventana fija {ventana_años} años)")
+
+    for año in años:
+        años_historia = año - año_inicio
+        if años_historia < ventana_años:
+            print(f"    {año}: historia insuficiente ({años_historia} años < {ventana_años}) — omitiendo")
+            continue
+
+        año_ini_ventana = año - ventana_años
+        X_train = df_base[
+            (df_base.index.year >= año_ini_ventana) &
+            (df_base.index.year < año)
+        ].values
+        try:
+            modelo, scaler, sorted_states = _fit_hmm_single(X_train)
+        except Exception as e:
+            print(f"    {año}: HMM falló — {e}")
+            continue
+
+        df_año = df_base[df_base.index.year == año]
+        if df_año.empty:
+            continue
+
+        estados_año = _predecir_estados(modelo, scaler, sorted_states, df_año.values)
+        todos_idx.extend(df_año.index.tolist())
+        todos_estados.extend(estados_año.tolist())
+        pct_severo = (np.array(estados_año) == 2).mean() * 100
+        print(f"    {año}: ventana [{año_ini_ventana}-{año-1}] ({len(X_train):,} obs) → "
+              f"severo={pct_severo:.0f}%")
+
+    return pd.DatetimeIndex(todos_idx), np.array(todos_estados)
+
+
 def hmm_expanding(df: pd.DataFrame, inicio: str,
-                  min_años: int = 6) -> tuple:
+                  min_años: int = 2) -> tuple:
     """
     VERSION SIN LEAKAGE — expanding window por año con mínimo de historia.
 
@@ -206,10 +263,10 @@ def hmm_expanding(df: pd.DataFrame, inicio: str,
       - Entrena HMM en datos desde `inicio` hasta fin del año Y-1
       - Predice estados del año Y con ese modelo
 
-    Con min_años=6 e inicio=2010:
-      - Primer entrenamiento: 2010-2015 (6 años) → etiqueta 2016
-      - 2do entrenamiento:    2010-2016 (7 años) → etiqueta 2017
-      - ...y así sucesivamente
+    Con min_años=2 e inicio=2010:
+      - Primer entrenamiento: 2010-2011 (2 años) → etiqueta 2012
+      - 2do entrenamiento:    2010-2012 (3 años) → etiqueta 2013
+      - ...y así sucesivamente (historia siempre crece)
     """
     df_base       = df[df.index >= inicio][["target", "garch_vol"]].dropna()
     año_inicio    = df_base.index.year.min()
@@ -219,7 +276,7 @@ def hmm_expanding(df: pd.DataFrame, inicio: str,
 
     print(f"\n  [EXPANDING] HMM año a año | inicio={inicio} | min_años={min_años}")
     print(f"  Primeras etiquetas desde {año_inicio + min_años} "
-          f"(entrenado en {año_inicio}–{año_inicio + min_años - 1})")
+          f"(entrenado en {año_inicio}-{año_inicio + min_años - 1})")
 
     for año in años:
         años_historia = año - año_inicio
@@ -249,7 +306,13 @@ def hmm_expanding(df: pd.DataFrame, inicio: str,
     return pd.DatetimeIndex(todos_idx), np.array(todos_estados)
 
 
-# ── Gráfico 4 paneles ─────────────────────────────────────────────────────────
+# ── Helper ────────────────────────────────────────────────────────────────────
+
+def df_base_year(inicio: str) -> int:
+    return pd.Timestamp(inicio).year
+
+
+# ── Gráfico 5 paneles ─────────────────────────────────────────────────────────
 
 def _pintar_regimen(ax, idx, estados, vol_ref_idx, vol_ref_vals):
     """Pinta fondo por régimen HMM y superpone garch_vol normalizada."""
@@ -271,12 +334,13 @@ def _pintar_regimen(ax, idx, estados, vol_ref_idx, vol_ref_vals):
 
 
 def graficar(df: pd.DataFrame, sadf_dict: dict,
-             hmm_completo=None, hmm_expanding_=None) -> None:
+             hmm_completo=None, hmm_expanding_=None,
+             hmm_rolling_=None) -> None:
 
-    tiene_hmm = hmm_completo is not None or hmm_expanding_ is not None
-    n_panels  = 2 + (1 if hmm_completo   is not None else 0) \
-                  + (1 if hmm_expanding_  is not None else 0)
-    h_ratios  = [2.0] + [1.0] * (n_panels - 1)
+    n_panels = 2 + (1 if hmm_completo   is not None else 0) \
+                 + (1 if hmm_expanding_  is not None else 0) \
+                 + (1 if hmm_rolling_    is not None else 0)
+    h_ratios = [2.0] + [1.0] * (n_panels - 1)
 
     fig, axes = plt.subplots(
         n_panels, 1, figsize=(19, 4 * n_panels),
@@ -288,7 +352,7 @@ def graficar(df: pd.DataFrame, sadf_dict: dict,
     fig.suptitle(
         f"Validación SADF y HMM — {BANCO}\n"
         f"SADF: tau_min={TAU_MIN} dh | ventanas {ventanas_str}  |  "
-        f"HMM: {N_ESTADOS} estados | expanding desde {HMM_INICIO} con mín {HMM_MIN_AÑOS} años",
+        f"HMM: {N_ESTADOS} estados | expanding (mín {HMM_MIN_AÑOS}a) vs rolling ({HMM_ROLLING_AÑOS}a)",
         fontsize=12, fontweight="bold"
     )
 
@@ -340,8 +404,21 @@ def graficar(df: pd.DataFrame, sadf_dict: dict,
         vol_e = df.loc[df.index.isin(idx_e), "garch_vol"]
         _pintar_regimen(ax4, idx_e, est_e, vol_e.index, vol_e.values)
         ax4.set_title(
-            "HMM expanding (SIN leakage) — para etiquetar año Y, entrena solo en años anteriores",
+            f"HMM expanding (SIN leakage, mín {HMM_MIN_AÑOS}a) — historia crece: "
+            f"etiqueta desde {df_base_year(HMM_INICIO) + HMM_MIN_AÑOS}",
             fontsize=9, color="#1B5E20"
+        )
+
+    # ── Panel 5: HMM rolling (sin leakage) ────────────────────────────────────
+    if hmm_rolling_ is not None:
+        ax5 = axes[ax_idx]; ax_idx += 1
+        idx_r, est_r = hmm_rolling_
+        vol_r = df.loc[df.index.isin(idx_r), "garch_vol"]
+        _pintar_regimen(ax5, idx_r, est_r, vol_r.index, vol_r.values)
+        ax5.set_title(
+            f"HMM rolling {HMM_ROLLING_AÑOS}a (SIN leakage) — ventana fija: "
+            f"etiqueta desde {df_base_year(HMM_INICIO) + HMM_ROLLING_AÑOS}",
+            fontsize=9, color="#0D47A1"
         )
 
     # ── Bandas de episodios ────────────────────────────────────────────────────
@@ -365,7 +442,8 @@ def graficar(df: pd.DataFrame, sadf_dict: dict,
 
 # ── Estadísticas de validación ────────────────────────────────────────────────
 
-def reportar_estadisticas(df, sadf_dict, hmm_completo=None, hmm_expanding_=None):
+def reportar_estadisticas(df, sadf_dict, hmm_completo=None,
+                          hmm_expanding_=None, hmm_rolling_=None):
     print("\n── SADF: % días sobre P95 en episodios de stress ───────────────────")
     for nombre, svals in sadf_dict.items():
         p95 = np.nanpercentile(svals, 95)
@@ -374,15 +452,19 @@ def reportar_estadisticas(df, sadf_dict, hmm_completo=None, hmm_expanding_=None)
             sub = s[(s.index >= ini) & (s.index <= fin)]
             if len(sub) > 0:
                 pct = (sub > p95).mean() * 100
-                print(f"  {nombre:<15} | {etiqueta:<15}: {pct:5.1f}% sobre P95")
+                print(f"  {nombre:<18} | {etiqueta:<15}: {pct:5.1f}% sobre P95")
 
-    for tag, hmm_res in [("MUESTRA COMPLETA (leakage)", hmm_completo),
-                          ("EXPANDING (sin leakage)   ", hmm_expanding_)]:
+    variantes = [
+        ("MUESTRA COMPLETA (leakage)    ", hmm_completo),
+        (f"EXPANDING  mín {HMM_MIN_AÑOS}a (sin leak)", hmm_expanding_),
+        (f"ROLLING    {HMM_ROLLING_AÑOS}a  (sin leak) ", hmm_rolling_),
+    ]
+    for tag, hmm_res in variantes:
         if hmm_res is None:
             continue
         idx_h, estados = hmm_res
         total = len(estados)
-        print(f"\n── HMM {tag}: distribución de estados ──────────────────────")
+        print(f"\n── HMM {tag}: distribución de estados ──────")
         for e, nom in enumerate(["Calma   ", "Moderado", "Severo  "]):
             n = (estados == e).sum()
             print(f"  Estado {e} {nom}: {n:,} días ({n/total*100:.1f}%)")
@@ -414,9 +496,10 @@ def main():
         p99 = np.nanpercentile(sadf_dict[nombre], 99)
         print(f"  P95={p95:.2f} | P99={p99:.2f}")
 
-    # 3. HMM — dos versiones
-    hmm_c  = None   # muestra completa (con leakage)
-    hmm_ex = None   # expanding (sin leakage)
+    # 3. HMM — tres versiones
+    hmm_c  = None   # muestra completa (con leakage, solo referencia)
+    hmm_ex = None   # expanding: historia crece, min HMM_MIN_AÑOS
+    hmm_ro = None   # rolling:   ventana fija HMM_ROLLING_AÑOS
 
     if _HMM_OK:
         print(f"\nEntrenando HMM muestra completa (con leakage)…")
@@ -433,11 +516,18 @@ def main():
         except Exception as e:
             print(f"  Falló: {e}")
 
-    # 4. Estadísticas
-    reportar_estadisticas(df, sadf_dict, hmm_c, hmm_ex)
+        print(f"\nEntrenando HMM rolling (sin leakage, ventana {HMM_ROLLING_AÑOS} años)…")
+        try:
+            hmm_ro = hmm_rolling(df, HMM_INICIO, ventana_años=HMM_ROLLING_AÑOS)
+            print("  OK")
+        except Exception as e:
+            print(f"  Falló: {e}")
 
-    # 5. Gráfico (4 paneles si HMM disponible)
-    graficar(df, sadf_dict, hmm_c, hmm_ex)
+    # 4. Estadísticas
+    reportar_estadisticas(df, sadf_dict, hmm_c, hmm_ex, hmm_ro)
+
+    # 5. Gráfico (hasta 5 paneles)
+    graficar(df, sadf_dict, hmm_c, hmm_ex, hmm_ro)
 
 
 if __name__ == "__main__":
