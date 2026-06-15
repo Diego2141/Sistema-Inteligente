@@ -393,19 +393,20 @@ def graficar(df: pd.DataFrame, sadf_dict: dict,
         vol_c = df.loc[df.index.isin(idx_c), "garch_vol"]
         _pintar_regimen(ax3, idx_c, est_c, vol_c.index, vol_c.values)
         ax3.set_title(
-            "HMM muestra completa (CON leakage) — entrenado en 2016→hoy, etiqueta toda la historia",
+            "CON LEAKAGE — HMM entrenado en TODA la muestra: "
+            "el estado de 2013 'sabe' que en 2020 vino COVID",
             fontsize=9, color="#B71C1C"
         )
 
-    # ── Panel 4: HMM expanding (sin leakage) ──────────────────────────────────
+    # ── Panel 4: HMM expanding — OPCIÓN A (sin leakage) ──────────────────────
     if hmm_expanding_ is not None:
         ax4 = axes[ax_idx]; ax_idx += 1
         idx_e, est_e = hmm_expanding_
         vol_e = df.loc[df.index.isin(idx_e), "garch_vol"]
         _pintar_regimen(ax4, idx_e, est_e, vol_e.index, vol_e.values)
         ax4.set_title(
-            f"HMM expanding (SIN leakage, mín {HMM_MIN_AÑOS}a) — historia crece: "
-            f"etiqueta desde {df_base_year(HMM_INICIO) + HMM_MIN_AÑOS}",
+            f"OPCIÓN A — pre-computado en step001 (expanding, SIN leakage): "
+            f"hmm_estado[Y] = Viterbi( HMM entrenado en [2010, Y-1] )",
             fontsize=9, color="#1B5E20"
         )
 
@@ -416,8 +417,8 @@ def graficar(df: pd.DataFrame, sadf_dict: dict,
         vol_r = df.loc[df.index.isin(idx_r), "garch_vol"]
         _pintar_regimen(ax5, idx_r, est_r, vol_r.index, vol_r.values)
         ax5.set_title(
-            f"HMM rolling {HMM_ROLLING_AÑOS}a (SIN leakage) — ventana fija: "
-            f"etiqueta desde {df_base_year(HMM_INICIO) + HMM_ROLLING_AÑOS}",
+            f"ROLLING {HMM_ROLLING_AÑOS}a (SIN leakage) — ventana fija: "
+            f"hmm_estado[Y] = Viterbi( HMM entrenado en [Y-{HMM_ROLLING_AÑOS}, Y-1] )",
             fontsize=9, color="#0D47A1"
         )
 
@@ -478,6 +479,101 @@ def reportar_estadisticas(df, sadf_dict, hmm_completo=None,
 
 
 
+# ── Pre-cómputo (simula lo que haría step001) ────────────────────────────────
+
+def precomputar_hmm_features(df: pd.DataFrame) -> pd.Series:
+    """
+    Simula lo que haría step001_build_feature_matrix.py:
+    calcula hmm_estado[t] una sola vez con expanding window y lo devuelve
+    como Serie indexada por fecha — lista para añadir al parquet.
+
+    Para cada año Y desde (HMM_INICIO + HMM_MIN_AÑOS):
+        hmm_estado[Y] = Viterbi( HMM entrenado en [HMM_INICIO, Y-1] )
+
+    Años anteriores a (HMM_INICIO + HMM_MIN_AÑOS) → NaN (burn-in).
+    """
+    idx, estados = hmm_expanding(df, HMM_INICIO, min_años=HMM_MIN_AÑOS)
+    return pd.Series(estados, index=idx, name="hmm_estado", dtype="Int8")
+
+
+def mostrar_como_feature(df: pd.DataFrame, hmm_serie: pd.Series,
+                         hmm_leakage: tuple) -> None:
+    """
+    Imprime cómo quedaría la columna hmm_estado en la matriz de features
+    y la compara contra la versión con leakage en fechas clave.
+    """
+    idx_leak, est_leak = hmm_leakage
+    leak_serie = pd.Series(est_leak, index=idx_leak, name="hmm_leakage")
+
+    # Unir en un DataFrame de comparación
+    comp = df[["target", "garch_vol"]].copy()
+    comp["hmm_opcion_A"] = hmm_serie           # pre-computado sin leakage
+    comp["hmm_leakage"]  = leak_serie          # con leakage (referencia)
+
+    etiquetas = {0: "calma", 1: "mod.", 2: "severo"}
+
+    print("\n" + "═" * 75)
+    print("PASO 1 — Lo que step001 grabaría en matriz_features.parquet")
+    print("         (columna hmm_estado calculada UNA SOLA VEZ, expanding)")
+    print("═" * 75)
+    print(f"\n  {'Fecha':<13} {'garch_vol':>10} {'hmm_OpcionA':>13} {'hmm_Leakage':>13}")
+    print("  " + "-" * 55)
+
+    # Fechas clave para comparar
+    fechas_muestra = []
+    for ini, fin, _ in EPISODIOS:
+        rng = comp.loc[ini:fin].index
+        if len(rng) >= 3:
+            fechas_muestra.extend(rng[:2].tolist())
+            fechas_muestra.append(rng[-1])
+
+    # Añadir algunas fechas de calma para contraste
+    año_calma = str(df_base_year(HMM_INICIO) + HMM_MIN_AÑOS + 1)
+    rng_calma = comp.loc[año_calma:año_calma].index
+    if len(rng_calma) >= 2:
+        fechas_muestra = rng_calma[:2].tolist() + fechas_muestra
+
+    for f in sorted(set(fechas_muestra)):
+        if f not in comp.index:
+            continue
+        row    = comp.loc[f]
+        a_val  = row["hmm_opcion_A"]
+        l_val  = row["hmm_leakage"]
+        a_str  = f"{int(a_val)}={etiquetas[int(a_val)]}" if pd.notna(a_val) else "NaN"
+        l_str  = f"{int(l_val)}={etiquetas[int(l_val)]}" if pd.notna(l_val) else "NaN"
+        marca  = " ←DIFIEREN" if (pd.notna(a_val) and pd.notna(l_val)
+                                   and int(a_val) != int(l_val)) else ""
+        print(f"  {str(f.date()):<13} {row['garch_vol']:>10.4f} "
+              f"{a_str:>13} {l_str:>13}{marca}")
+
+    print("\n" + "═" * 75)
+    print("PASO 2 — Cómo lo vería un fold de step005")
+    print("═" * 75)
+    print("""
+  Fold k:  train = [2010-01-01, 2019-12-31]
+           val   = [2020-01-01, 2020-06-30]
+           test  = [2020-07-01, 2020-12-31]
+
+  X_train incluye columna hmm_estado (pre-computada, sin leakage)
+  X_test  incluye columna hmm_estado (pre-computada, sin leakage)
+
+  XGBoost NO sabe que es un HMM — lo trata como feature entero {0, 1, 2}.
+  No hay re-entrenamiento de HMM dentro del fold.
+""")
+
+    # Resumen de discrepancias en episodios
+    print("  Discrepancias Opción A vs Leakage en episodios de stress:")
+    for ini, fin, etiqueta in EPISODIOS:
+        sub = comp.loc[ini:fin].dropna(subset=["hmm_opcion_A", "hmm_leakage"])
+        if sub.empty:
+            continue
+        pct_sev_A = (sub["hmm_opcion_A"] == 2).mean() * 100
+        pct_sev_L = (sub["hmm_leakage"]  == 2).mean() * 100
+        acuerdo   = (sub["hmm_opcion_A"] == sub["hmm_leakage"]).mean() * 100
+        print(f"  {etiqueta:<20}: severo OpA={pct_sev_A:.0f}%  "
+              f"Leak={pct_sev_L:.0f}%  |  acuerdo={acuerdo:.0f}%")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -497,31 +593,44 @@ def main():
         print(f"  P95={p95:.2f} | P99={p99:.2f}")
 
     # 3. HMM — tres versiones
-    hmm_c  = None   # muestra completa (con leakage, solo referencia)
-    hmm_ex = None   # expanding: historia crece, min HMM_MIN_AÑOS
-    hmm_ro = None   # rolling:   ventana fija HMM_ROLLING_AÑOS
+    hmm_c  = None   # muestra completa (con leakage, referencia)
+    hmm_ex = None   # expanding = OPCIÓN A (pre-computado, sin leakage)
+    hmm_ro = None   # rolling ventana fija (sin leakage)
 
     if _HMM_OK:
-        print(f"\nEntrenando HMM muestra completa (con leakage)…")
+        print(f"\n[LEAKAGE] HMM muestra completa — solo referencia visual…")
         try:
             hmm_c = hmm_muestra_completa(df, HMM_INICIO)
             print("  OK")
         except Exception as e:
             print(f"  Falló: {e}")
 
-        print(f"\nEntrenando HMM expanding (sin leakage, mín {HMM_MIN_AÑOS} años)…")
+        print(f"\n[OPCIÓN A] Pre-computar HMM expanding (simula step001)…")
         try:
-            hmm_ex = hmm_expanding(df, HMM_INICIO, min_años=HMM_MIN_AÑOS)
+            hmm_ex_serie = precomputar_hmm_features(df)
+            # Convertir a tupla (idx, array) para graficar
+            hmm_ex = (hmm_ex_serie.index, hmm_ex_serie.fillna(-1).astype(int).values)
+            # Filtrar NaN
+            mask   = hmm_ex_serie.notna()
+            hmm_ex = (hmm_ex_serie.index[mask], hmm_ex_serie[mask].astype(int).values)
             print("  OK")
         except Exception as e:
             print(f"  Falló: {e}")
+            hmm_ex_serie = None
 
-        print(f"\nEntrenando HMM rolling (sin leakage, ventana {HMM_ROLLING_AÑOS} años)…")
+        print(f"\n[ROLLING {HMM_ROLLING_AÑOS}a] HMM rolling (sin leakage)…")
         try:
             hmm_ro = hmm_rolling(df, HMM_INICIO, ventana_años=HMM_ROLLING_AÑOS)
             print("  OK")
         except Exception as e:
             print(f"  Falló: {e}")
+
+        # Mostrar tabla comparativa Opción A vs Leakage
+        if hmm_ex is not None and hmm_c is not None:
+            hmm_ex_serie_full = pd.Series(
+                hmm_ex[1], index=hmm_ex[0], name="hmm_estado"
+            )
+            mostrar_como_feature(df, hmm_ex_serie_full, hmm_c)
 
     # 4. Estadísticas
     reportar_estadisticas(df, sadf_dict, hmm_c, hmm_ex, hmm_ro)
