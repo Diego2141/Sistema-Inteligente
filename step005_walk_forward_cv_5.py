@@ -695,12 +695,13 @@ def _ajustar_prophet_fold(fechas_train: pd.Series, y_train_vals: np.ndarray,
             changepoints=cp_valid if cp_valid else None,
             changepoint_prior_scale=prior,
             yearly_seasonality=True,
-            weekly_seasonality=True,
+            weekly_seasonality=False,  # datos solo días hábiles → ciclo 7d contaminado
             daily_seasonality=False,
             seasonality_mode="additive",
         )
-        m.add_seasonality(name="monthly",   period=21, fourier_order=5)
-        m.add_seasonality(name="quarterly", period=63, fourier_order=5)
+        # Períodos en días calendario (no hábiles): mensual≈30d, trimestral≈91d
+        m.add_seasonality(name="monthly",   period=30, fourier_order=5)
+        m.add_seasonality(name="quarterly", period=91, fourier_order=5)
         m.fit(df_p)
         return m
     except Exception as _e:
