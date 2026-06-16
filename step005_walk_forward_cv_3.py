@@ -196,7 +196,7 @@ FIX_REG_LAMBDA = False
 # True  → s fijo en S_FACTOR_FIJO × std_y (recomendado por el paper 2406.02293)
 #          Optuna no busca s; libera trials para otros hiperparámetros
 # False → Optuna busca s en [S_MIN_FACTOR, S_MAX_FACTOR] × std_y
-S_FIJO         = True
+S_FIJO         = False
 S_FACTOR_FIJO  = 0.05   # equivale a s=0.05 en datos estandarizados (centro del rango paper)
 
 # ── max_delta_step (recomienda el paper 2406.02293, pág. 10) ──────────────────
