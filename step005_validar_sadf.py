@@ -42,7 +42,9 @@ except ImportError:
 # ── Configuración ─────────────────────────────────────────────────────────────
 BASE_SISTEMA = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente")
 RUTA_MATRIZ  = BASE_SISTEMA / "1. Data" / "Clean" / "matriz_features.parquet"
+RUTA_BCRP    = BASE_SISTEMA / "1. Data" / "Raw" / "series_bcrp.xlsx"
 DIR_OUTPUT   = BASE_SISTEMA / "2. Output"
+HOJA_BCRP_EMBI = "EMBIG"   # hoja con PD04709XD (Spread EMBIG Perú)
 
 BANCO        = "SISTEMA"
 H_REF        = 2          # h mínimo — usamos target y garch_vol de este h
@@ -127,6 +129,57 @@ def cargar_datos(ruta: Path, banco: str, h_ref: int) -> pd.DataFrame:
     print(f"  {banco} | {len(df):,} obs | "
           f"{df.index.min().date()} → {df.index.max().date()}")
     return df
+
+
+def cargar_embig(ruta: Path = RUTA_BCRP, hoja: str = HOJA_BCRP_EMBI) -> pd.Series:
+    """
+    Lee el EMBIG Perú directo del Excel crudo del Add-In BCRPData
+    (no está en matriz_features.parquet — fue excluido en FEATURES_EXCLUIR).
+    Mismo parser que step001._leer_bcrp_excel().
+    """
+    if not ruta.exists():
+        print(f"  AVISO: no se encontró {ruta} — panel EMBIG omitido.")
+        return pd.Series(dtype=float, name="EMBI_PERU")
+
+    try:
+        raw = pd.read_excel(ruta, sheet_name=hoja, header=None)
+        header_row = None
+        for i, row in raw.iterrows():
+            vals = [str(v).strip().lower() for v in row if pd.notna(v)]
+            if any(v in ("date", "fecha") for v in vals):
+                header_row = i
+                break
+        if header_row is None:
+            header_row = 5
+
+        df = pd.read_excel(ruta, sheet_name=hoja, header=header_row)
+        df.columns = [str(c).strip() for c in df.columns]
+        col_fecha = next((c for c in df.columns if c.lower() in ("date", "fecha")), df.columns[0])
+        col_valor = next((c for c in df.columns if c.lower() in ("valores", "value", "values")), df.columns[1])
+        df = df[[col_fecha, col_valor]].copy()
+        df.columns = ["fecha", "EMBI_PERU"]
+
+        _meses_es = {
+            "Ene": "Jan", "Feb": "Feb", "Mar": "Mar", "Abr": "Apr",
+            "May": "May", "Jun": "Jun", "Jul": "Jul", "Ago": "Aug",
+            "Set": "Sep", "Oct": "Oct", "Nov": "Nov", "Dic": "Dec",
+        }
+        def _parse_fecha_bcrp(s):
+            s = str(s).strip()
+            for es, en in _meses_es.items():
+                s = s.replace(es, en)
+            return pd.to_datetime(s, errors="coerce", dayfirst=True)
+
+        df["fecha"] = df["fecha"].apply(_parse_fecha_bcrp)
+        df["EMBI_PERU"] = pd.to_numeric(
+            df["EMBI_PERU"].astype(str).str.replace(",", "."), errors="coerce"
+        )
+        df = df.dropna(subset=["fecha"]).set_index("fecha").sort_index()
+        print(f"  EMBIG leído: {len(df):,} obs, {df.index.min().date()} → {df.index.max().date()}")
+        return df["EMBI_PERU"]
+    except Exception as e:
+        print(f"  AVISO: error leyendo EMBIG ({e}) — panel omitido.")
+        return pd.Series(dtype=float, name="EMBI_PERU")
 
 
 # ── HMM ───────────────────────────────────────────────────────────────────────
@@ -561,10 +614,12 @@ def hmm_evolucion(df: pd.DataFrame, primer_ventana: int = HMM_PRIMER_VENTANA) ->
     return resultados
 
 
-def graficar_evolucion(df: pd.DataFrame, evol: dict) -> None:
+def graficar_evolucion(df: pd.DataFrame, evol: dict,
+                       embig: pd.Series = None) -> None:
     """
-    Fila 0: flujo neto diario (referencia visual).
-    Filas 1..N: un panel por año — re-etiqueta toda la historia con el
+    Fila 0: EMBIG Perú (riesgo país) — referencia visual, justo bajo el título.
+    Fila 1: flujo neto diario (referencia visual).
+    Filas 2..N+1: un panel por año — re-etiqueta toda la historia con el
     modelo entrenado hasta ese año.
     """
     años = sorted(evol.keys())
@@ -572,8 +627,10 @@ def graficar_evolucion(df: pd.DataFrame, evol: dict) -> None:
     if n == 0:
         return
 
-    n_rows   = 1 + n
-    h_ratios = [2.0] + [1.0] * n
+    tiene_embig = embig is not None and not embig.empty
+    n_extra  = 2 if tiene_embig else 1
+    n_rows   = n_extra + n
+    h_ratios = ([1.2] if tiene_embig else []) + [2.0] + [1.0] * n
 
     fig, axes = plt.subplots(
         n_rows, 1, figsize=(19, 2.0 + 2.5 * n),
@@ -584,13 +641,30 @@ def graficar_evolucion(df: pd.DataFrame, evol: dict) -> None:
     fig.suptitle(
         f"Evolución del HMM — {BANCO}  |  {N_ESTADOS} estados\n"
         f"Cada panel re-etiqueta TODA la historia con el modelo entrenado hasta ese año",
-        fontsize=12, fontweight="bold"
+        fontsize=12, fontweight="bold", y=0.995
     )
 
     colores_hmm = {0: "#4CAF50", 1: "#FFC107", 2: "#F44336"}
 
-    # ── Panel 0: flujo neto diario ────────────────────────────────────────────
-    ax_flujo  = axes[0]
+    siguiente = 0
+
+    # ── Panel EMBIG (justo debajo del título) ─────────────────────────────────
+    if tiene_embig:
+        ax_embig = axes[siguiente]
+        embig_v  = embig.reindex(df.index.union(embig.index)).sort_index()
+        embig_v  = embig_v.loc[embig_v.index >= df.index.min()]
+        ax_embig.plot(embig_v.index, embig_v.values, color="#6A1B9A", lw=0.8)
+        ax_embig.fill_between(embig_v.index, embig_v.values, alpha=0.12, color="#6A1B9A")
+        ax_embig.set_ylabel("EMBIG\n(pbs)", fontsize=8)
+        ax_embig.set_title("EMBIG Perú — riesgo país (pbs)", fontsize=9)
+        for ini, fin, _ in EPISODIOS:
+            ax_embig.axvspan(pd.Timestamp(ini), pd.Timestamp(fin),
+                             alpha=0.10, color="navy", zorder=0)
+        siguiente += 1
+
+    # ── Panel: flujo neto diario ───────────────────────────────────────────────
+    ax_flujo  = axes[siguiente]
+    siguiente += 1
     flujo     = df["target"].values
     fechas    = df.index
     colores_f = np.where(flujo >= 0, "#2196F3", "#F44336")
@@ -611,7 +685,7 @@ def graficar_evolucion(df: pd.DataFrame, evol: dict) -> None:
 
     # ── Paneles HMM por año ───────────────────────────────────────────────────
     for i, año in enumerate(años):
-        ax           = axes[1 + i]
+        ax           = axes[siguiente + i]
         idx_a, est_a = evol[año]
         vol_a        = df.loc[df.index.isin(idx_a), "garch_vol"]
 
@@ -642,7 +716,8 @@ def graficar_evolucion(df: pd.DataFrame, evol: dict) -> None:
                                        ["Calma", "Moderado", "Severo"])]
             ax.legend(handles=parches, fontsize=7, loc="upper left", ncol=3)
 
-    plt.tight_layout()
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    fig.subplots_adjust(top=0.93, hspace=0.05)
     ruta = DIR_OUTPUT / f"evolucion_hmm_{BANCO}.png"
     fig.savefig(ruta, dpi=130, bbox_inches="tight")
     print(f"\n  Gráfico evolución guardado: {ruta}")
@@ -794,8 +869,9 @@ def main():
     # 6. Gráfico de evolución: cómo se re-etiqueta la historia al añadir cada año
     if _HMM_OK:
         print(f"\nGenerando gráfico de evolución HMM...")
-        evol = hmm_evolucion(df, primer_ventana=HMM_PRIMER_VENTANA)
-        graficar_evolucion(df, evol)
+        evol  = hmm_evolucion(df, primer_ventana=HMM_PRIMER_VENTANA)
+        embig = cargar_embig()
+        graficar_evolucion(df, evol, embig=embig)
 
 
 if __name__ == "__main__":
