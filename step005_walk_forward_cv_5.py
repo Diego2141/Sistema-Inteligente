@@ -285,6 +285,15 @@ USAR_PROPHET = True    # descomposición estacional con Prophet
 USAR_SADF    = True    # features SADF (sadf_60d, sadf_120d)
 USAR_HMM     = True    # features HMM (hmm_estado, hmm_prob_stress)
 
+# ── Modo Prophet solo ──────────────────────────────────────────────────────────
+# True  → Prophet puro: se ajusta en TRAIN, predice VAL+TEST directamente
+#          Omite Optuna + XGB. Útil para diagnosticar qué aporta Prophet vs
+#          la realidad y qué recursos exporta (componentes, incertidumbre).
+#          Los cuantiles se construyen asumiendo normalidad con la incertidumbre
+#          de Prophet (yhat_lower / yhat_upper al 80%).
+# False → comportamiento normal: Prophet residualiza y XGB modela los residuos.
+SOLO_PROPHET = False
+
 PROPHET_CHANGEPOINTS      = ['2016-07-01']
 PROPHET_CHANGEPOINT_PRIOR = 0.05
 
@@ -2833,7 +2842,48 @@ def evaluar_banco(banco: str):
             y_val_m   = y_val
             std_y_m   = std_y
 
-        if SOLO_REGENERAR_PLOTS:
+        if SOLO_PROPHET:
+            # ── Modo Prophet solo: salta Optuna + XGB completamente ──────────
+            if _prophet_model is None:
+                logger.warning(f"  [SOLO_PROPHET] Fold {fold['fold']}: Prophet no disponible — omitiendo")
+                _fm2 = ((df["fecha_t"] >= fold["train_start"]) &
+                        (df["fecha_t"] <= fold["test_end"]))
+                if "target_original" in df.columns:
+                    df.loc[_fm2, "target"] = df.loc[_fm2, "target_original"]
+                continue
+
+            from scipy.stats import norm as _sp_norm
+
+            def _prophet_quantiles(model, fechas, quantiles):
+                """Genera cuantiles a partir de la incertidumbre de Prophet (normal approx.)."""
+                future = pd.DataFrame({"ds": pd.to_datetime(fechas)})
+                fc = model.predict(future)
+                yhat  = fc["yhat"].values
+                # Prophet devuelve CI al 80% por defecto
+                sigma = (fc["yhat_upper"].values - fc["yhat_lower"].values) / (2 * 1.2816)
+                sigma = np.maximum(sigma, 1.0)   # evitar sigma≈0
+                return {tau: yhat + sigma * _sp_norm.ppf(tau) for tau in quantiles}
+
+            _test_fechas = df[(df["fecha_t"] >= fold["test_start"]) &
+                              (df["fecha_t"] <= fold["test_end"])]["fecha_t"].values
+            _val_fechas  = df[(df["fecha_t"] >= fold["val_start"]) &
+                              (df["fecha_t"] < fold["test_start"])]["fecha_t"].values
+
+            preds_test = _prophet_quantiles(_prophet_model, _test_fechas, QUANTILES)
+            preds_val  = _prophet_quantiles(_prophet_model, _val_fechas,  QUANTILES)
+
+            # Restaurar target original antes de métricas
+            _fm_rest = ((df["fecha_t"] >= fold["train_start"]) &
+                        (df["fecha_t"] <= fold["test_end"]))
+            if "target_original" in df.columns:
+                df.loc[_fm_rest, "target"] = df.loc[_fm_rest, "target_original"]
+
+            best_params = {}
+            modelos     = {}
+            logger.info(f"    [SOLO_PROPHET] Predicciones generadas para "
+                        f"{len(_test_fechas)} filas TEST, {len(_val_fechas)} VAL")
+
+        elif SOLO_REGENERAR_PLOTS:
             # ── Modo replot: carga modelos del disco, salta Optuna ───────────
             fold_num  = fold["fold"]
             fold_info = _fm_idx.get(fold_num)
@@ -2868,18 +2918,20 @@ def evaluar_banco(banco: str):
                 except Exception as _e_diag:
                     logger.warning(f"    [diag] Fold {fold['fold']} falló: {_e_diag}")
 
-        # ── Predicciones + denormalización (v4) ─────────────────────────────
-        preds_test_raw = predecir_fold(modelos, X_test)
-        preds_val_raw  = predecir_fold(modelos, X_val)
-        if NORMALIZAR_TARGET and std_y > 0:
-            preds_test = {tau: arr * std_y for tau, arr in preds_test_raw.items()}
-            preds_val  = {tau: arr * std_y for tau, arr in preds_val_raw.items()}
-        else:
-            preds_test = preds_test_raw
-            preds_val  = preds_val_raw
+        # ── Predicciones + denormalización (v4) — solo para modos no-SOLO_PROPHET ──
+        if not SOLO_PROPHET:
+            preds_test_raw = predecir_fold(modelos, X_test)
+            preds_val_raw  = predecir_fold(modelos, X_val)
+            if NORMALIZAR_TARGET and std_y > 0:
+                preds_test = {tau: arr * std_y for tau, arr in preds_test_raw.items()}
+                preds_val  = {tau: arr * std_y for tau, arr in preds_val_raw.items()}
+            else:
+                preds_test = preds_test_raw
+                preds_val  = preds_val_raw
 
         # ── v5: Reconstrucción Prophet — sumar componente estacional ─────
-        if _hmm_prophet_ok and _prophet_model is not None:
+        # En SOLO_PROPHET las predicciones ya son de Prophet puro, sin XGB residuos
+        if not SOLO_PROPHET and _hmm_prophet_ok and _prophet_model is not None:
             try:
                 # Test: usar fechas_t_test para alinear yhat
                 _yhat_by_fecha = {}
@@ -2938,7 +2990,19 @@ def evaluar_banco(banco: str):
                 return d.get(key, default)
 
             for row in (row_test, row_val):
-                if MODELO_CV == "lgbm":
+                if SOLO_PROPHET:
+                    row.update({
+                        "s_optimo"        : 0.0,
+                        "learning_rate"   : 0.0,
+                        "max_depth"       : 0,
+                        "n_estimators"    : 0,
+                        "min_child_weight": 0,
+                        "subsample"       : 0.0,
+                        "colsample_bytree": 0.0,
+                        "reg_alpha"       : 0.0,
+                        "reg_lambda"      : 0.0,
+                    })
+                elif MODELO_CV == "lgbm":
                     row.update({
                         "s_optimo"        : 0.0,
                         "learning_rate"   : round(_hp(best_params, "learning_rate"), 4),
