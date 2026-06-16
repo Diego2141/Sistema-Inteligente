@@ -42,6 +42,13 @@ DIR_OUTPUT.mkdir(parents=True, exist_ok=True)
 # Bancos a analizar  (None = todos los disponibles)
 BANCOS       = ["SISTEMA"]
 
+# ── Transformación del target ──────────────────────────────────────────────────
+# True  → Prophet entrena sobre |flujo_neto| (magnitud pura, siempre ≥ 0)
+#          Útil para ver si la estacionalidad del volumen es más predecible
+#          que la del flujo con signo.
+# False → flujo neto original (con signo)
+TARGET_ABS   = False
+
 # Folds walk-forward (mismas fechas que step005_walk_forward_cv_5)
 H_REF        = 2    # h para extraer flujo neto diario
 
@@ -209,6 +216,11 @@ def main():
 
     df_all = pd.read_parquet(RUTA_MATRIZ, filters=[("h", "==", H_REF)])
     df_all["fecha_t"] = pd.to_datetime(df_all["fecha_t"])
+
+    if TARGET_ABS:
+        df_all["target"] = df_all["target"].abs()
+        print("  [TARGET_ABS] target transformado a valor absoluto (|flujo_neto|)")
+
     bancos = BANCOS or df_all["banco"].unique().tolist()
 
     resumen = []

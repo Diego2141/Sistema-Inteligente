@@ -294,6 +294,10 @@ USAR_HMM     = True    # features HMM (hmm_estado, hmm_prob_stress)
 # False → comportamiento normal: Prophet residualiza y XGB modela los residuos.
 SOLO_PROPHET = False
 
+# True  → en modo SOLO_PROPHET, entrena Prophet sobre |flujo_neto|
+# False → flujo neto con signo (default)
+PROPHET_TARGET_ABS = False
+
 PROPHET_CHANGEPOINTS      = ['2016-07-01']
 PROPHET_CHANGEPOINT_PRIOR = 0.05
 
@@ -2758,6 +2762,9 @@ def evaluar_banco(banco: str):
                                  .drop_duplicates("fecha_t")
                                  .sort_values("fecha_t")
                                  [["fecha_t", "target"]].dropna())
+
+                if SOLO_PROPHET and PROPHET_TARGET_ABS:
+                    _daily_tr_p["target"] = _daily_tr_p["target"].abs()
 
                 if len(_daily_tr_p) >= 120:
                     _prophet_model = _ajustar_prophet_fold(

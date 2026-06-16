@@ -192,12 +192,6 @@ assert MODELO_CV in ("xgb", "lgbm", "xgb_qt"), \
 FIX_REG_ALPHA  = False
 FIX_REG_LAMBDA = False
 
-# ── Transformación del target ──────────────────────────────────────────────────
-# True  → target = |flujo_neto|  (valor absoluto — prueba: ¿predecir magnitud
-#          en lugar de dirección + magnitud mejora las métricas?)
-# False → target original (flujo neto con signo)
-TARGET_ABS     = False
-
 # ── Parámetro s (suavizado Pinball-Arctan) ────────────────────────────────────
 # True  → s fijo en S_FACTOR_FIJO × std_y (recomendado por el paper 2406.02293)
 #          Optuna no busca s; libera trials para otros hiperparámetros
@@ -2345,10 +2339,6 @@ def evaluar_banco(banco: str):
     df = pd.read_parquet(RUTA_MATRIZ, filters=[("banco", "==", banco)])
     df["fecha_t"] = pd.to_datetime(df["fecha_t"])
     df = df.sort_values(["fecha_t", "h"]).reset_index(drop=True)
-
-    if TARGET_ABS:
-        df["target"] = df["target"].abs()
-        logger.info("  [TARGET_ABS] target transformado a valor absoluto")
 
     if df.empty or df["target"].notna().sum() < 500:
         logger.warning(f"  [{banco}] Datos insuficientes — omitiendo")
