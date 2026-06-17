@@ -83,8 +83,8 @@ PROPHET_CHANGEPOINTS      = ['2016-07-01']
 PROPHET_CHANGEPOINT_PRIOR = 0.05   # no aplica con growth='flat', se conserva por compatibilidad
 
 # Ventanas para el gráfico de medias móviles (en días hábiles)
-# 22 ≈ 1 mes  |  66 ≈ 1 trimestre
-MA_WINDOWS = [22, 66]
+# 5 ≈ 1 semana hábil  |  22 ≈ 1 mes hábil
+MA_WINDOWS = [5, 22]
 
 # ── Carga de datos ─────────────────────────────────────────────────────────────
 
@@ -285,7 +285,7 @@ def graficar_medias_moviles(fold_num, banco, df_train, df_test, df_val,
         ax.axhline(0, color="k", lw=0.5, ls="--", alpha=0.4)
         ax.set_ylabel("miles de mill. S/.", fontsize=8)
 
-        dias_label = f"{w}d ≈ {'1 mes' if w <= 25 else '1 trimestre' if w <= 70 else str(w) + 'd'}"
+        dias_label = f"{w}d ≈ {'1 semana hábil' if w <= 5 else '1 mes hábil' if w <= 25 else '1 trimestre' if w <= 70 else str(w) + 'd'}"
         ax.set_title(f"Ventana MA: {dias_label}", fontsize=9, loc="left")
         ax.legend(fontsize=8, ncol=4, loc="upper left")
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
