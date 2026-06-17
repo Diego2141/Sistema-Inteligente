@@ -1288,6 +1288,13 @@ def preparar_fold_data(df, fold, cols_feat):
     h_test         = df_test.loc[mte,  "h"].values
     fechas_t_test  = pd.to_datetime(df_test.loc[mte, "fecha_t"].values)
 
+    # Convertir columnas pandas ExtensionArray (Int8, boolean, etc.) a float64
+    for _df in [X_train, X_val, X_test]:
+        ext_cols = [c for c in _df.columns
+                    if pd.api.types.is_extension_array_dtype(_df[c])]
+        if ext_cols:
+            _df[ext_cols] = _df[ext_cols].astype("float64")
+
     return (X_train, y_train, X_val, y_val, X_test, y_test,
             h_train, h_val, h_test, fechas_t_test)
 
