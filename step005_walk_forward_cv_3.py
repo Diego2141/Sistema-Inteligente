@@ -199,7 +199,18 @@ FIX_REG_LAMBDA = False
 S_FIJO         = True
 S_FACTOR_FIJO  = 0.05   # equivale a s=0.05 en datos estandarizados (centro del rango paper)
 
-# ── max_delta_step (recomienda el paper 2406.02293, pág. 10) ──────────────────
+# ── Calibración post-hoc (shift aditivo estimado en VAL) ─────────────────────
+# True  → después de predecir, calcula el sesgo sistemático en VAL y lo corrige
+#         en TEST: todas las predicciones se desplazan por el percentil P del
+#         residuo (actual − Q50_pred) en VAL.
+#         P=50 → elimina sesgo (mediana de errores)
+#         P<50 → introduce sesgo negativo (conservador para riesgo de liquidez)
+#         P=25 → desplaza hacia abajo con sesgo negativo moderado
+# False → sin calibración (comportamiento original)
+CALIBRACION_POSTHOC   = False
+CALIBRACION_PERCENTIL = 25    # percentil del residuo VAL usado como shift
+
+
 # Limita el salto máximo de cada árbol para evitar overshooting con gradientes
 # grandes. El paper usa 0.5 sobre targets estandarizados (std_y≈1); para datos
 # sin estandarizar el equivalente es 0.5 × std_y por fold.
@@ -2482,6 +2493,16 @@ def evaluar_banco(banco: str):
 
         preds_test = predecir_fold(modelos, X_test)
         preds_val  = predecir_fold(modelos, X_val)
+
+        # ── Calibración post-hoc ─────────────────────────────────────────────
+        if CALIBRACION_POSTHOC and 0.50 in preds_val:
+            _res_val = y_val.values - preds_val[0.50]
+            _shift   = float(np.percentile(_res_val, CALIBRACION_PERCENTIL))
+            preds_test = {tau: arr + _shift for tau, arr in preds_test.items()}
+            preds_val  = {tau: arr + _shift for tau, arr in preds_val.items()}
+            logger.info(f"    [CALIBRACION] shift P{CALIBRACION_PERCENTIL}={_shift:,.0f} "
+                        f"(sesgo VAL Q50: media={_res_val.mean():,.0f}, "
+                        f"mediana={np.median(_res_val):,.0f})")
 
         if not SOLO_REGENERAR_PLOTS:
             row_test = calcular_metricas_fold(preds_test, y_test.values, fold, "test")
