@@ -82,6 +82,10 @@ FOLDS = [
 PROPHET_CHANGEPOINTS      = ['2016-07-01']
 PROPHET_CHANGEPOINT_PRIOR = 0.05   # no aplica con growth='flat', se conserva por compatibilidad
 
+# Ventanas para el gráfico de medias móviles (en días hábiles)
+# 22 ≈ 1 mes  |  66 ≈ 1 trimestre
+MA_WINDOWS = [22, 66]
+
 # ── Carga de datos ─────────────────────────────────────────────────────────────
 
 def cargar(banco: str, h_ref: int = H_REF) -> pd.DataFrame:
@@ -201,6 +205,107 @@ def graficar_fold(fold_num, banco, df_train, df_test, df_val, fc_test, fc_val,
     print(f"  Guardado: {ruta.name}")
 
 
+def graficar_medias_moviles(fold_num, banco, df_train, df_test, df_val,
+                            fc_test, fc_val):
+    """
+    Gráfico de medias móviles: real suavizado vs Prophet suavizado.
+
+    Por cada ventana en MA_WINDOWS genera un panel con:
+      · MA(real)          — línea sólida azul
+      · MA(yhat)          — línea discontinua roja
+      · MA(yhat_lower/upper) — banda sombreada (IC 80% suavizado)
+      · Línea cero
+
+    Cubre los últimos 2 años de TRAIN + VAL + TEST para ver cómo
+    Prophet captura la estacionalidad en el período relevante.
+    """
+    # Construir serie continua: tail train + val + test
+    train_tail = df_train[df_train["fecha_t"] >= df_train["fecha_t"].max()
+                          - pd.DateOffset(years=2)].copy()
+
+    # Alinear predicciones con fechas reales
+    fc_val_s  = fc_val.set_index("ds")[["yhat", "yhat_lower", "yhat_upper"]]
+    fc_test_s = fc_test.set_index("ds")[["yhat", "yhat_lower", "yhat_upper"]]
+    fc_all    = pd.concat([fc_val_s, fc_test_s]).sort_index()
+
+    # Serie completa de realizado (train_tail + val + test)
+    real_all = (pd.concat([
+                    train_tail.set_index("fecha_t")[["target"]],
+                    df_val.set_index("fecha_t")[["target"]],
+                    df_test.set_index("fecha_t")[["target"]],
+                ])
+                .sort_index()
+                .loc[~lambda x: x.index.duplicated()])
+
+    n_panels = len(MA_WINDOWS)
+    fig, axes = plt.subplots(n_panels, 1,
+                             figsize=(16, 4 * n_panels),
+                             sharex=True,
+                             gridspec_kw={"hspace": 0.12})
+    if n_panels == 1:
+        axes = [axes]
+
+    fig.suptitle(
+        f"Medias móviles: real vs Prophet — {banco}  |  Fold {fold_num}  "
+        f"|  TRAIN hasta {df_train['fecha_t'].max().date()}",
+        fontsize=11, fontweight="bold", y=1.01,
+    )
+
+    # Zona de fondo: val (celeste) y test (naranja claro)
+    val_ini  = pd.Timestamp(df_val["fecha_t"].min())
+    val_fin  = pd.Timestamp(df_val["fecha_t"].max())
+    test_ini = pd.Timestamp(df_test["fecha_t"].min())
+    test_fin = pd.Timestamp(df_test["fecha_t"].max())
+
+    for ax, w in zip(axes, MA_WINDOWS):
+        ma_real  = real_all["target"].rolling(w, min_periods=max(1, w // 2)).mean()
+        ma_yhat  = fc_all["yhat"].rolling(w, min_periods=max(1, w // 2)).mean()
+        ma_lower = fc_all["yhat_lower"].rolling(w, min_periods=max(1, w // 2)).mean()
+        ma_upper = fc_all["yhat_upper"].rolling(w, min_periods=max(1, w // 2)).mean()
+
+        # Zonas de período
+        ax.axvspan(val_ini,  val_fin,  alpha=0.07, color="steelblue", label="_val")
+        ax.axvspan(test_ini, test_fin, alpha=0.07, color="tomato",    label="_test")
+
+        # Banda IC suavizada (solo en VAL+TEST)
+        mask_fc = ma_upper.index >= val_ini
+        ax.fill_between(ma_upper.index[mask_fc],
+                        ma_lower[mask_fc] / 1e9,
+                        ma_upper[mask_fc] / 1e9,
+                        alpha=0.18, color="red", label="IC 80% (Prophet, suav.)")
+
+        # Realizado suavizado (completo: train_tail + val + test)
+        ax.plot(ma_real.index, ma_real / 1e9,
+                color="steelblue", lw=1.6, label=f"Real MA-{w}")
+
+        # Predicción suavizada (solo VAL+TEST)
+        ax.plot(ma_yhat.index[mask_fc], ma_yhat[mask_fc] / 1e9,
+                "--", color="red", lw=1.5, label=f"Prophet MA-{w}")
+
+        ax.axhline(0, color="k", lw=0.5, ls="--", alpha=0.4)
+        ax.set_ylabel("miles de mill. S/.", fontsize=8)
+
+        dias_label = f"{w}d ≈ {'1 mes' if w <= 25 else '1 trimestre' if w <= 70 else str(w) + 'd'}"
+        ax.set_title(f"Ventana MA: {dias_label}", fontsize=9, loc="left")
+        ax.legend(fontsize=8, ncol=4, loc="upper left")
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
+        ax.grid(True, alpha=0.2)
+
+    # Etiquetas de zona en el último eje
+    axes[-1].set_xlabel("Fecha", fontsize=9)
+    axes[0].text(val_ini  + (val_fin  - val_ini)  / 2, axes[0].get_ylim()[1],
+                 "VAL",  ha="center", va="top", fontsize=8, color="steelblue", alpha=0.7)
+    axes[0].text(test_ini + (test_fin - test_ini) / 2, axes[0].get_ylim()[1],
+                 "TEST", ha="center", va="top", fontsize=8, color="tomato",    alpha=0.7)
+
+    fig.autofmt_xdate(rotation=30, ha="right")
+    plt.tight_layout()
+    ruta = DIR_OUTPUT / f"ma_{banco}_fold{fold_num:02d}.png"
+    fig.savefig(ruta, dpi=130, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Guardado: {ruta.name}")
+
+
 def graficar_componentes(fold_num, banco, model, df_train):
     """Grafica descomposición de componentes de Prophet."""
     futuro = pd.DataFrame({"ds": pd.to_datetime(df_train["fecha_t"].values)})
@@ -290,6 +395,8 @@ def main():
 
             graficar_fold(fn, banco, df_train, df_test, df_val,
                           fc_test, fc_val, model)
+            graficar_medias_moviles(fn, banco, df_train, df_test, df_val,
+                                    fc_test, fc_val)
             graficar_componentes(fn, banco, model, df_train)
 
     # Resumen CSV
