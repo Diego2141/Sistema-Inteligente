@@ -209,6 +209,10 @@ S_FACTOR_FIJO  = 0.05   # equivale a s=0.05 en datos estandarizados (centro del 
 # False → sin calibración (comportamiento original)
 CALIBRACION_POSTHOC   = False
 CALIBRACION_PERCENTIL = 25    # percentil del residuo VAL usado como shift
+# Límite del shift como fracción de std_y: previene correcciones exageradas
+# que distorsionan el eje Y cuando el modelo tiene sesgo grande.
+# None → sin límite (el valor original antes de esta corrección)
+CALIBRACION_MAX_SHIFT_FACTOR = 0.5   # e.g. 0.5 → shift ≤ ±0.5×std_y
 
 
 # Limita el salto máximo de cada árbol para evitar overshooting con gradientes
@@ -2498,21 +2502,29 @@ def evaluar_banco(banco: str):
         # Shift calculado por separado para cada h en VAL y aplicado solo a
         # filas del mismo h en TEST/VAL. Evita que residuos de horizontes
         # largos (mayor varianza) contaminen el percentil de horizontes cortos.
+        # CALIBRACION_MAX_SHIFT_FACTOR limita el shift a ±factor×std_y para
+        # evitar que un sesgo grande del modelo distorsione el eje Y.
         if CALIBRACION_POSTHOC and 0.50 in preds_val:
+            _cap = (CALIBRACION_MAX_SHIFT_FACTOR * std_y
+                    if CALIBRACION_MAX_SHIFT_FACTOR is not None else np.inf)
             _shifts_h = {}
             for _h in np.unique(h_val):
                 _mask_h = h_val == _h
                 _res_h  = y_val.values[_mask_h] - preds_val[0.50][_mask_h]
                 if len(_res_h) >= 2:
-                    _shifts_h[int(_h)] = float(np.percentile(_res_h, CALIBRACION_PERCENTIL))
+                    _s = float(np.percentile(_res_h, CALIBRACION_PERCENTIL))
+                    _shifts_h[int(_h)] = float(np.clip(_s, -_cap, _cap))
             _adj_test = np.array([_shifts_h.get(int(h), 0.0) for h in h_test])
             _adj_val  = np.array([_shifts_h.get(int(h), 0.0) for h in h_val])
             preds_test = {tau: arr + _adj_test for tau, arr in preds_test.items()}
             preds_val  = {tau: arr + _adj_val  for tau, arr in preds_val.items()}
-            logger.info(f"    [CALIBRACION] P{CALIBRACION_PERCENTIL} por-h: "
-                        f"h=1→{_shifts_h.get(1,0):,.0f}  "
-                        f"h=38→{_shifts_h.get(38,0):,.0f}  "
-                        f"h=75→{_shifts_h.get(75,0):,.0f}")
+            logger.info(
+                f"    [CALIBRACION] P{CALIBRACION_PERCENTIL} por-h "
+                f"(cap=±{_cap:,.0f} = ±{CALIBRACION_MAX_SHIFT_FACTOR}×std_y): "
+                f"h=1→{_shifts_h.get(1,0):,.0f}  "
+                f"h=38→{_shifts_h.get(38,0):,.0f}  "
+                f"h=75→{_shifts_h.get(75,0):,.0f}"
+            )
 
         if not SOLO_REGENERAR_PLOTS:
             row_test = calcular_metricas_fold(preds_test, y_test.values, fold, "test")
