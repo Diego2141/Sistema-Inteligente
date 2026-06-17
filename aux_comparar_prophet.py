@@ -229,13 +229,12 @@ def graficar_medias_moviles(fold_num, banco, df_train, df_test, df_val,
     fc_all    = pd.concat([fc_val_s, fc_test_s]).sort_index()
 
     # Serie completa de realizado (train_tail + val + test)
-    real_all = (pd.concat([
-                    train_tail.set_index("fecha_t")[["target"]],
-                    df_val.set_index("fecha_t")[["target"]],
-                    df_test.set_index("fecha_t")[["target"]],
-                ])
-                .sort_index()
-                .loc[~lambda x: x.index.duplicated()])
+    real_all = pd.concat([
+        train_tail.set_index("fecha_t")[["target"]],
+        df_val.set_index("fecha_t")[["target"]],
+        df_test.set_index("fecha_t")[["target"]],
+    ]).sort_index()
+    real_all = real_all[~real_all.index.duplicated()]
 
     n_panels = len(MA_WINDOWS)
     fig, axes = plt.subplots(n_panels, 1,
