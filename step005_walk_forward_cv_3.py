@@ -2494,15 +2494,25 @@ def evaluar_banco(banco: str):
         preds_test = predecir_fold(modelos, X_test)
         preds_val  = predecir_fold(modelos, X_val)
 
-        # ── Calibración post-hoc ─────────────────────────────────────────────
+        # ── Calibración post-hoc (por horizonte h) ───────────────────────────
+        # Shift calculado por separado para cada h en VAL y aplicado solo a
+        # filas del mismo h en TEST/VAL. Evita que residuos de horizontes
+        # largos (mayor varianza) contaminen el percentil de horizontes cortos.
         if CALIBRACION_POSTHOC and 0.50 in preds_val:
-            _res_val = y_val.values - preds_val[0.50]
-            _shift   = float(np.percentile(_res_val, CALIBRACION_PERCENTIL))
-            preds_test = {tau: arr + _shift for tau, arr in preds_test.items()}
-            preds_val  = {tau: arr + _shift for tau, arr in preds_val.items()}
-            logger.info(f"    [CALIBRACION] shift P{CALIBRACION_PERCENTIL}={_shift:,.0f} "
-                        f"(sesgo VAL Q50: media={_res_val.mean():,.0f}, "
-                        f"mediana={np.median(_res_val):,.0f})")
+            _shifts_h = {}
+            for _h in np.unique(h_val):
+                _mask_h = h_val == _h
+                _res_h  = y_val.values[_mask_h] - preds_val[0.50][_mask_h]
+                if len(_res_h) >= 2:
+                    _shifts_h[int(_h)] = float(np.percentile(_res_h, CALIBRACION_PERCENTIL))
+            _adj_test = np.array([_shifts_h.get(int(h), 0.0) for h in h_test])
+            _adj_val  = np.array([_shifts_h.get(int(h), 0.0) for h in h_val])
+            preds_test = {tau: arr + _adj_test for tau, arr in preds_test.items()}
+            preds_val  = {tau: arr + _adj_val  for tau, arr in preds_val.items()}
+            logger.info(f"    [CALIBRACION] P{CALIBRACION_PERCENTIL} por-h: "
+                        f"h=1→{_shifts_h.get(1,0):,.0f}  "
+                        f"h=38→{_shifts_h.get(38,0):,.0f}  "
+                        f"h=75→{_shifts_h.get(75,0):,.0f}")
 
         if not SOLO_REGENERAR_PLOTS:
             row_test = calcular_metricas_fold(preds_test, y_test.values, fold, "test")
