@@ -80,7 +80,7 @@ FOLDS = [
 ]
 
 PROPHET_CHANGEPOINTS      = ['2016-07-01']
-PROPHET_CHANGEPOINT_PRIOR = 0.05
+PROPHET_CHANGEPOINT_PRIOR = 0.05   # no aplica con growth='flat', se conserva por compatibilidad
 
 # ── Carga de datos ─────────────────────────────────────────────────────────────
 
@@ -102,27 +102,35 @@ def ajustar_prophet(fechas_train, y_train_vals):
 
     df_p = pd.DataFrame({"ds": pd.to_datetime(fechas_train),
                           "y":  y_train_vals}).dropna()
-    cp_valid = [c for c in PROPHET_CHANGEPOINTS
-                if df_p["ds"].min() < pd.Timestamp(c) < df_p["ds"].max()]
+
+    # Normalizar: flujo neto en escala grande causa inestabilidad numérica en Fourier
+    _scale = float(df_p["y"].std()) or 1.0
+    df_p["y"] = df_p["y"] / _scale
+
     m = Prophet(
-        changepoints=cp_valid if cp_valid else None,
-        changepoint_prior_scale=PROPHET_CHANGEPOINT_PRIOR,
+        growth="flat",                # flujo neto es mean-reverting: sin tendencia secular
         yearly_seasonality=True,
-        weekly_seasonality=False,  # datos solo días hábiles → ciclo 7d contaminado
+        weekly_seasonality=False,     # datos solo días hábiles → ciclo 7d contaminado
         daily_seasonality=False,
         seasonality_mode="additive",
         interval_width=0.80,
     )
-    # Períodos en días calendario (no hábiles): mensual≈30d, trimestral≈91d
-    m.add_seasonality(name="monthly",   period=30, fourier_order=5)
-    m.add_seasonality(name="quarterly", period=91, fourier_order=5)
+    # Períodos en días calendario: mensual≈30d, trimestral≈91d  |  fourier_order=3: menos sobreajuste
+    m.add_seasonality(name="monthly",   period=30, fourier_order=3)
+    m.add_seasonality(name="quarterly", period=91, fourier_order=3)
     m.fit(df_p)
+    m._y_scale = _scale   # guardar escala para desnormalizar en predict
     return m
 
 
 def predecir(model, fechas):
     future = pd.DataFrame({"ds": pd.to_datetime(fechas)})
-    return model.predict(future)
+    fc     = model.predict(future)
+    scale  = getattr(model, "_y_scale", 1.0)
+    fc["yhat"]       = fc["yhat"]       * scale
+    fc["yhat_lower"] = fc["yhat_lower"] * scale
+    fc["yhat_upper"] = fc["yhat_upper"] * scale
+    return fc
 
 
 # ── Métricas ───────────────────────────────────────────────────────────────────

@@ -692,21 +692,22 @@ def _ajustar_prophet_fold(fechas_train: pd.Series, y_train_vals: np.ndarray,
         df_p = pd.DataFrame({"ds": pd.to_datetime(fechas_train),
                               "y":  y_train_vals}).dropna()
 
-        cp_valid = [c for c in changepoints
-                    if df_p["ds"].min() < pd.Timestamp(c) < df_p["ds"].max()]
+        # Normalizar: flujo neto en escala grande causa inestabilidad numérica en Fourier
+        _scale = float(df_p["y"].std()) or 1.0
+        df_p["y"] = df_p["y"] / _scale
 
         m = Prophet(
-            changepoints=cp_valid if cp_valid else None,
-            changepoint_prior_scale=prior,
+            growth="flat",                # flujo neto es mean-reverting: sin tendencia secular
             yearly_seasonality=True,
-            weekly_seasonality=False,  # datos solo días hábiles → ciclo 7d contaminado
+            weekly_seasonality=False,     # datos solo días hábiles → ciclo 7d contaminado
             daily_seasonality=False,
             seasonality_mode="additive",
         )
-        # Períodos en días calendario (no hábiles): mensual≈30d, trimestral≈91d
-        m.add_seasonality(name="monthly",   period=30, fourier_order=5)
-        m.add_seasonality(name="quarterly", period=91, fourier_order=5)
+        # Períodos en días calendario: mensual≈30d, trimestral≈91d  |  fourier_order=3: menos sobreajuste
+        m.add_seasonality(name="monthly",   period=30, fourier_order=3)
+        m.add_seasonality(name="quarterly", period=91, fourier_order=3)
         m.fit(df_p)
+        m._y_scale = _scale   # guardar escala para desnormalizar en predict
         return m
     except Exception as _e:
         logger.warning(f"    [Prophet] Error al ajustar: {_e}")
@@ -714,10 +715,11 @@ def _ajustar_prophet_fold(fechas_train: pd.Series, y_train_vals: np.ndarray,
 
 
 def _predecir_prophet(model, fechas: pd.DatetimeIndex) -> np.ndarray:
-    """Devuelve yhat de Prophet para un array de fechas."""
+    """Devuelve yhat de Prophet para un array de fechas (desnormalizado)."""
     future = pd.DataFrame({"ds": pd.to_datetime(fechas)})
     fc     = model.predict(future)
-    return fc["yhat"].values
+    scale  = getattr(model, "_y_scale", 1.0)
+    return fc["yhat"].values * scale
 
 
 # Alias for interface compatibility
