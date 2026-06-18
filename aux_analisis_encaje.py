@@ -24,7 +24,7 @@ Identidad contable del balance de encaje:
 Datos requeridos:
   H:/DPINV/CARPETAS PERSONALES/DIEGO/3. Sistema Inteligente/1. Data/Raw/EncajeD.xlsx
 
-Outputs (guardados en la misma carpeta que este script):
+Outputs (guardados en Output/encaje/ relativo a este script):
   encaje_01_componentes_tiempo.png
   encaje_02_patron_dia_mes.png
   encaje_03_scatter_exceso_retiro.png
@@ -49,7 +49,8 @@ warnings.filterwarnings("ignore")
 RUTA_DATOS = pathlib.Path(
     r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Raw\EncajeD.xlsx"
 )
-DIR_OUTPUT = pathlib.Path(__file__).parent   # misma carpeta que este script
+DIR_OUTPUT = pathlib.Path(__file__).parent / "Output" / "encaje"
+DIR_OUTPUT.mkdir(parents=True, exist_ok=True)
 
 COLORES = {
     "cta_cte":   "#1f77b4",
@@ -466,6 +467,28 @@ print(f"    Media(Δcta_cte + Δovernight + Δactivos + retiro_neto) = {media_su
 print(f"    Std del residuo = {std_suma/1e6:.0f}M")
 print("    → La identidad se cumple. El residuo es ruido de redondeo.")
 
+print("\n[2b] VARIACIÓN DIARIA PROMEDIO DE CADA COMPONENTE (M USD)")
+df_id_tmp = df[["d_cta_cte","d_overnight","d_activos","retiro_neto"]].dropna()
+for col, nombre in [("d_cta_cte",   "Δ Cta Cte BCR  "),
+                     ("d_overnight", "Δ Overnight BCR"),
+                     ("d_activos",   "Δ Activos      "),
+                     ("retiro_neto", "Retiro Neto    ")]:
+    v = df_id_tmp[col]
+    print(f"    {nombre}  media={v.mean()/1e6:+7.1f}M  "
+          f"std={v.std()/1e6:6.0f}M  "
+          f"p10={v.quantile(.10)/1e6:+7.0f}M  "
+          f"p90={v.quantile(.90)/1e6:+7.0f}M")
+print(f"    {'SUMA (debe≈0)   ':22s}  media={df_id_tmp.sum(axis=1).mean()/1e6:+7.1f}M")
+
+print("\n[2c] CONTRIBUCIÓN DE CADA CANAL POR FASE (promedio diario, M USD)")
+comp_cols_r = ["d_cta_cte","d_overnight","d_activos","retiro_neto"]
+comp_names_r= ["Δ Cta Cte","Δ Overnight","Δ Activos ","Retiro    "]
+fase_medias = df.groupby("fase")[comp_cols_r].mean() / 1e6
+print(f"    {'Fase':<22}", "  ".join(f"{n:>10}" for n in comp_names_r))
+for f in ["A_inicio(1-4)","B_acum(5-21)","C_rentab(22-28)","D_cierre(29-31)"]:
+    vals = "  ".join(f"{fase_medias.loc[f,c]:+10.1f}" for c in comp_cols_r)
+    print(f"    {f:<22}  {vals}")
+
 print("\n[3] RETIRO NETO PROMEDIO POR FASE (M USD)")
 fase_res = df.groupby("fase")["retiro_neto"].agg(
     media=lambda x: round(x.mean()/1e6),
@@ -488,9 +511,12 @@ print("    5. exceso_acum_periodo_lag1 [exceso acumulado desde inicio del mes]")
 
 print()
 print("Archivos generados en:", DIR_OUTPUT)
-print("  encaje_01_componentes_tiempo.png")
-print("  encaje_02_patron_dia_mes.png")
-print("  encaje_03_scatter_exceso_retiro.png")
-print("  encaje_04_fases_boxplot.png")
-print("  encaje_05_identidad_contable.png")
-print("  encaje_06_r2_por_anio.png")
+for i, nombre in enumerate([
+    "encaje_01_componentes_tiempo.png",
+    "encaje_02_patron_dia_mes.png",
+    "encaje_03_scatter_exceso_retiro.png",
+    "encaje_04_fases_boxplot.png",
+    "encaje_05_identidad_contable.png",
+    "encaje_06_r2_por_anio.png",
+], start=1):
+    print(f"  {i}. {nombre}")
