@@ -49,7 +49,9 @@ warnings.filterwarnings("ignore")
 RUTA_DATOS = pathlib.Path(
     r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Raw\EncajeD.xlsx"
 )
-DIR_OUTPUT = pathlib.Path(__file__).parent / "Output" / "encaje"
+# RUTA_DATOS: .../3. Sistema Inteligente/1. Data/Raw/EncajeD.xlsx
+# Subir 3 niveles da la raíz del proyecto → Output/encaje
+DIR_OUTPUT = RUTA_DATOS.parent.parent.parent / "Output" / "encaje"
 DIR_OUTPUT.mkdir(parents=True, exist_ok=True)
 
 COLORES = {
