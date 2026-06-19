@@ -172,9 +172,46 @@ df["proporcion_usada"] = (
     df["retiro_acum_mes_lag1"].abs() / df["techo_10h"].replace(0, np.nan)
 ).clip(lower=0)
 
+# =============================================================================
+# ESTADO LIBRE: banco puede retirar (transición irreversible dentro del mes)
+# Condición de entrada: faltante_lag1 ≤ encaje_lag1
+#   → con un día más al nivel actual, ya cumpliría el exigible del mes
+# Una vez activo, permanece el resto del mes (encaje_acum solo crece)
+# =============================================================================
+df["encaje_lag1"]     = df["encaje"].shift(1)
+df["condicion_libre"] = (df["faltante_lag1"] <= df["encaje_lag1"]).astype(int)
+df["libre"] = (
+    df.groupby(["ano","mes"])["condicion_libre"]
+    .cummax()
+    .astype(bool)
+)
+
+# Días desde inicio del estado libre en el mes (0 = primer día libre)
+df["libre_prev"]        = df.groupby(["ano","mes"])["libre"].shift(1).fillna(False)
+df["es_inicio_libre"]   = df["libre"] & ~df["libre_prev"]
+df["dias_desde_libre"]  = df.groupby(["ano","mes"])["libre"].cumsum().where(df["libre"]) - 1
+
+# Resumen mensual con día de inicio libre y métricas de cumplimiento
+def _resumen_mes(g):
+    dia_libre = g.loc[g["es_inicio_libre"], "dia_mes"].values
+    return pd.Series({
+        "dia_inicio_libre":  dia_libre[0] if len(dia_libre) > 0 else np.nan,
+        "retiro_acum_fin":   g["retiro_acum_mes"].iloc[-1],
+        "techo_mes":         g["techo_10h"].dropna().iloc[0] if g["techo_10h"].notna().any() else np.nan,
+        "n_dias_libre":      int(g["libre"].sum()),
+        "n_dias_frenado":    int((~g["libre"]).sum()),
+        "retiro_en_libre":   g.loc[g["libre"],   "retiro_neto"].sum(),
+        "retiro_en_frenado": g.loc[~g["libre"],  "retiro_neto"].sum(),
+    })
+
+df_mensual = df.groupby(["ano","mes"]).apply(_resumen_mes).reset_index()
+
 n_techo = df["techo_10h"].notna().sum()
+n_libre = df["libre"].sum()
 print(f"  Faltante calculado:    {df['faltante_lag1'].notna().sum():,} días")
 print(f"  Techo 10h disponible:  {n_techo:,} días ({n_techo/len(df)*100:.1f}% del total)")
+print(f"  Días en estado libre:  {n_libre:,} ({n_libre/len(df)*100:.1f}%)")
+print(f"  Día inicio libre (mediana del mes): {df_mensual['dia_inicio_libre'].median():.0f}")
 print()
 
 # =============================================================================
@@ -707,6 +744,153 @@ plt.close()
 print(f"  Guardado: {ruta.name}")
 
 # =============================================================================
+# GRÁFICA 9: Estado libre — día de inicio y comportamiento del retiro
+# =============================================================================
+print("Generando gráfica 9: estado libre (día de inicio y retiro)...")
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+fig.suptitle(
+    "BBVA – Estado Libre de Encaje\n"
+    "Libre = 'con un día más al nivel actual ya cumplo el exigible del mes'",
+    fontsize=12, fontweight="bold"
+)
+
+# Panel A: Boxplot del día de inicio libre por año
+ax = axes[0]
+anios_u = sorted(df_mensual["dia_inicio_libre"].dropna().pipe(
+    lambda s: df_mensual.loc[s.index, "ano"]
+).unique())
+anios_u = sorted(df_mensual["ano"].unique())
+data_box  = [df_mensual.loc[df_mensual["ano"] == a, "dia_inicio_libre"].dropna().values
+             for a in anios_u]
+data_box  = [d for d in data_box if len(d) > 0]
+anios_box = [a for a, d in zip(anios_u,
+             [df_mensual.loc[df_mensual["ano"] == a, "dia_inicio_libre"].dropna().values
+              for a in anios_u]) if len(d) > 0]
+
+bp = ax.boxplot(data_box, tick_labels=anios_box, patch_artist=True,
+                medianprops=dict(color="black", lw=2),
+                flierprops=dict(marker=".", markersize=4, alpha=0.5))
+for patch in bp["boxes"]:
+    patch.set_facecolor("#2c7bb6")
+    patch.set_alpha(0.7)
+
+med_global = df_mensual["dia_inicio_libre"].median()
+ax.axhline(med_global, color="red", ls="--", lw=1.5,
+           label=f"Mediana global = día {med_global:.0f}")
+ax.set_xlabel("Año")
+ax.set_ylabel("Día del mes")
+ax.set_title("¿Qué día del mes entra en estado libre?\n"
+             "(por año — mediana y dispersión)", fontsize=10)
+ax.legend(fontsize=9)
+# Sombrear fases de referencia
+for fase, col in FASES_COLORES.items():
+    d0, d1 = {"A_inicio(1-4)":(0.5,4.5), "B_acum(5-21)":(4.5,21.5),
+               "C_rentab(22-28)":(21.5,28.5), "D_cierre(29-31)":(28.5,31.5)}[fase]
+    ax.axhspan(d0, d1, alpha=0.07, color=col)
+
+# Panel B: Retiro neto por estado (frenado / recién libre / libre establecido)
+ax = axes[1]
+df_reg = df.copy()
+df_reg["estado"] = "Frenado"
+df_reg.loc[df_reg["libre"] & (df_reg["dias_desde_libre"] <= 2),  "estado"] = "Libre (días 1-3)"
+df_reg.loc[df_reg["libre"] & (df_reg["dias_desde_libre"] > 2),   "estado"] = "Libre (día 4+)"
+
+orden_est = ["Frenado", "Libre (días 1-3)", "Libre (día 4+)"]
+colores_est = {"Frenado": "#d62728", "Libre (días 1-3)": "#ff7f0e", "Libre (día 4+)": "#2ca02c"}
+data_est = [df_reg.loc[df_reg["estado"] == e, "retiro_neto"].values / 1e6 for e in orden_est]
+
+bp2 = ax.boxplot(data_est, tick_labels=orden_est, patch_artist=True,
+                 medianprops=dict(color="black", lw=2),
+                 flierprops=dict(marker=".", markersize=3, alpha=0.3),
+                 showfliers=True)
+for patch, est in zip(bp2["boxes"], orden_est):
+    patch.set_facecolor(colores_est[est])
+    patch.set_alpha(0.75)
+
+ax.axhline(0, color="k", lw=0.8, ls="--")
+ax.set_ylabel("Retiro Neto (M USD)")
+ax.set_title("Retiro Neto por estado de encaje\n"
+             "(¿el retiro grande ocurre después de entrar en estado libre?)", fontsize=10)
+
+for i, (est, data) in enumerate(zip(orden_est, data_est), start=1):
+    med = float(np.median(data))
+    n   = len(data)
+    ax.text(i, med + 5, f"{med:.0f}M\nn={n:,}", ha="center", fontsize=8,
+            fontweight="bold", color="black")
+
+plt.tight_layout()
+ruta = DIR_OUTPUT / "encaje_09_estado_libre.png"
+fig.savefig(ruta, dpi=130, bbox_inches="tight")
+plt.close()
+print(f"  Guardado: {ruta.name}")
+
+# =============================================================================
+# EXPORTAR EXCEL CON DATOS DE ANÁLISIS
+# =============================================================================
+print("Exportando Excel con datos del análisis...")
+
+ruta_excel = DIR_OUTPUT / "encaje_analisis_datos.xlsx"
+
+# Hoja 1: datos diarios con todas las features computadas
+cols_diario = [
+    "fecha", "dia_mes", "ano", "mes", "fase",
+    "caja", "cta_cte_bcr", "overnight_bcr", "activos", "encaje_exigible",
+    "encaje", "exceso_encaje",
+    "encaje_acum_mes", "exigible_total_mes", "faltante", "faltante_lag1",
+    "encaje_lag1", "condicion_libre", "libre", "dias_desde_libre",
+    "retiro_neto", "retiro_acum_mes",
+    "cc_on", "techo_10h", "techo_restante", "proporcion_usada",
+    "d_cta_cte", "d_overnight", "d_activos",
+]
+cols_diario_ok = [c for c in cols_diario if c in df.columns]
+df_export = df[cols_diario_ok].copy()
+# Escalar a millones para legibilidad
+cols_m = ["caja","cta_cte_bcr","overnight_bcr","activos","encaje_exigible",
+          "encaje","exceso_encaje","encaje_acum_mes","exigible_total_mes",
+          "faltante","faltante_lag1","encaje_lag1",
+          "retiro_neto","retiro_acum_mes","cc_on","techo_10h",
+          "techo_restante","d_cta_cte","d_overnight","d_activos"]
+for c in cols_m:
+    if c in df_export.columns:
+        df_export[c] = df_export[c] / 1e6
+
+# Hoja 2: resumen mensual
+df_mensual_exp = df_mensual.copy()
+for c in ["retiro_acum_fin","techo_mes","retiro_en_libre","retiro_en_frenado"]:
+    if c in df_mensual_exp.columns:
+        df_mensual_exp[c] = df_mensual_exp[c] / 1e6
+
+# Hoja 3: R² comparativo
+df_r2 = pd.DataFrame([
+    {"predictor": k, "R2_pct": round(v * 100, 2) if v is not None and not np.isnan(v) else np.nan}
+    for k, v in R2.items()
+])
+
+# Hoja 4: estadísticas por estado (frenado / libre)
+df_estado_stats = (
+    df_reg.groupby("estado")["retiro_neto"]
+    .agg(media="mean", mediana="median",
+         p10=lambda x: x.quantile(0.10),
+         p90=lambda x: x.quantile(0.90),
+         n="count")
+    .reset_index()
+)
+df_estado_stats[["media","mediana","p10","p90"]] /= 1e6
+
+with pd.ExcelWriter(ruta_excel, engine="openpyxl") as writer:
+    df_export.to_excel(writer, sheet_name="Diario_M_USD", index=False)
+    df_mensual_exp.to_excel(writer, sheet_name="Mensual", index=False)
+    df_r2.to_excel(writer, sheet_name="R2_comparativo", index=False)
+    df_estado_stats.to_excel(writer, sheet_name="Estado_libre_frenado", index=False)
+
+print(f"  Guardado: {ruta_excel.name}")
+print(f"    → Hoja 'Diario_M_USD':        {len(df_export):,} filas — features diarias (M USD)")
+print(f"    → Hoja 'Mensual':              {len(df_mensual_exp):,} filas — resumen por mes")
+print(f"    → Hoja 'R2_comparativo':       {len(df_r2)} predictores")
+print(f"    → Hoja 'Estado_libre_frenado': estadísticas por régimen")
+
+# =============================================================================
 # RESUMEN ESTADÍSTICO EN CONSOLA
 # =============================================================================
 print()
@@ -855,6 +1039,33 @@ print("    → Si compliance < 100%, revisar si hay meses de cierre de encaje es
 print("    → El techo es útil como restricción operativa, no como predictor diario.")
 print("    → Para pronóstico: mejor usarlo en la última semana del mes (días 22-31).")
 
+print("\n[10] ESTADO LIBRE: DÍA DE INICIO Y COMPORTAMIENTO DEL RETIRO")
+print(f"    Condición: faltante_lag1 ≤ encaje_lag1")
+print(f"    (con un día más al nivel actual, el banco ya cumpliría el exigible)")
+print()
+med_libre = df_mensual["dia_inicio_libre"].median()
+p10_libre = df_mensual["dia_inicio_libre"].quantile(0.10)
+p90_libre = df_mensual["dia_inicio_libre"].quantile(0.90)
+print(f"    Día de inicio libre — mediana: {med_libre:.0f}  P10: {p10_libre:.0f}  P90: {p90_libre:.0f}")
+print(f"    Meses sin estado libre: {df_mensual['dia_inicio_libre'].isna().sum()} "
+      f"({df_mensual['dia_inicio_libre'].isna().mean()*100:.0f}%)")
+print()
+print("    Retiro neto (M USD) por estado:")
+for est in ["Frenado", "Libre (días 1-3)", "Libre (día 4+)"]:
+    sub = df_reg.loc[df_reg["estado"] == est, "retiro_neto"] / 1e6
+    print(f"      {est:<22s}  media={sub.mean():+7.0f}M  "
+          f"mediana={sub.median():+7.0f}M  "
+          f"p10={sub.quantile(.10):+7.0f}M  "
+          f"p90={sub.quantile(.90):+7.0f}M  "
+          f"n={len(sub):,}")
+print()
+print("    Día de inicio libre por año:")
+for _, row in df_mensual.groupby("ano")["dia_inicio_libre"].median().reset_index().iterrows():
+    print(f"      {int(row['ano'])}: mediana día {row['dia_inicio_libre']:.0f}")
+print()
+print("    → Si el retiro grande ocurre principalmente en estado 'Libre (día 4+)',")
+print("      el estado libre es un predictor confiable del timing del retiro.")
+
 print("\n[9] RESUMEN: ¿VALE LA PENA INCLUIR ESTAS FEATURES EN EL MODELO?")
 print("    Feature               | R² diario | Utilidad principal")
 print("    ─────────────────────────────────────────────────────────────────")
@@ -895,5 +1106,7 @@ for i, nombre in enumerate([
     "encaje_06_r2_por_anio.png",
     "encaje_07_faltante_predictor.png",
     "encaje_08_techo_r2_comparativo.png",
+    "encaje_09_estado_libre.png",
+    "encaje_analisis_datos.xlsx",
 ], start=1):
     print(f"  {i}. {nombre}")
