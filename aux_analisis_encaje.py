@@ -178,8 +178,17 @@ df["proporcion_usada"] = (
 #   → con un día más al nivel actual, ya cumpliría el exigible del mes
 # Una vez activo, permanece el resto del mes (encaje_acum solo crece)
 # =============================================================================
-df["encaje_lag1"]     = df["encaje"].shift(1)
-df["condicion_libre"] = (df["faltante_lag1"] <= df["encaje_lag1"]).astype(int)
+df["encaje_lag1"] = df["encaje"].shift(1)
+
+# condicion_libre = False en el primer día del mes (faltante_lag1 viene del mes anterior)
+_primer_dia_mes = df.groupby(["ano","mes"]).cumcount() == 0
+df["condicion_libre"] = (
+    (~_primer_dia_mes) &
+    df["faltante_lag1"].notna() &
+    df["encaje_lag1"].notna() &
+    (df["faltante_lag1"] <= df["encaje_lag1"])
+).astype(int)
+
 df["libre"] = (
     df.groupby(["ano","mes"])["condicion_libre"]
     .cummax()
@@ -768,7 +777,7 @@ anios_box = [a for a, d in zip(anios_u,
              [df_mensual.loc[df_mensual["ano"] == a, "dia_inicio_libre"].dropna().values
               for a in anios_u]) if len(d) > 0]
 
-bp = ax.boxplot(data_box, tick_labels=anios_box, patch_artist=True,
+bp = ax.boxplot(data_box, labels=anios_box, patch_artist=True,
                 medianprops=dict(color="black", lw=2),
                 flierprops=dict(marker=".", markersize=4, alpha=0.5))
 for patch in bp["boxes"]:
@@ -800,7 +809,7 @@ orden_est = ["Frenado", "Libre (días 1-3)", "Libre (día 4+)"]
 colores_est = {"Frenado": "#d62728", "Libre (días 1-3)": "#ff7f0e", "Libre (día 4+)": "#2ca02c"}
 data_est = [df_reg.loc[df_reg["estado"] == e, "retiro_neto"].values / 1e6 for e in orden_est]
 
-bp2 = ax.boxplot(data_est, tick_labels=orden_est, patch_artist=True,
+bp2 = ax.boxplot(data_est, labels=orden_est, patch_artist=True,
                  medianprops=dict(color="black", lw=2),
                  flierprops=dict(marker=".", markersize=3, alpha=0.3),
                  showfliers=True)
