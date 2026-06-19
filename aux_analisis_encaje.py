@@ -84,8 +84,10 @@ df = df.sort_values("fecha").reset_index(drop=True)
 df["dia_mes"]        = df["fecha"].dt.day
 df["ano"]            = df["fecha"].dt.year
 df["mes"]            = df["fecha"].dt.month
-df["encaje_total"]   = df["caja"] + df["cta_cte_bcr"] + df["overnight_bcr"]
-df["exceso_encaje"]  = df["encaje_total"] - df["encaje_exigible"]
+# Encaje = Caja + Cta Cte BCR  (Overnight NO cuenta para el encaje)
+# Cuando Cta Cte cae → se compensa con: Δovernight + Δactivos + retiro_neto
+df["encaje"]         = df["caja"] + df["cta_cte_bcr"]
+df["exceso_encaje"]  = df["encaje"] - df["encaje_exigible"]
 
 # Variaciones diarias (Δ)
 df["d_cta_cte"]      = df["cta_cte_bcr"].diff()
@@ -137,15 +139,15 @@ fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
 fig.suptitle("BBVA – Componentes de Encaje en el Tiempo (USD)", fontsize=13, fontweight="bold")
 
 ax = axes[0]
-ax.fill_between(df["fecha"], df["cta_cte_bcr"]/1e9, alpha=0.5,
-                color=COLORES["cta_cte"], label="Cta Cte BCR")
-ax.fill_between(df["fecha"], df["overnight_bcr"]/1e9, alpha=0.5,
-                color=COLORES["overnight"], label="Overnight BCR")
+ax.fill_between(df["fecha"], df["cta_cte_bcr"]/1e9, alpha=0.6,
+                color=COLORES["cta_cte"], label="Cta Cte BCR (encaje)")
+ax.plot(df["fecha"], df["overnight_bcr"]/1e9, color=COLORES["overnight"],
+        lw=0.8, alpha=0.8, label="Overnight BCR (no es encaje)")
 ax.plot(df["fecha"], df["encaje_exigible"]/1e9, color=COLORES["exigible"],
         lw=1.5, ls="--", label="Encaje Exigible")
-ax.set_ylabel("Miles de M USD")
+ax.set_ylabel("B USD")
 ax.legend(loc="upper left", fontsize=8)
-ax.set_title("Cta Cte BCR vs Overnight BCR vs Exigible", fontsize=10)
+ax.set_title("Encaje = Caja + Cta Cte BCR  |  Overnight: instrumento separado (no encaje)", fontsize=10)
 ax.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.1fB"))
 
 ax = axes[1]
@@ -156,9 +158,9 @@ ax.fill_between(df["fecha"], df["exceso_encaje"]/1e9,
                 where=df["exceso_encaje"] < 0, alpha=0.6,
                 color=COLORES["retiro"], label="Déficit (negativo)")
 ax.axhline(0, color="k", lw=0.8)
-ax.set_ylabel("Miles de M USD")
+ax.set_ylabel("B USD")
 ax.legend(loc="upper left", fontsize=8)
-ax.set_title("Exceso de Encaje = (Cta Cte + Overnight + Caja) − Exigible", fontsize=10)
+ax.set_title("Exceso de Encaje = (Caja + Cta Cte BCR) − Exigible  [sin overnight]", fontsize=10)
 ax.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.1fB"))
 
 ax = axes[2]
@@ -205,19 +207,19 @@ patches = [mpatches.Patch(color=c, label=f, alpha=0.8)
            for f, c in FASES_COLORES.items()]
 ax.legend(handles=patches, loc="lower left", fontsize=8, ncol=2)
 
-# Panel B: Cta Cte vs Overnight
+# Panel B: Cta Cte vs Overnight (movimiento espejo)
 ax = axes[1]
 ax.plot(by_day["dia_mes"], by_day["cta_mean"]/1e9, color=COLORES["cta_cte"],
-        marker="o", ms=4, lw=1.5, label="Cta Cte BCR (prom)")
+        marker="o", ms=4, lw=1.5, label="Cta Cte BCR — encaje (prom)")
 ax.plot(by_day["dia_mes"], by_day["on_mean"]/1e9, color=COLORES["overnight"],
-        marker="s", ms=4, lw=1.5, label="Overnight BCR (prom)")
+        marker="s", ms=4, lw=1.5, label="Overnight BCR — no encaje (prom)")
 ax.plot(by_day["dia_mes"], by_day["ex_mean"]/1e9, color=COLORES["exceso"],
-        marker="^", ms=4, lw=1.5, ls="--", label="Exceso de Encaje (prom)")
+        marker="^", ms=4, lw=1.5, ls="--", label="Exceso de Encaje = (Caja+Cta Cte)−Exigible")
 ax.axhline(0, color="k", lw=0.5)
 ax.set_xlabel("Día del mes")
-ax.set_ylabel("Miles de M USD")
-ax.set_title("Cta Cte vs Overnight vs Exceso por día del mes", fontsize=10)
-ax.legend(loc="lower left", fontsize=8)
+ax.set_ylabel("B USD")
+ax.set_title("Cta Cte baja en días 22-28 → Overnight sube (sustitución)  |  días 29-31: Overnight baja → retiro", fontsize=10)
+ax.legend(loc="upper right", fontsize=8)
 ax.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.1fB"))
 
 # Sombrear fases
@@ -234,67 +236,67 @@ plt.close()
 print(f"  Guardado: {ruta.name}")
 
 # =============================================================================
-# GRÁFICA 3: Scatter Δexceso vs Retiro Neto (la identidad contable)
+# GRÁFICA 3: Identidad contable — distribución de la caída de Cta Cte
+# Cuando Δcta_cte < 0 → se distribuye en Δovernight, Δactivos, retiro_neto
 # =============================================================================
-print("Generando gráfica 3: scatter Δexceso vs Retiro Neto...")
-df_sc = df[["d_exceso", "retiro_neto", "fase"]].dropna()
-corr_val = df_sc["d_exceso"].corr(df_sc["retiro_neto"])
+print("Generando gráfica 3: identidad contable Δcta_cte → canales...")
+
+df_sc = df[["d_cta_cte", "d_overnight", "d_activos", "retiro_neto", "fase"]].dropna()
+corr_val = df_sc["d_cta_cte"].corr(df_sc["retiro_neto"])
 
 fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 fig.suptitle(
-    f"Identidad Contable: ΔExceso de Encaje ↔ Retiro Neto\n"
-    f"Correlación global = {corr_val:+.4f}   (r² = {corr_val**2:.4f})",
-    fontsize=12, fontweight="bold"
+    "Identidad Contable: Δ Cta Cte BCR → Overnight + Activos + Retiro Neto\n"
+    "Cuando Cta Cte cae, el dinero va al exterior (retiro), overnight y activos",
+    fontsize=11, fontweight="bold"
 )
 
-# Panel A: scatter coloreado por fase
+# Panel A: scatter Δcta_cte vs retiro_neto por fase
 ax = axes[0]
 for fase_nom, grp in df_sc.groupby("fase", sort=True):
-    ax.scatter(grp["d_exceso"]/1e9, grp["retiro_neto"]/1e6,
+    ax.scatter(grp["d_cta_cte"]/1e9, grp["retiro_neto"]/1e6,
                alpha=0.25, s=10, color=FASES_COLORES[fase_nom], label=fase_nom)
-
-# línea de regresión
-x_lin = df_sc["d_exceso"].values
+x_lin = df_sc["d_cta_cte"].values
 y_lin = df_sc["retiro_neto"].values
 mask  = np.isfinite(x_lin) & np.isfinite(y_lin)
 coef  = np.polyfit(x_lin[mask], y_lin[mask], 1)
 xr    = np.linspace(x_lin[mask].min(), x_lin[mask].max(), 200)
-ax.plot(xr/1e9, np.polyval(coef, xr)/1e6, "k-", lw=1.5, label=f"Regresión (pend={coef[0]:.2f})")
+ax.plot(xr/1e9, np.polyval(coef, xr)/1e6, "k-", lw=1.5,
+        label=f"Regresión (r={corr_val:+.3f})")
 ax.axhline(0, color="gray", lw=0.5)
 ax.axvline(0, color="gray", lw=0.5)
-ax.set_xlabel("Δ Exceso de Encaje (B USD)")
+ax.set_xlabel("Δ Cta Cte BCR (B USD)")
 ax.set_ylabel("Retiro Neto (M USD)")
-ax.set_title("Scatter por fase del mes", fontsize=10)
+ax.set_title("Δ Cta Cte vs Retiro Neto por fase", fontsize=10)
 ax.legend(fontsize=7, markerscale=2)
 
-# Panel B: hexbin para ver densidad
+# Panel B: barras de destino de la caída de Cta Cte por fase
 ax = axes[1]
-xp = df_sc["d_exceso"].values / 1e9
-yp = df_sc["retiro_neto"].values / 1e6
-hb = ax.hexbin(xp, yp, gridsize=40, cmap="YlOrRd", mincnt=1, bins="log")
-fig.colorbar(hb, ax=ax, label="log(conteo)")
-ax.plot(xr/1e9, np.polyval(coef, xr)/1e6, "b-", lw=1.5)
-ax.axhline(0, color="gray", lw=0.5)
-ax.axvline(0, color="gray", lw=0.5)
-ax.set_xlabel("Δ Exceso de Encaje (B USD)")
-ax.set_ylabel("Retiro Neto (M USD)")
-ax.set_title("Densidad hexbin (log-scale)", fontsize=10)
-
-# Texto explicativo
-textstr = (
-    "Identidad:\n"
-    "Δcta_cte + Δovernight\n"
-    "+ Δactivos + retiro_neto ≈ 0\n\n"
-    "→ retiro_neto ≈ -Δ(exceso)\n"
-    f"   r = {corr_val:+.4f}\n"
-    f"   r² = {corr_val**2:.2%}"
-)
-ax.text(0.02, 0.97, textstr, transform=ax.transAxes, fontsize=8,
-        va="top", ha="left",
+fase_order_g = ["A_inicio(1-4)", "B_acum(5-21)", "C_rentab(22-28)", "D_cierre(29-31)"]
+labels_g     = ["Inicio\n(1-4)", "Acum.\n(5-21)", "Rentab.\n(22-28)", "Cierre\n(29-31)"]
+canales      = ["d_overnight", "d_activos", "retiro_neto"]
+canales_nom  = ["→ Overnight BCR", "→ Activos", "→ Retiro Neto"]
+canales_col  = [COLORES["overnight"], COLORES["activos"], COLORES["retiro"]]
+medias_f     = df.groupby("fase")[canales].mean() / 1e6
+x = np.arange(len(fase_order_g)); width = 0.22
+for j, (n, c, col) in enumerate(zip(canales_nom, canales, canales_col)):
+    vals = [medias_f.loc[f, c] for f in fase_order_g]
+    ax.bar(x + j*width - width, vals, width, label=n, color=col, alpha=0.85)
+ax.axhline(0, color="k", lw=0.8)
+ax.set_xticks(x); ax.set_xticklabels(labels_g, fontsize=9)
+ax.set_ylabel("M USD (promedio diario)")
+ax.set_title("Destino de la caída de Cta Cte por fase\n(promedio diario por canal)", fontsize=10)
+ax.legend(fontsize=9)
+ax.text(0.98, 0.97,
+        "Días 22-28: Cta Cte → Overnight (82%)\n"
+        "Días 29-31: Overnight → Retiro Neto\n"
+        "El retiro grande ocurre cuando el banco\n"
+        "convierte overnight en divisas al exterior.",
+        transform=ax.transAxes, fontsize=8, va="top", ha="right",
         bbox=dict(boxstyle="round", facecolor="lightyellow", alpha=0.8))
 
 plt.tight_layout()
-ruta = DIR_OUTPUT / "encaje_03_scatter_exceso_retiro.png"
+ruta = DIR_OUTPUT / "encaje_03_canales_cta_cte.png"
 fig.savefig(ruta, dpi=130, bbox_inches="tight")
 plt.close()
 print(f"  Guardado: {ruta.name}")
@@ -457,12 +459,25 @@ print("=" * 65)
 print("RESUMEN DEL ANÁLISIS")
 print("=" * 65)
 
-print("\n[1] CÓMO SE CALCULÓ EL Δ EXCESO DE ENCAJE")
-print("    Exceso = (Caja + Cta Cte BCR + Overnight BCR) − Exigible")
-print("    Δ Exceso(t) = Exceso(t) − Exceso(t−1)   [diferencia simple diaria]")
-print(f"    Correlación Retiro Neto ~ Δ Exceso: r = {corr_val:+.4f}")
-print(f"    R² = {corr_val**2:.2%}  → el {corr_val**2:.0%} de la varianza del retiro")
-print("    está determinada por el cambio en el exceso de encaje.")
+print("\n[1] DEFINICIÓN CORRECTA DE ENCAJE Y EXCESO")
+print("    Encaje     = Caja + Cta Cte BCR  (Overnight NO es encaje)")
+print("    Exceso     = Encaje − Exigible")
+print("    Δ Exceso(t)= Exceso(t) − Exceso(t−1)  [diferencia simple diaria]")
+print()
+print("    Identidad del balance:")
+print("    Δcta_cte + Δovernight + Δactivos + retiro_neto ≈ 0")
+print("    → Cuando Cta Cte cae, el dinero va a Overnight, Activos o Retiro Neto")
+print()
+print("    Distribución de la caída de Cta Cte (días con Δcta_cte < 0):")
+mask_cae = df["d_cta_cte"] < 0
+total    = df.loc[mask_cae, "d_cta_cte"].sum()
+d_on     = df.loc[mask_cae, "d_overnight"].sum()
+d_act    = df.loc[mask_cae, "d_activos"].sum()
+d_ret    = df.loc[mask_cae, "retiro_neto"].sum()
+print(f"      Caída Cta Cte:   {total/1e9:+.1f}B")
+print(f"      → Overnight:     {d_on/1e9:+.1f}B  ({d_on/abs(total)*100:.0f}%)")
+print(f"      → Activos:       {d_act/1e9:+.1f}B  ({d_act/abs(total)*100:.0f}%)")
+print(f"      → Retiro Neto:   {d_ret/1e9:+.1f}B  ({d_ret/abs(total)*100:.0f}%)")
 
 print("\n[2] VERIFICACIÓN DE LA IDENTIDAD CONTABLE")
 print(f"    Media(Δcta_cte + Δovernight + Δactivos + retiro_neto) = {media_suma/1e6:.1f}M")
