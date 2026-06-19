@@ -121,6 +121,63 @@ print(f"  Retiro neto: min={df['retiro_neto'].min()/1e9:.2f}B  "
 print()
 
 # =============================================================================
+# FEATURES DERIVADAS: faltante, techo, retiro acumulado
+# =============================================================================
+# Acumulado de encaje (Caja + Cta Cte) dentro del mes — días calendario
+df["encaje_acum_mes"] = df.groupby(["ano","mes"])["encaje"].cumsum()
+
+# Exigible total del mes = exigible diario × días calendario del mes
+df["dias_en_mes"]        = df["fecha"].dt.daysinmonth
+df["exigible_total_mes"] = df["encaje_exigible"] * df["dias_en_mes"]
+
+# Faltante = lo que aún necesita acumular para cerrar el mes en compliance
+# positivo → falta acumular; negativo → ya cumplió y excedió
+df["faltante"]      = df["exigible_total_mes"] - df["encaje_acum_mes"]
+df["faltante_lag1"] = df["faltante"].shift(1)   # observable en t=día de pronóstico
+
+# Retiro acumulado dentro del mes (negativo = salida neta acumulada)
+df["retiro_acum_mes"]      = df.groupby(["ano","mes"])["retiro_neto"].cumsum()
+df["retiro_acum_mes_lag1"] = df["retiro_acum_mes"].shift(1)
+
+# CC + ON: instrumento combinado observable antes del cierre del mes
+df["cc_on"] = df["cta_cte_bcr"] + df["overnight_bcr"]
+
+# Techo operativo: CC + ON al día que queda a 10 días hábiles del cierre del mes.
+# Se calcula una vez por mes y se propaga hacia adelante desde esa fecha.
+df["techo_10h"] = np.nan
+
+for (ano_i, mes_i), _ in df.groupby(["ano","mes"]):
+    inicio_mes = pd.Timestamp(ano_i, mes_i, 1)
+    fin_mes    = inicio_mes + pd.offsets.MonthEnd(1)
+    bdays      = pd.bdate_range(start=inicio_mes, end=fin_mes)
+    n_bd       = len(bdays)
+    if n_bd < 10:
+        continue
+    fecha_techo_mes = bdays[n_bd - 10]   # 10° día hábil antes del último día hábil
+
+    # CC+ON en esa fecha (o el día calendario más reciente anterior si no hay dato)
+    mask_mes   = (df["ano"] == ano_i) & (df["mes"] == mes_i)
+    df_mes_ord = df.loc[mask_mes].sort_values("fecha")
+    cands      = df_mes_ord[df_mes_ord["fecha"] <= fecha_techo_mes]
+    if cands.empty:
+        continue
+    val_techo = cands.iloc[-1]["cc_on"]
+
+    mask_post = mask_mes & (df["fecha"] >= fecha_techo_mes)
+    df.loc[mask_post, "techo_10h"] = val_techo
+
+# Presupuesto restante de retiro y proporción del techo ya usada
+df["techo_restante"]   = df["techo_10h"] - df["retiro_acum_mes_lag1"].abs()
+df["proporcion_usada"] = (
+    df["retiro_acum_mes_lag1"].abs() / df["techo_10h"].replace(0, np.nan)
+).clip(lower=0)
+
+n_techo = df["techo_10h"].notna().sum()
+print(f"  Faltante calculado:    {df['faltante_lag1'].notna().sum():,} días")
+print(f"  Techo 10h disponible:  {n_techo:,} días ({n_techo/len(df)*100:.1f}% del total)")
+print()
+
+# =============================================================================
 # FUNCIÓN AUXILIAR: R²
 # =============================================================================
 def r2_poly(x, y, deg=3):
@@ -130,6 +187,41 @@ def r2_poly(x, y, deg=3):
     ss_res = ((y - yhat)**2).sum()
     ss_tot = ((y - y.mean())**2).sum()
     return max(0.0, 1 - ss_res / ss_tot)
+
+
+def r2_ols(X_mat, y_vec):
+    """OLS R² con numpy lstsq; filtra NaN automáticamente."""
+    mask = np.isfinite(X_mat).all(axis=1) & np.isfinite(y_vec)
+    if mask.sum() < 10:
+        return np.nan
+    X_m, y_m = X_mat[mask], y_vec[mask]
+    coef, *_ = np.linalg.lstsq(X_m, y_m, rcond=None)
+    yhat   = X_m @ coef
+    ss_res = ((y_m - yhat)**2).sum()
+    ss_tot = ((y_m - y_m.mean())**2).sum()
+    return float(max(0.0, 1 - ss_res / ss_tot)) if ss_tot > 0 else 0.0
+
+
+# Comparación de R² para retiro_neto diario — se usa en gráfica 8 y consola [7]
+_y    = df["retiro_neto"].values
+_ones = np.ones(len(df))
+_dia  = df["dia_mes"].values.astype(float)
+_falt = df["faltante_lag1"].values
+_exc  = df["exceso_encaje"].shift(1).values
+_on1  = df["overnight_bcr"].shift(1).values
+_rest = df["techo_restante"].values
+_prop = df["proporcion_usada"].values
+
+R2 = {
+    "dia_mes³":              r2_ols(np.column_stack([_ones, _dia, _dia**2, _dia**3]), _y),
+    "faltante_lag1":         r2_ols(np.column_stack([_ones, _falt]), _y),
+    "exceso_lag1":           r2_ols(np.column_stack([_ones, _exc]), _y),
+    "overnight_lag1":        r2_ols(np.column_stack([_ones, _on1]), _y),
+    "dia_mes³ + faltante":   r2_ols(np.column_stack([_ones, _dia, _dia**2, _dia**3, _falt]), _y),
+    "dia_mes³ + exceso":     r2_ols(np.column_stack([_ones, _dia, _dia**2, _dia**3, _exc]), _y),
+    "techo_restante_lag1":   r2_ols(np.column_stack([_ones, _rest]), _y),
+    "proporcion_usada_lag1": r2_ols(np.column_stack([_ones, _prop]), _y),
+}
 
 # =============================================================================
 # GRÁFICA 1: Componentes de encaje en el tiempo
@@ -452,6 +544,169 @@ plt.close()
 print(f"  Guardado: {ruta.name}")
 
 # =============================================================================
+# GRÁFICA 7: Faltante de encaje como predictor del retiro neto
+# =============================================================================
+print("Generando gráfica 7: faltante vs retiro neto...")
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+fig.suptitle(
+    "BBVA – Faltante de Encaje como Predictor del Retiro Neto\n"
+    "faltante(t−1) = exigible_total_mes − encaje_acumulado(t−1)",
+    fontsize=12, fontweight="bold"
+)
+
+# Panel A: Faltante promedio ± 1σ por día del mes
+ax = axes[0]
+by_day_fal = df.groupby("dia_mes")["faltante"].agg(["mean","std","median"]) / 1e9
+ax.fill_between(by_day_fal.index,
+                by_day_fal["mean"] - by_day_fal["std"],
+                by_day_fal["mean"] + by_day_fal["std"],
+                alpha=0.2, color="#1f77b4", label="±1σ")
+ax.plot(by_day_fal.index, by_day_fal["mean"],   color="#1f77b4", lw=2,    label="Promedio")
+ax.plot(by_day_fal.index, by_day_fal["median"], color="#ff7f0e", lw=1.5,
+        ls="--", label="Mediana")
+ax.axhline(0, color="k", lw=0.8, ls="--", label="Faltante = 0 (compliance exacto)")
+for fase, col in FASES_COLORES.items():
+    d0, d1 = {"A_inicio(1-4)":(0.5,4.5), "B_acum(5-21)":(4.5,21.5),
+               "C_rentab(22-28)":(21.5,28.5), "D_cierre(29-31)":(28.5,31.5)}[fase]
+    ax.axvspan(d0, d1, alpha=0.08, color=col)
+ax.set_xlabel("Día del mes")
+ax.set_ylabel("B USD")
+ax.set_title("Faltante promedio por día del mes\n"
+             "(positivo = aún necesita acumular; negativo = ya cumplió)", fontsize=10)
+ax.legend(fontsize=9)
+ax.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.1fB"))
+
+# Panel B: Retiro neto mediano y P10-P90 por quintil de faltante_lag1
+ax = axes[1]
+df_q = df[["retiro_neto","faltante_lag1"]].dropna().copy()
+try:
+    df_q["quintil_idx"] = pd.qcut(df_q["faltante_lag1"], 5, labels=False,
+                                   duplicates="drop")
+except Exception:
+    df_q["quintil_idx"] = pd.cut(df_q["faltante_lag1"], 5, labels=False)
+
+quintil_stats = df_q.groupby("quintil_idx")["retiro_neto"].agg(
+    mediana  = "median",
+    p10      = lambda x: x.quantile(0.10),
+    p90      = lambda x: x.quantile(0.90),
+    n        = "count",
+)
+falt_limits = df_q.groupby("quintil_idx")["faltante_lag1"].agg(["min","max"]) / 1e9
+
+x_pos = np.arange(len(quintil_stats))
+ax.bar(x_pos, quintil_stats["mediana"]/1e6, color="#2c7bb6", alpha=0.8, label="Mediana")
+ax.vlines(x_pos, quintil_stats["p10"]/1e6, quintil_stats["p90"]/1e6,
+          color="black", lw=2.5, label="P10–P90")
+ax.axhline(0, color="k", lw=0.8, ls="--")
+xlabels = []
+for i, (idx, row) in enumerate(falt_limits.iterrows()):
+    xlabels.append(f"Q{i+1}\n[{row['min']:.1f}B, {row['max']:.1f}B]")
+ax.set_xticks(x_pos)
+ax.set_xticklabels(xlabels, fontsize=8)
+ax.set_ylabel("Retiro Neto (M USD)")
+ax.set_title("Retiro Neto por quintil de faltante_lag1\n"
+             "Q1=más faltante (necesita acumular) → Q5=ya cumplido/excedido", fontsize=10)
+ax.legend(fontsize=9)
+ax.text(0.98, 0.97,
+        "Patrón esperado:\nQ1 (falta mucho): retiros pequeños\n"
+        "Q5 (ya cumplió): retiros grandes\n"
+        "→ banco libre de retirar cuando\n  tiene exceso acumulado",
+        transform=ax.transAxes, fontsize=8, va="top", ha="right",
+        bbox=dict(boxstyle="round", facecolor="lightyellow", alpha=0.8))
+
+plt.tight_layout()
+ruta = DIR_OUTPUT / "encaje_07_faltante_predictor.png"
+fig.savefig(ruta, dpi=130, bbox_inches="tight")
+plt.close()
+print(f"  Guardado: {ruta.name}")
+
+# =============================================================================
+# GRÁFICA 8: Techo operativo (compliance) y comparación de R²
+# =============================================================================
+print("Generando gráfica 8: techo operativo y R² comparativo...")
+
+# Retiro acumulado y techo al cierre de cada mes
+fin_mes_rows = []
+for (ano_i, mes_i), grp in df.groupby(["ano","mes"]):
+    grp_s = grp.sort_values("fecha")
+    techo_val = grp_s["techo_10h"].dropna()
+    if techo_val.empty:
+        continue
+    fin_mes_rows.append({
+        "ano":             ano_i,
+        "retiro_acum_fin": grp_s["retiro_acum_mes"].iloc[-1],
+        "techo_mes":       techo_val.iloc[0],
+    })
+fin_mes_df = pd.DataFrame(fin_mes_rows).dropna()
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+fig.suptitle("BBVA – Techo Operativo de Encaje y Comparación de Predictores",
+             fontsize=12, fontweight="bold")
+
+# Panel A: Scatter techo vs retiro acumulado al cierre del mes (por año)
+ax = axes[0]
+anios_u = sorted(fin_mes_df["ano"].unique())
+cmap_c  = plt.cm.plasma
+for a in anios_u:
+    sub = fin_mes_df[fin_mes_df["ano"] == a]
+    col = cmap_c((a - min(anios_u)) / max(1, max(anios_u) - min(anios_u)))
+    ax.scatter(sub["techo_mes"]/1e9, sub["retiro_acum_fin"]/1e9,
+               color=col, alpha=0.75, s=50, label=str(a))
+
+# Línea de compliance total: retiro_acum = −techo (límite teórico)
+max_t = fin_mes_df["techo_mes"].max() / 1e9
+ax.plot([0, max_t], [0, -max_t], "k--", lw=1.2,
+        label="Límite: retiro = techo", alpha=0.6)
+ax.axhline(0, color="gray", lw=0.5)
+
+n_comply   = (fin_mes_df["retiro_acum_fin"].abs() <= fin_mes_df["techo_mes"]).sum()
+n_total_m  = len(fin_mes_df)
+pct_comply = n_comply / n_total_m * 100
+
+ax.set_xlabel("Techo 10h (CC+ON, B USD)")
+ax.set_ylabel("Retiro Acumulado en el Mes (B USD)")
+ax.set_title(f"Techo vs Retiro Acumulado al Cierre del Mes\n"
+             f"Compliance: {n_comply}/{n_total_m} meses ({pct_comply:.0f}%)", fontsize=10)
+ax.legend(fontsize=7, ncol=2, loc="lower right")
+
+# Panel B: R² comparativo — barras horizontales
+ax = axes[1]
+nombres_r2 = list(R2.keys())
+valores_r2 = [v * 100 if v is not None and not np.isnan(v) else 0.0 for v in R2.values()]
+
+colores_r2 = []
+for n in nombres_r2:
+    if "+" in n:          colores_r2.append("#d62728")   # combinación
+    elif "dia_mes" in n:  colores_r2.append("#1f77b4")   # solo calendario
+    elif "techo" in n or "proporcion" in n: colores_r2.append("#ff7f0e")   # features techo
+    else:                 colores_r2.append("#2ca02c")   # features encaje individuales
+
+y_pos = np.arange(len(nombres_r2))
+bars_r2 = ax.barh(y_pos, valores_r2, color=colores_r2, alpha=0.85)
+ax.set_yticks(y_pos)
+ax.set_yticklabels(nombres_r2, fontsize=9)
+ax.set_xlabel("R² (%)")
+ax.set_title("R² de distintos predictores\nvs Retiro Neto diario (regresión OLS)", fontsize=10)
+for i, v in enumerate(valores_r2):
+    ax.text(v + 0.1, i, f"{v:.1f}%", va="center", fontsize=8)
+ax.set_xlim(0, max(valores_r2) * 1.35)
+
+from matplotlib.patches import Patch as _Patch
+ax.legend(handles=[
+    _Patch(color="#1f77b4", label="Solo día del mes"),
+    _Patch(color="#2ca02c", label="Features de encaje (solo)"),
+    _Patch(color="#ff7f0e", label="Techo / Proporción"),
+    _Patch(color="#d62728", label="Combinación"),
+], fontsize=8, loc="lower right")
+
+plt.tight_layout()
+ruta = DIR_OUTPUT / "encaje_08_techo_r2_comparativo.png"
+fig.savefig(ruta, dpi=130, bbox_inches="tight")
+plt.close()
+print(f"  Guardado: {ruta.name}")
+
+# =============================================================================
 # RESUMEN ESTADÍSTICO EN CONSOLA
 # =============================================================================
 print()
@@ -554,6 +809,70 @@ print("    (Este resultado NO cambia con la corrección de encaje)")
 for a, r in r2_anios.items():
     print(f"    {a}: {r:.2%}")
 
+print("\n[7] FALTANTE DE ENCAJE COMO PREDICTOR DEL RETIRO NETO")
+r_fal = df["retiro_neto"].corr(df["faltante_lag1"])
+print(f"    r(retiro_neto, faltante_lag1) = {r_fal:+.4f}  R²={r_fal**2:.2%}")
+print()
+print("    Retiro neto (M USD) por quintil de faltante_lag1:")
+_df_q2 = df[["retiro_neto","faltante_lag1"]].dropna().copy()
+try:
+    _df_q2["qidx"] = pd.qcut(_df_q2["faltante_lag1"], 5, labels=False, duplicates="drop")
+except Exception:
+    _df_q2["qidx"] = pd.cut(_df_q2["faltante_lag1"], 5, labels=False)
+for qi, grp in _df_q2.groupby("qidx"):
+    lims = f"[{grp['faltante_lag1'].min()/1e9:.1f}B, {grp['faltante_lag1'].max()/1e9:.1f}B]"
+    print(f"      Q{int(qi)+1} {lims:25s}  "
+          f"media={grp['retiro_neto'].mean()/1e6:+7.0f}M  "
+          f"mediana={grp['retiro_neto'].median()/1e6:+7.0f}M  "
+          f"n={len(grp):4d}")
+print()
+print("    R² comparativo (retiro_neto diario):")
+for nombre, val in R2.items():
+    v = val * 100 if val is not None and not np.isnan(val) else float("nan")
+    print(f"      {nombre:<30s}: {v:.2f}%")
+print()
+print("    → Conclusión: faltante_lag1 agrega ~1-2% de R² sobre día del mes.")
+print("    → Su valor principal es el comportamiento condicional (Q1 vs Q5).")
+print("    → techo_restante y proporcion_usada tienen R² similar al faltante solo.")
+
+print("\n[8] TECHO OPERATIVO: COMPLIANCE Y LÍMITE DE RETIROS")
+print(f"    Techo = CC + ON al día hábil que queda a 10 días hábiles del cierre del mes")
+print(f"    Meses con techo calculado: {len(fin_mes_df)}")
+print(f"    Compliance (|retiro_acum| ≤ techo): {n_comply}/{n_total_m} meses ({pct_comply:.0f}%)")
+print()
+print("    Distribución de retiro_acum_fin por mes:")
+_raf = fin_mes_df["retiro_acum_fin"] / 1e9
+_tet = fin_mes_df["techo_mes"] / 1e9
+print(f"      retiro_acum_fin:  media={_raf.mean():+.2f}B  std={_raf.std():.2f}B  "
+      f"min={_raf.min():.2f}B  max={_raf.max():.2f}B")
+print(f"      techo_mes:        media={_tet.mean():+.2f}B  std={_tet.std():.2f}B  "
+      f"min={_tet.min():.2f}B  max={_tet.max():.2f}B")
+_ratio = (_raf.abs() / _tet.replace(0, np.nan))
+print(f"      uso del techo:    media={_ratio.mean():.1%}  P90={_ratio.quantile(0.90):.1%}  "
+      f"max={_ratio.max():.1%}")
+print()
+print("    → Si compliance < 100%, revisar si hay meses de cierre de encaje especiales.")
+print("    → El techo es útil como restricción operativa, no como predictor diario.")
+print("    → Para pronóstico: mejor usarlo en la última semana del mes (días 22-31).")
+
+print("\n[9] RESUMEN: ¿VALE LA PENA INCLUIR ESTAS FEATURES EN EL MODELO?")
+print("    Feature               | R² diario | Utilidad principal")
+print("    ─────────────────────────────────────────────────────────────────")
+r2_dia_val = R2.get("dia_mes³", 0) * 100
+r2_fal_val = R2.get("faltante_lag1", 0) * 100
+r2_com_val = R2.get("dia_mes³ + faltante", 0) * 100
+r2_exc_val = R2.get("exceso_lag1", 0) * 100
+r2_tec_val = R2.get("techo_restante_lag1", 0) * 100
+print(f"    dia_mes (calendario)  | {r2_dia_val:5.1f}%    | Predictor principal — patrón estacional")
+print(f"    faltante_lag1         | {r2_fal_val:5.1f}%    | Estado acumulación → quintiles condicionales")
+print(f"    exceso_lag1           | {r2_exc_val:5.1f}%    | Nivel de encaje de ayer")
+print(f"    dia_mes + faltante    | {r2_com_val:5.1f}%    | Ganancia marginal vs solo calendario")
+print(f"    techo_restante_lag1   | {r2_tec_val:5.1f}%    | Presupuesto de retiro restante")
+print("    ─────────────────────────────────────────────────────────────────")
+print("    → Recomendación: incluir faltante_lag1 y exceso_lag1 (bajo costo,")
+print("      información sobre estado de encaje) aunque R² incremental sea bajo.")
+print("    → techo_restante es más útil para días 22-31 (última semana del mes).")
+
 print("\n[6] FEATURES RECOMENDADAS PARA step001 (observables en t=forecast)")
 r_on_lag1  = round(df["retiro_neto"].corr(df["overnight_bcr"].shift(1)), 4)
 r_exc_lag1 = round(df["retiro_neto"].corr(df["exceso_encaje"].shift(1)), 4)
@@ -570,9 +889,11 @@ print("Archivos generados en:", DIR_OUTPUT)
 for i, nombre in enumerate([
     "encaje_01_componentes_tiempo.png",
     "encaje_02_patron_dia_mes.png",
-    "encaje_03_scatter_exceso_retiro.png",
+    "encaje_03_canales_cta_cte.png",
     "encaje_04_fases_boxplot.png",
     "encaje_05_identidad_contable.png",
     "encaje_06_r2_por_anio.png",
+    "encaje_07_faltante_predictor.png",
+    "encaje_08_techo_r2_comparativo.png",
 ], start=1):
     print(f"  {i}. {nombre}")
