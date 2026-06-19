@@ -200,6 +200,19 @@ df["libre_prev"]        = df.groupby(["ano","mes"])["libre"].shift(1).fillna(Fal
 df["es_inicio_libre"]   = df["libre"] & ~df["libre_prev"]
 df["dias_desde_libre"]  = df.groupby(["ano","mes"])["libre"].cumsum().where(df["libre"]) - 1
 
+# Exceso proyectado al cierre: extrapola ritmo de acumulación hasta hoy al mes completo
+# Auditoría: usa encaje_acum_mes / dia_mes (días calendarios transcurridos).
+# Caveat: si los datos son solo hábiles, la tasa queda sobrestimada (~22/30).
+# El sesgo es sistemático y constante → no afecta la regresión relativa entre meses.
+df["exceso_proyectado"] = (
+    (df["encaje_acum_mes"] / df["dia_mes"]) * df["dias_en_mes"]
+    - df["exigible_total_mes"]
+)
+df["exceso_proyectado_lag1"] = df["exceso_proyectado"].shift(1)
+
+# D_cierre generalizado: últimos 3 días calendario del mes (robusto a 28/30/31 días)
+df["es_D_cierre"] = df["dia_mes"] >= (df["dias_en_mes"] - 2)
+
 # Resumen mensual con día de inicio libre y métricas de cumplimiento
 def _resumen_mes(g):
     dia_libre = g.loc[g["es_inicio_libre"], "dia_mes"].values
@@ -1093,6 +1106,127 @@ print("    → Recomendación: incluir faltante_lag1 y exceso_lag1 (bajo costo,"
 print("      información sobre estado de encaje) aunque R² incremental sea bajo.")
 print("    → techo_restante es más útil para días 22-31 (última semana del mes).")
 
+# =============================================================================
+# [10] REGRESIÓN MENSUAL: MAGNITUD DEL RETIRO EN D_CIERRE
+# Target:     suma de retiro_neto en los últimos 3 días del mes
+# Predictores observables al día 21 → sin leakage de datos futuros del mes
+# =============================================================================
+
+# Target mensual
+retiro_D = (
+    df[df["es_D_cierre"]]
+    .groupby(["ano", "mes"])["retiro_neto"]
+    .sum()
+    .rename("retiro_D_cierre")
+)
+
+# Predictores: último valor disponible en o antes del día 21
+_pred_cols = ["exceso_proyectado", "overnight_bcr", "techo_10h", "faltante"]
+pred_d21 = (
+    df[df["dia_mes"] <= 21]
+    .groupby(["ano", "mes"])
+    .last()[_pred_cols]
+    .rename(columns={
+        "exceso_proyectado": "exceso_proy_d21",
+        "overnight_bcr":     "overnight_d21",
+        "techo_10h":         "techo_10h_mes",
+        "faltante":          "faltante_d21",
+    })
+)
+
+reg_df = pred_d21.join(retiro_D).dropna()
+
+# OLS con constante
+_X_names = ["exceso_proy_d21", "overnight_d21", "techo_10h_mes", "faltante_d21"]
+_X_mat   = np.column_stack([np.ones(len(reg_df))] + [reg_df[c].values for c in _X_names])
+_y_vec   = reg_df["retiro_D_cierre"].values
+
+_coeffs, _, _, _ = np.linalg.lstsq(_X_mat, _y_vec, rcond=None)
+_y_pred  = _X_mat @ _coeffs
+_ss_res  = np.sum((_y_vec - _y_pred)**2)
+_ss_tot  = np.sum((_y_vec - _y_vec.mean())**2)
+_r2_reg  = 1 - _ss_res / _ss_tot if _ss_tot > 0 else 0.0
+
+reg_df = reg_df.copy()
+reg_df["y_pred"]  = _y_pred
+reg_df["residuo"] = _y_vec - _y_pred
+
+print("\n[10] REGRESIÓN: RETIRO D_CIERRE ~ PREDICTORES AL DÍA 21")
+print(f"  N = {len(reg_df)} meses  |  R² = {_r2_reg:.3f}")
+print(f"  {'Variable':<26} {'Coeficiente':>14}")
+print(f"  {'─'*42}")
+_var_labels = ["(Constante)", "exceso_proy_d21", "overnight_d21", "techo_10h", "faltante_d21"]
+for _nm, _coef in zip(_var_labels, _coeffs):
+    print(f"  {_nm:<26} {_coef/1e6:>+12.3f} M/M")
+print(f"  {'─'*42}")
+print(f"  Interpretación: coeficiente de exceso_proy ≈ -1 confirmaría identidad contable")
+print(f"  (el banco retira exactamente el exceso proyectado). Desviaciones → discrecionalidad.")
+
+_top = reg_df.nlargest(3, "residuo").reset_index()
+_bot = reg_df.nsmallest(3, "residuo").reset_index()
+print(f"\n  Meses con MAYOR retiro del proyectado (residuo positivo):")
+for _, _r in _top.iterrows():
+    print(f"    {int(_r['ano'])}-{int(_r['mes']):02d}  "
+          f"real={_r['retiro_D_cierre']/1e6:+.0f}M  "
+          f"pred={_r['y_pred']/1e6:+.0f}M  "
+          f"exceso={_r['residuo']/1e6:+.0f}M")
+print(f"\n  Meses con MENOR retiro del proyectado (residuo negativo):")
+for _, _r in _bot.iterrows():
+    print(f"    {int(_r['ano'])}-{int(_r['mes']):02d}  "
+          f"real={_r['retiro_D_cierre']/1e6:+.0f}M  "
+          f"pred={_r['y_pred']/1e6:+.0f}M  "
+          f"exceso={_r['residuo']/1e6:+.0f}M")
+print()
+
+# ── Gráfica 10: Regresión D_cierre ───────────────────────────────────────────
+print("Generando gráfica 10: regresión D_cierre...")
+fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+fig.suptitle(
+    "BBVA – Regresión: Retiro Neto en D_cierre (últimos 3 días del mes)\n"
+    "Predictores observables al día 21 — sin leakage",
+    fontsize=12, fontweight="bold"
+)
+
+# Panel 1: Actual vs Predicho
+ax = axes[0]
+ax.scatter(_y_pred/1e6, _y_vec/1e6, alpha=0.75, color="#1f77b4",
+           edgecolors="k", lw=0.5, s=60)
+_lim = max(abs(np.concatenate([_y_pred, _y_vec]))) / 1e6 * 1.08
+ax.plot([-_lim, _lim], [-_lim, _lim], "k--", lw=1, label="45° (perfecto)")
+ax.axhline(0, color="k", lw=0.4, ls=":")
+ax.axvline(0, color="k", lw=0.4, ls=":")
+ax.set_xlabel("Retiro predicho (M USD)", fontsize=9)
+ax.set_ylabel("Retiro real (M USD)", fontsize=9)
+ax.set_title(f"Actual vs Predicho  (R²={_r2_reg:.2f})", fontsize=10)
+ax.legend(fontsize=8)
+ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:,.0f}M"))
+ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:,.0f}M"))
+
+# Panel 2: Residuos en el tiempo
+ax = axes[1]
+_reg_plot  = reg_df.reset_index()
+_fechas_r  = pd.to_datetime(
+    _reg_plot["ano"].astype(str) + "-" +
+    _reg_plot["mes"].astype(str).str.zfill(2) + "-01"
+)
+_cols_r = ["#d62728" if r > 0 else "#1f77b4" for r in reg_df["residuo"].values]
+ax.bar(_fechas_r, reg_df["residuo"].values/1e6, color=_cols_r, alpha=0.8, width=20)
+ax.axhline(0, color="k", lw=0.8)
+ax.set_xlabel("Fecha", fontsize=9)
+ax.set_ylabel("Residuo (M USD)", fontsize=9)
+ax.set_title(
+    "Residuos por mes\n"
+    "Rojo = retiró MÁS de lo proyectado (episodio stress o decisión discrecional)",
+    fontsize=9
+)
+ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:,.0f}M"))
+
+plt.tight_layout()
+_ruta_g10 = DIR_OUTPUT / "encaje_10_regresion_D_cierre.png"
+fig.savefig(_ruta_g10, dpi=150, bbox_inches="tight")
+print(f"  Guardado: {_ruta_g10}")
+plt.show()
+
 print("\n[6] FEATURES RECOMENDADAS PARA step001 (observables en t=forecast)")
 r_on_lag1  = round(df["retiro_neto"].corr(df["overnight_bcr"].shift(1)), 4)
 r_exc_lag1 = round(df["retiro_neto"].corr(df["exceso_encaje"].shift(1)), 4)
@@ -1116,6 +1250,7 @@ for i, nombre in enumerate([
     "encaje_07_faltante_predictor.png",
     "encaje_08_techo_r2_comparativo.png",
     "encaje_09_estado_libre.png",
+    "encaje_10_regresion_D_cierre.png",
     "encaje_analisis_datos.xlsx",
 ], start=1):
     print(f"  {i}. {nombre}")
