@@ -229,6 +229,100 @@ def _predecir_estados(modelo, scaler, sorted_states, X: np.ndarray) -> np.ndarra
     return np.array([mapa[e] for e in estados_raw])
 
 
+# ── GARCH(1,1) por ventana (sin leakage de parámetros) ───────────────────────
+#
+# Para que el HMM expanding/rolling sea limpio de principio a fin, el GARCH
+# también se re-estima en cada ventana: los parámetros ω, α, β solo ven datos
+# hasta Y-1 antes de etiquetar el año Y.
+#
+# Tres funciones de bajo nivel:
+#   _garch_fit          → estima (ω, α, β, escala, var_unc) sobre un array
+#   _garch_vol_insample → σ_t causal con los parámetros estimados (in-sample)
+#   _garch_vol_oos      → σ_t causal para datos OOS, continuando la recursión
+#                         desde el último punto del entrenamiento
+
+def _garch_fit(flujo_arr: np.ndarray):
+    """
+    Estima GARCH(1,1) en flujo_arr por MLE (L-BFGS-B).
+    Retorna (omega, alpha, beta, escala, var_unc) o None si falla / serie corta.
+    """
+    from scipy.optimize import minimize
+    escala = float(np.std(flujo_arr))
+    if escala < 1e-9 or len(flujo_arr) < 60:
+        return None
+    x       = (flujo_arr / escala).astype(float)
+    n       = len(x)
+    var_unc = float(np.var(x))
+
+    def _s2(params):
+        w, a, b = params
+        s2 = np.empty(n)
+        s2[0] = var_unc
+        for t in range(1, n):
+            s2[t] = w + a * x[t-1]**2 + b * s2[t-1]
+        return s2
+
+    def _nll(params):
+        w, a, b = params
+        if w <= 0 or a <= 0 or b <= 0 or a + b >= 0.9999:
+            return 1e10
+        s2 = _s2(params)
+        if np.any(s2 <= 0):
+            return 1e10
+        return 0.5 * float(np.sum(np.log(s2) + x**2 / s2))
+
+    try:
+        res = minimize(_nll, [0.01, 0.08, 0.88], method="L-BFGS-B",
+                       bounds=[(1e-7, 0.5), (1e-7, 0.5), (1e-7, 0.9999)],
+                       options={"maxiter": 500, "ftol": 1e-10, "gtol": 1e-7})
+        if res.fun > 1e9:
+            return None
+        return (*res.x, escala, var_unc)
+    except Exception:
+        return None
+
+
+def _garch_vol_insample(params: tuple, flujo_arr: np.ndarray) -> np.ndarray:
+    """σ_t in-sample: recursión causal con parámetros estimados en flujo_arr."""
+    w, a, b, escala, var_unc = params
+    x  = (flujo_arr / escala).astype(float)
+    n  = len(x)
+    s2 = np.empty(n)
+    s2[0] = var_unc
+    for t in range(1, n):
+        s2[t] = w + a * x[t-1]**2 + b * s2[t-1]
+    return np.sqrt(np.maximum(s2, 0)) * escala
+
+
+def _garch_vol_oos(params: tuple,
+                   flujo_train: np.ndarray,
+                   flujo_oos:   np.ndarray) -> np.ndarray:
+    """
+    σ_t OOS para flujo_oos.
+    Continúa la recursión GARCH desde el último estado del entrenamiento
+    usando los parámetros estimados en train — sin ver datos futuros.
+    """
+    w, a, b, escala, _ = params
+    x_tr    = (flujo_train / escala).astype(float)
+    n_tr    = len(x_tr)
+    var_tr  = float(np.var(x_tr))
+
+    # Propagar recursión hasta el final de train para obtener σ²_{n_train}
+    s2 = var_tr
+    for t in range(1, n_tr):
+        s2 = w + a * x_tr[t-1]**2 + b * s2
+    # Primer punto OOS: σ²_{n_train+1}
+    s2_init = w + a * x_tr[-1]**2 + b * s2
+
+    x_oos   = (flujo_oos / escala).astype(float)
+    n_oos   = len(x_oos)
+    s2_arr  = np.empty(n_oos)
+    s2_arr[0] = s2_init
+    for t in range(1, n_oos):
+        s2_arr[t] = w + a * x_oos[t-1]**2 + b * s2_arr[t-1]
+    return np.sqrt(np.maximum(s2_arr, 0)) * escala
+
+
 def hmm_muestra_completa(df: pd.DataFrame, inicio: str) -> tuple:
     """
     VERSION CON LEAKAGE — entrena en 2016→hoy y etiqueta toda la serie.
@@ -255,26 +349,27 @@ def hmm_rolling(df: pd.DataFrame, inicio: str,
                 ventana_años: int = 6) -> tuple:
     """
     VERSION SIN LEAKAGE — rolling window de longitud fija.
+    GARCH(1,1) re-estimado en cada ventana: ω, α, β solo ven datos de esa ventana.
 
     Para etiquetar el año Y:
-      - Entrena HMM en [Y - ventana_años, Y-1]  (ventana fija)
-      - Requiere que haya al menos ventana_años de historia desde `inicio`
-      - Predice estados del año Y con ese modelo
+      - Entrena GARCH + HMM en [Y - ventana_años, Y-1]  (ventana fija)
+      - σ_t OOS de año Y continúa la recursión desde el último punto de train
+      - Requiere al menos ventana_años de historia desde `inicio`
 
     Con ventana_años=6 e inicio=2010:
       - Primer entrenamiento: 2010-2015 (6 años) → etiqueta 2016
       - 2do entrenamiento:    2011-2016 (6 años) → etiqueta 2017
       - ...y así sucesivamente
     """
-    df_base    = df[df.index >= inicio][["target", "garch_vol"]].dropna()
-    año_inicio = df_base.index.year.min()
-    años       = sorted(df_base.index.year.unique())
+    flujo_base = df[df.index >= inicio]["target"].dropna()
+    año_inicio = flujo_base.index.year.min()
+    años       = sorted(flujo_base.index.year.unique())
     todos_idx     = []
     todos_estados = []
 
-    print(f"\n  [ROLLING {ventana_años}a] HMM año a año | inicio={inicio}")
+    print(f"\n  [ROLLING {ventana_años}a] HMM+GARCH/ventana | inicio={inicio}")
     print(f"  Primeras etiquetas desde {año_inicio + ventana_años} "
-          f"(ventana fija {ventana_años} años)")
+          f"(ventana fija {ventana_años} años, GARCH re-estimado por ventana)")
 
     for año in años:
         años_historia = año - año_inicio
@@ -283,25 +378,35 @@ def hmm_rolling(df: pd.DataFrame, inicio: str,
             continue
 
         año_ini_ventana = año - ventana_años
-        X_train = df_base[
-            (df_base.index.year >= año_ini_ventana) &
-            (df_base.index.year < año)
-        ].values
+        flujo_train = flujo_base[
+            (flujo_base.index.year >= año_ini_ventana) &
+            (flujo_base.index.year < año)
+        ]
+        flujo_año = flujo_base[flujo_base.index.year == año]
+        if flujo_año.empty or len(flujo_train) < 50:
+            continue
+
+        params = _garch_fit(flujo_train.values)
+        if params is None:
+            print(f"    {año}: GARCH falló — omitiendo")
+            continue
+
+        sigma_train = _garch_vol_insample(params, flujo_train.values)
+        sigma_oos   = _garch_vol_oos(params, flujo_train.values, flujo_año.values)
+        X_train = np.column_stack([flujo_train.values, sigma_train])
+        X_año   = np.column_stack([flujo_año.values,  sigma_oos])
+
         try:
             modelo, scaler, sorted_states = _fit_hmm_single(X_train)
         except Exception as e:
             print(f"    {año}: HMM falló — {e}")
             continue
 
-        df_año = df_base[df_base.index.year == año]
-        if df_año.empty:
-            continue
-
-        estados_año = _predecir_estados(modelo, scaler, sorted_states, df_año.values)
-        todos_idx.extend(df_año.index.tolist())
+        estados_año = _predecir_estados(modelo, scaler, sorted_states, X_año)
+        todos_idx.extend(flujo_año.index.tolist())
         todos_estados.extend(estados_año.tolist())
         pct_severo = (np.array(estados_año) == 2).mean() * 100
-        print(f"    {año}: ventana [{año_ini_ventana}-{año-1}] ({len(X_train):,} obs) → "
+        print(f"    {año}: ventana [{año_ini_ventana}-{año-1}] ({len(flujo_train):,} obs) → "
               f"severo={pct_severo:.0f}%")
 
     return pd.DatetimeIndex(todos_idx), np.array(todos_estados)
@@ -310,64 +415,84 @@ def hmm_rolling(df: pd.DataFrame, inicio: str,
 def hmm_expanding(df: pd.DataFrame, inicio: str,
                   primer_ventana: int = 6) -> tuple:
     """
-    VERSION SIN LEAKAGE — igual que GARCH:
+    VERSION SIN LEAKAGE — GARCH + HMM expanding.
+    GARCH(1,1) re-estimado en cada ventana: ω, α, β solo ven datos hasta Y-1.
 
       Paso 1 — Primer bloque (in-sample):
-        Entrena en [inicio, inicio + primer_ventana - 1]
-        Etiqueta ESE mismo periodo (como GARCH da valores fitted en train)
+        GARCH estimado en [inicio, inicio+primer_ventana-1] (in-sample)
+        HMM entrenado con [flujo, σ_t_insample]
+        Etiqueta ESE mismo periodo con Viterbi (sin hueco al inicio)
 
       Paso 2 — Expanding año a año:
         Para etiquetar año Y (Y > inicio + primer_ventana - 1):
-          Entrena en [inicio, Y-1] → etiqueta año Y
+          GARCH estimado en [inicio, Y-1] → σ_t OOS para año Y (continúa recursión)
+          HMM entrenado con [flujo_train, σ_train] → etiqueta [flujo_Y, σ_Y_oos]
 
     Con primer_ventana=6 e inicio=2010:
-      - Modelo 1: entrena 2010-2015 → etiqueta 2010-2015 (in-sample) + 2016
-      - Modelo 2: entrena 2010-2016 → etiqueta 2017
+      - Modelo 1: GARCH+HMM en 2010-2015 → etiqueta 2010-2015 (in-sample) + 2016
+      - Modelo 2: GARCH+HMM en 2010-2016 → etiqueta 2017
       - ...
-      → SIN huecos: toda la historia desde 2010 tiene etiqueta
+      → SIN huecos, SIN leakage de parámetros: toda la historia desde 2010
     """
-    df_base    = df[df.index >= inicio][["target", "garch_vol"]].dropna()
-    año_inicio = df_base.index.year.min()
+    flujo_base   = df[df.index >= inicio]["target"].dropna()
+    año_inicio   = flujo_base.index.year.min()
     año_fin_prim = año_inicio + primer_ventana - 1
-    años       = sorted(df_base.index.year.unique())
+    años         = sorted(flujo_base.index.year.unique())
     todos_idx     = []
     todos_estados = []
 
-    print(f"\n  [EXPANDING] HMM | inicio={inicio} | primer_ventana={primer_ventana}a")
-    print(f"  Modelo 1: entrena {año_inicio}-{año_fin_prim} → etiqueta {año_inicio}-{año_fin_prim} "
+    print(f"\n  [EXPANDING] HMM+GARCH/ventana | inicio={inicio} | primer_ventana={primer_ventana}a")
+    print(f"  Modelo 1: GARCH+HMM {año_inicio}-{año_fin_prim} → etiqueta {año_inicio}-{año_fin_prim} "
           f"(in-sample) + {año_fin_prim + 1}")
-    print(f"  Modelo 2+: expanding año a año desde {año_fin_prim + 1}")
+    print(f"  Modelo 2+: expanding año a año desde {año_fin_prim + 1}, GARCH re-estimado cada año")
 
     # ── Paso 1: primer bloque in-sample ───────────────────────────────────────
-    df_prim = df_base[df_base.index.year <= año_fin_prim]
-    if not df_prim.empty:
-        try:
-            modelo, scaler, sorted_states = _fit_hmm_single(df_prim.values)
-            estados_prim = _predecir_estados(modelo, scaler, sorted_states, df_prim.values)
-            todos_idx.extend(df_prim.index.tolist())
-            todos_estados.extend(estados_prim.tolist())
-            pct_sev = (estados_prim == 2).mean() * 100
-            print(f"    {año_inicio}-{año_fin_prim}: in-sample ({len(df_prim):,} obs) → "
-                  f"severo={pct_sev:.0f}%")
-        except Exception as e:
-            print(f"    Paso 1 falló — {e}")
+    flujo_prim = flujo_base[flujo_base.index.year <= año_fin_prim]
+    if not flujo_prim.empty:
+        params = _garch_fit(flujo_prim.values)
+        if params is None:
+            print(f"    Paso 1: GARCH falló — bloque inicial omitido")
+        else:
+            try:
+                sigma_prim = _garch_vol_insample(params, flujo_prim.values)
+                X_prim = np.column_stack([flujo_prim.values, sigma_prim])
+                modelo, scaler, sorted_states = _fit_hmm_single(X_prim)
+                estados_prim = _predecir_estados(modelo, scaler, sorted_states, X_prim)
+                todos_idx.extend(flujo_prim.index.tolist())
+                todos_estados.extend(estados_prim.tolist())
+                pct_sev = (estados_prim == 2).mean() * 100
+                print(f"    {año_inicio}-{año_fin_prim}: in-sample ({len(flujo_prim):,} obs) → "
+                      f"severo={pct_sev:.0f}%")
+            except Exception as e:
+                print(f"    Paso 1 falló — {e}")
 
     # ── Paso 2: expanding desde año_fin_prim + 1 ──────────────────────────────
     for año in años:
         if año <= año_fin_prim:
             continue
-        X_train = df_base[df_base.index.year < año].values
-        df_año  = df_base[df_base.index.year == año]
-        if df_año.empty or len(X_train) < 50:
+        flujo_train = flujo_base[flujo_base.index.year < año]
+        flujo_año   = flujo_base[flujo_base.index.year == año]
+        if flujo_año.empty or len(flujo_train) < 50:
             continue
+
+        params = _garch_fit(flujo_train.values)
+        if params is None:
+            print(f"    {año}: GARCH falló — omitiendo")
+            continue
+
+        sigma_train = _garch_vol_insample(params, flujo_train.values)
+        sigma_oos   = _garch_vol_oos(params, flujo_train.values, flujo_año.values)
+        X_train = np.column_stack([flujo_train.values, sigma_train])
+        X_año   = np.column_stack([flujo_año.values,  sigma_oos])
+
         try:
             modelo, scaler, sorted_states = _fit_hmm_single(X_train)
-            estados_año = _predecir_estados(modelo, scaler, sorted_states, df_año.values)
-            todos_idx.extend(df_año.index.tolist())
+            estados_año = _predecir_estados(modelo, scaler, sorted_states, X_año)
+            todos_idx.extend(flujo_año.index.tolist())
             todos_estados.extend(estados_año.tolist())
             pct_sev = (estados_año == 2).mean() * 100
             años_train = año - año_inicio
-            print(f"    {año}: entrenado en {len(X_train):,} obs ({años_train}a) → "
+            print(f"    {año}: entrenado en {len(flujo_train):,} obs ({años_train}a) → "
                   f"severo={pct_sev:.0f}%")
         except Exception as e:
             print(f"    {año}: HMM falló — {e}")
@@ -574,40 +699,54 @@ def precomputar_hmm_features(df: pd.DataFrame) -> pd.Series:
 def hmm_evolucion(df: pd.DataFrame, primer_ventana: int = HMM_PRIMER_VENTANA) -> dict:
     """
     Para cada año Y desde (HMM_INICIO + primer_ventana) hasta el último año:
-      - Entrena HMM en [HMM_INICIO, Y]  (toda la historia disponible hasta Y)
+      - Re-estima GARCH(1,1) en [HMM_INICIO, Y]  (parámetros sin leakage del futuro)
+      - Entrena HMM con [flujo, σ_t_insample] en [HMM_INICIO, Y]
       - Re-etiqueta TODOS los días de [HMM_INICIO, Y] con ese modelo
 
+    GARCH re-estimado en cada bloque: ω, α, β solo ven datos hasta Y.
     Devuelve dict {año_fin: (DatetimeIndex, np.array estados)}
     → permite ver cómo evoluciona/estabiliza la clasificación al añadir cada año.
     """
-    df_base    = df[df.index >= HMM_INICIO][["target", "garch_vol"]].dropna()
-    año_inicio = df_base.index.year.min()
+    flujo_base   = df[df.index >= HMM_INICIO]["target"].dropna()
+    año_inicio   = flujo_base.index.year.min()
     año_fin_prim = año_inicio + primer_ventana - 1
-    años_oos   = sorted(y for y in df_base.index.year.unique() if y > año_fin_prim)
+    años_oos     = sorted(y for y in flujo_base.index.year.unique() if y > año_fin_prim)
 
     resultados = {}
-    print(f"\n  [EVOLUCIÓN] Re-etiquetando cada año con modelo acumulado...")
+    print(f"\n  [EVOLUCIÓN] Re-etiquetando cada año con modelo acumulado (GARCH por bloque)...")
 
-    # Año base: modelo entrenado en primer bloque
-    df_prim = df_base[df_base.index.year <= año_fin_prim]
-    try:
-        modelo, scaler, sorted_states = _fit_hmm_single(df_prim.values)
-        estados = _predecir_estados(modelo, scaler, sorted_states, df_prim.values)
-        resultados[año_fin_prim] = (df_prim.index, estados)
-        pct_sev = (estados == 2).mean() * 100
-        print(f"    hasta {año_fin_prim}: {len(df_prim):,} obs → severo={pct_sev:.0f}%")
-    except Exception as e:
-        print(f"    Modelo base falló: {e}")
-
-    # Cada año siguiente: re-entrena con toda la historia hasta ese año
-    for año in años_oos:
-        df_hasta = df_base[df_base.index.year <= año]
+    # Año base: GARCH + HMM entrenado en primer bloque
+    flujo_prim = flujo_base[flujo_base.index.year <= año_fin_prim]
+    params = _garch_fit(flujo_prim.values)
+    if params is None:
+        print(f"    Modelo base: GARCH falló")
+    else:
         try:
-            modelo, scaler, sorted_states = _fit_hmm_single(df_hasta.values)
-            estados = _predecir_estados(modelo, scaler, sorted_states, df_hasta.values)
-            resultados[año] = (df_hasta.index, estados)
+            sigma_prim = _garch_vol_insample(params, flujo_prim.values)
+            X_prim = np.column_stack([flujo_prim.values, sigma_prim])
+            modelo, scaler, sorted_states = _fit_hmm_single(X_prim)
+            estados = _predecir_estados(modelo, scaler, sorted_states, X_prim)
+            resultados[año_fin_prim] = (flujo_prim.index, estados)
             pct_sev = (estados == 2).mean() * 100
-            print(f"    hasta {año}: {len(df_hasta):,} obs → severo={pct_sev:.0f}%")
+            print(f"    hasta {año_fin_prim}: {len(flujo_prim):,} obs → severo={pct_sev:.0f}%")
+        except Exception as e:
+            print(f"    Modelo base falló: {e}")
+
+    # Cada año siguiente: re-estima GARCH y HMM con toda la historia hasta ese año
+    for año in años_oos:
+        flujo_hasta = flujo_base[flujo_base.index.year <= año]
+        params = _garch_fit(flujo_hasta.values)
+        if params is None:
+            print(f"    {año}: GARCH falló — omitiendo")
+            continue
+        try:
+            sigma_hasta = _garch_vol_insample(params, flujo_hasta.values)
+            X_hasta = np.column_stack([flujo_hasta.values, sigma_hasta])
+            modelo, scaler, sorted_states = _fit_hmm_single(X_hasta)
+            estados = _predecir_estados(modelo, scaler, sorted_states, X_hasta)
+            resultados[año] = (flujo_hasta.index, estados)
+            pct_sev = (estados == 2).mean() * 100
+            print(f"    hasta {año}: {len(flujo_hasta):,} obs → severo={pct_sev:.0f}%")
         except Exception as e:
             print(f"    {año}: falló — {e}")
 
