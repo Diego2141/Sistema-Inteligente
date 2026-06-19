@@ -193,12 +193,15 @@ def hmm_evolucion(flujo: pd.Series, primer_ventana: int = HMM_PRIMER_VENTANA) ->
         if params is None:
             print(f"    {label}: GARCH falló")
             return None
+        w, a, b, escala, _ = params
         sigma = _garch_vol(params, flujo_bloque.values)
         X = np.column_stack([flujo_bloque.values, sigma])
         modelo, scaler, ss = _fit_hmm(X)
         estados = _predecir(modelo, scaler, ss, X)
         pct = (estados == 2).mean() * 100
-        print(f"    hasta {label}: {len(flujo_bloque):,} obs → severo={pct:.0f}%")
+        print(f"    hasta {label}: {len(flujo_bloque):,} obs | "
+              f"GARCH ω={w:.4f} α={a:.3f} β={b:.3f} (α+β={a+b:.3f}) | "
+              f"severo={pct:.0f}%")
         return flujo_bloque.index, estados, pd.Series(sigma, index=flujo_bloque.index)
 
     # Bloque base
