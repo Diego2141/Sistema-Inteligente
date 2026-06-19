@@ -51,7 +51,7 @@ RUTA_DATOS = pathlib.Path(
 )
 # RUTA_DATOS: .../3. Sistema Inteligente/1. Data/Raw/EncajeD.xlsx
 # Subir 3 niveles da la raíz del proyecto → Output/encaje
-DIR_OUTPUT = RUTA_DATOS.parent.parent.parent / "Output" / "encaje"
+DIR_OUTPUT = RUTA_DATOS.parent.parent.parent / "2. Output" / "encaje"
 DIR_OUTPUT.mkdir(parents=True, exist_ok=True)
 
 COLORES = {
