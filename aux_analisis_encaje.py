@@ -486,12 +486,28 @@ print("    → El valor correcto de Δexceso es r=+0.38 / R²=14%.")
 print("    → Lo más valioso para el pronóstico sigue siendo el patrón calendárico.")
 
 print("\n[3] VERIFICACIÓN DE LA IDENTIDAD CONTABLE")
-print(f"    Media(Δcta_cte + Δovernight + Δactivos + retiro_neto) = {media_suma/1e6:.1f}M")
-print(f"    Std del residuo = {std_suma/1e6:.0f}M")
-print("    → La identidad se cumple. El residuo es ruido de redondeo.")
+df_id_tmp = df[["d_cta_cte","d_overnight","d_activos","retiro_neto"]].dropna().copy()
+df_id_tmp["residuo"] = df_id_tmp.sum(axis=1)
+res = df_id_tmp["residuo"] / 1e6
+print(f"    Media residuo:  {res.mean():+.1f}M")
+print(f"    Std residuo:    {res.std():.0f}M")
+print(f"    Min / Max:      {res.min():.0f}M  /  {res.max():.0f}M")
+print()
+print(f"    Días con |residuo| < 10M  (≈ cero):    {(res.abs()<10).sum():4d}  ({(res.abs()<10).mean()*100:.1f}%)")
+print(f"    Días con |residuo| < 100M (pequeño):   {(res.abs()<100).sum():4d}  ({(res.abs()<100).mean()*100:.1f}%)")
+print(f"    Días con |residuo| >= 500M (grande):   {(res.abs()>=500).sum():4d}  ({(res.abs()>=500).mean()*100:.1f}%)")
+print(f"    Mediana del residuo absoluto:          {res.abs().quantile(0.50):.0f}M")
+print(f"    P90 del residuo absoluto:              {res.abs().quantile(0.90):.0f}M")
+print()
+print("    → CONCLUSIÓN: la identidad NO se cumple perfectamente.")
+print("    → La mitad de los días el residuo supera 155M — no es ruido de redondeo.")
+print("    → EncajeD.xlsx captura solo 5 variables; el balance real del banco")
+print("      incluye otros canales no observados (bonos, posición interbancaria,")
+print("      depósitos de clientes, posición FX, etc.) que absorben la diferencia.")
+print("    → No podemos afirmar que el retiro sea 'la válvula principal'")
+print("      con los datos disponibles.")
 
 print("\n[3b] VARIACIÓN DIARIA PROMEDIO DE CADA COMPONENTE (M USD)")
-df_id_tmp = df[["d_cta_cte","d_overnight","d_activos","retiro_neto"]].dropna()
 for col, nombre in [("d_cta_cte",   "Δ Cta Cte BCR  "),
                      ("d_overnight", "Δ Overnight BCR"),
                      ("d_activos",   "Δ Activos      "),
@@ -501,7 +517,8 @@ for col, nombre in [("d_cta_cte",   "Δ Cta Cte BCR  "),
           f"std={v.std()/1e6:6.0f}M  "
           f"p10={v.quantile(.10)/1e6:+7.0f}M  "
           f"p90={v.quantile(.90)/1e6:+7.0f}M")
-print(f"    {'SUMA (debe≈0)   ':22s}  media={df_id_tmp.sum(axis=1).mean()/1e6:+7.1f}M")
+print(f"    {'Residuo (no≈0)  ':22s}  media={res.mean():+7.1f}M  "
+      f"std={res.std():6.0f}M")
 
 print("\n[3c] DISTRIBUCIÓN DE LA CAÍDA DE CTA CTE (días con Δcta_cte < 0)")
 mask_cae = df["d_cta_cte"] < 0
