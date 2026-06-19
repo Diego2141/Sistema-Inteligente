@@ -464,27 +464,33 @@ print("    Encaje     = Caja + Cta Cte BCR  (Overnight NO es encaje)")
 print("    Exceso     = Encaje − Exigible")
 print("    Δ Exceso(t)= Exceso(t) − Exceso(t−1)  [diferencia simple diaria]")
 print()
-print("    Identidad del balance:")
-print("    Δcta_cte + Δovernight + Δactivos + retiro_neto ≈ 0")
-print("    → Cuando Cta Cte cae, el dinero va a Overnight, Activos o Retiro Neto")
-print()
-print("    Distribución de la caída de Cta Cte (días con Δcta_cte < 0):")
-mask_cae = df["d_cta_cte"] < 0
-total    = df.loc[mask_cae, "d_cta_cte"].sum()
-d_on     = df.loc[mask_cae, "d_overnight"].sum()
-d_act    = df.loc[mask_cae, "d_activos"].sum()
-d_ret    = df.loc[mask_cae, "retiro_neto"].sum()
-print(f"      Caída Cta Cte:   {total/1e9:+.1f}B")
-print(f"      → Overnight:     {d_on/1e9:+.1f}B  ({d_on/abs(total)*100:.0f}%)")
-print(f"      → Activos:       {d_act/1e9:+.1f}B  ({d_act/abs(total)*100:.0f}%)")
-print(f"      → Retiro Neto:   {d_ret/1e9:+.1f}B  ({d_ret/abs(total)*100:.0f}%)")
+print("    NOTA: Una versión anterior incluía Overnight en el exceso,")
+print("    lo que generaba una correlación espuria r=+0.90 con el retiro.")
+print("    Δexceso_malo = Δcta_cte + Δovernight + Δcaja  (overnight en ambos lados)")
+print("    Identidad:    Δcta_cte + Δovernight + Δactivos + retiro_neto = 0")
+print("    → El overnight se cancelaba consigo mismo, inflando el r artificialmente.")
 
-print("\n[2] VERIFICACIÓN DE LA IDENTIDAD CONTABLE")
+print("\n[2] CORRELACIONES CORRECTAS CON RETIRO NETO")
+corr_data = {
+    "Δ Cta Cte BCR (driver principal)": df["retiro_neto"].corr(df["d_cta_cte"]),
+    "Δ Exceso encaje (correcto, sin ON)": df["retiro_neto"].corr(df["d_exceso"]),
+    "Δ Activos                        ": df["retiro_neto"].corr(df["d_activos"]),
+    "Δ Overnight BCR                  ": df["retiro_neto"].corr(df["d_overnight"]),
+    "Exceso encaje (nivel)            ": df["retiro_neto"].corr(df["exceso_encaje"]),
+}
+for nombre, r in corr_data.items():
+    print(f"    {nombre}  r={r:+.4f}  R²={r**2:.2%}")
+print()
+print("    → El r=+0.90 reportado anteriormente era INCORRECTO (overnight incluido).")
+print("    → El valor correcto de Δexceso es r=+0.38 / R²=14%.")
+print("    → Lo más valioso para el pronóstico sigue siendo el patrón calendárico.")
+
+print("\n[3] VERIFICACIÓN DE LA IDENTIDAD CONTABLE")
 print(f"    Media(Δcta_cte + Δovernight + Δactivos + retiro_neto) = {media_suma/1e6:.1f}M")
 print(f"    Std del residuo = {std_suma/1e6:.0f}M")
 print("    → La identidad se cumple. El residuo es ruido de redondeo.")
 
-print("\n[2b] VARIACIÓN DIARIA PROMEDIO DE CADA COMPONENTE (M USD)")
+print("\n[3b] VARIACIÓN DIARIA PROMEDIO DE CADA COMPONENTE (M USD)")
 df_id_tmp = df[["d_cta_cte","d_overnight","d_activos","retiro_neto"]].dropna()
 for col, nombre in [("d_cta_cte",   "Δ Cta Cte BCR  "),
                      ("d_overnight", "Δ Overnight BCR"),
@@ -497,7 +503,18 @@ for col, nombre in [("d_cta_cte",   "Δ Cta Cte BCR  "),
           f"p90={v.quantile(.90)/1e6:+7.0f}M")
 print(f"    {'SUMA (debe≈0)   ':22s}  media={df_id_tmp.sum(axis=1).mean()/1e6:+7.1f}M")
 
-print("\n[2c] CONTRIBUCIÓN DE CADA CANAL POR FASE (promedio diario, M USD)")
+print("\n[3c] DISTRIBUCIÓN DE LA CAÍDA DE CTA CTE (días con Δcta_cte < 0)")
+mask_cae = df["d_cta_cte"] < 0
+total = df.loc[mask_cae, "d_cta_cte"].sum()
+d_on  = df.loc[mask_cae, "d_overnight"].sum()
+d_act = df.loc[mask_cae, "d_activos"].sum()
+d_ret = df.loc[mask_cae, "retiro_neto"].sum()
+print(f"    Caída total Cta Cte: {total/1e9:+.1f}B")
+print(f"      → Overnight:       {d_on/1e9:+.1f}B  ({d_on/abs(total)*100:.0f}%)")
+print(f"      → Activos:         {d_act/1e9:+.1f}B  ({d_act/abs(total)*100:.0f}%)")
+print(f"      → Retiro Neto:     {d_ret/1e9:+.1f}B  ({d_ret/abs(total)*100:.0f}%)")
+
+print("\n[3d] CONTRIBUCIÓN DE CADA CANAL POR FASE (promedio diario, M USD)")
 comp_cols_r = ["d_cta_cte","d_overnight","d_activos","retiro_neto"]
 comp_names_r= ["Δ Cta Cte","Δ Overnight","Δ Activos ","Retiro    "]
 fase_medias = df.groupby("fase")[comp_cols_r].mean() / 1e6
@@ -506,7 +523,7 @@ for f in ["A_inicio(1-4)","B_acum(5-21)","C_rentab(22-28)","D_cierre(29-31)"]:
     vals = "  ".join(f"{fase_medias.loc[f,c]:+10.1f}" for c in comp_cols_r)
     print(f"    {f:<22}  {vals}")
 
-print("\n[3] RETIRO NETO PROMEDIO POR FASE (M USD)")
+print("\n[4] RETIRO NETO PROMEDIO POR FASE (M USD)")
 fase_res = df.groupby("fase")["retiro_neto"].agg(
     media=lambda x: round(x.mean()/1e6),
     p10  =lambda x: round(x.quantile(.10)/1e6),
@@ -515,16 +532,21 @@ fase_res = df.groupby("fase")["retiro_neto"].agg(
 )
 print(fase_res.to_string())
 
-print("\n[4] R² DEL DÍA DEL MES COMO PREDICTOR (por año)")
+print("\n[5] R² DEL DÍA DEL MES COMO PREDICTOR (por año)")
+print("    (Este resultado NO cambia con la corrección de encaje)")
 for a, r in r2_anios.items():
     print(f"    {a}: {r:.2%}")
 
-print("\n[5] FEATURES RECOMENDADAS PARA step001 (observables en t=forecast)")
-print("    1. dia_mes_target          [calendario, siempre conocido]")
-print("    2. dias_fin_mes_target     [calendario, siempre conocido]")
-print("    3. overnight_bcr_lag1      r con retiro_neto =", round(df["retiro_neto"].corr(df["overnight_bcr"].shift(1)), 4))
-print("    4. exceso_encaje_lag1      r con retiro_neto =", round(df["retiro_neto"].corr(df["exceso_encaje"].shift(1)), 4))
-print("    5. exceso_acum_periodo_lag1 [exceso acumulado desde inicio del mes]")
+print("\n[6] FEATURES RECOMENDADAS PARA step001 (observables en t=forecast)")
+r_on_lag1  = round(df["retiro_neto"].corr(df["overnight_bcr"].shift(1)), 4)
+r_exc_lag1 = round(df["retiro_neto"].corr(df["exceso_encaje"].shift(1)), 4)
+r_cta_lag1 = round(df["retiro_neto"].corr(df["cta_cte_bcr"].shift(1)), 4)
+print(f"    1. dia_mes_target           [calendario]  — principal predictor (R²=13-35% por año)")
+print(f"    2. dias_fin_mes_target      [calendario]  — complementario al día del mes")
+print(f"    3. cta_cte_bcr_lag1         r={r_cta_lag1:+.4f}  [nivel de encaje de ayer]")
+print(f"    4. exceso_encaje_lag1       r={r_exc_lag1:+.4f}  [exceso encaje de ayer, sin overnight]")
+print(f"    5. overnight_bcr_lag1       r={r_on_lag1:+.4f}  [overnight de ayer → proxy rentabilización]")
+print(f"    6. exceso_acum_periodo_lag1          [exceso acumulado desde inicio del mes]")
 
 print()
 print("Archivos generados en:", DIR_OUTPUT)
