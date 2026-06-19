@@ -176,6 +176,8 @@ PARAMS = {
 
     # Rutas archivos manuales
     "ruta_datos_bancarios": r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Raw\Transacciones_BancaLocal.xlsx",
+    "ruta_encaje": r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Raw\EncajeD.xlsx",
+    "banco_encaje": "BBVA",   # banco al que aplican los datos de encaje
     "ruta_confirmados": r"RUTA\confirmados.xlsx",
     "ruta_intervencion": r"RUTA\intervencion.xlsx",
     # "ruta_igv" eliminado: pagos IGV en soles, no relevante para liquidez ME
@@ -418,6 +420,74 @@ def load_manual_data(params):
 
     logger.info("  Carga de datos manuales completada.")
     return resultado
+
+
+def load_encaje_data(params):
+    """
+    Carga EncajeD.xlsx con datos de encaje de BBVA.
+
+    Columnas esperadas (nombres normalizados a minúsculas y sin tildes):
+      fecha, caja, cta_cte_bcr, overnight_bcr, activos, encaje_exigible, retiro_neto
+
+    Retorna DataFrame indexado por fecha con las columnas normalizadas,
+    o DataFrame vacío si el archivo no está disponible.
+    """
+    ruta = params.get("ruta_encaje", "")
+    if not ruta or ruta == r"RUTA\EncajeD.xlsx":
+        logger.info("  Encaje: ruta no configurada — features de encaje omitidas.")
+        return pd.DataFrame()
+
+    try:
+        df = pd.read_excel(ruta)
+        if df.empty:
+            logger.warning(f"  EncajeD.xlsx vacío: {ruta}")
+            return pd.DataFrame()
+
+        # Normalizar nombres de columna: minúsculas, sin tildes, sin espacios
+        import unicodedata
+        def _norm(s):
+            s = str(s).lower().strip()
+            s = "".join(c for c in unicodedata.normalize("NFD", s)
+                        if unicodedata.category(c) != "Mn")
+            return s.replace(" ", "_").replace(".", "_")
+
+        df.columns = [_norm(c) for c in df.columns]
+
+        # Mapear variantes de nombres al estándar interno
+        _alias = {
+            "cta__cte__bcr": "cta_cte_bcr",
+            "cta_cte": "cta_cte_bcr",
+            "overnight": "overnight_bcr",
+            "exigible": "encaje_exigible",
+            "retiro": "retiro_neto",
+        }
+        df = df.rename(columns=_alias)
+
+        # Detectar columna de fecha
+        fecha_col = next((c for c in df.columns if "fecha" in c), None)
+        if fecha_col is None:
+            logger.warning("  EncajeD.xlsx: no se encontró columna de fecha.")
+            return pd.DataFrame()
+
+        df["fecha"] = pd.to_datetime(df[fecha_col])
+        df = df.set_index("fecha").sort_index()
+
+        # Conservar solo columnas numéricas relevantes
+        cols_requeridas = ["caja", "cta_cte_bcr", "overnight_bcr", "activos",
+                           "encaje_exigible", "retiro_neto"]
+        cols_presentes = [c for c in cols_requeridas if c in df.columns]
+        df = df[cols_presentes].apply(pd.to_numeric, errors="coerce")
+
+        logger.info(
+            f"  EncajeD cargado: {len(df):,} filas | "
+            f"{df.index.min().date()} → {df.index.max().date()} | "
+            f"cols: {cols_presentes}"
+        )
+        return df
+
+    except Exception as e:
+        logger.warning(f"  No se pudo cargar EncajeD.xlsx: {ruta} | {e}")
+        return pd.DataFrame()
 
 
 ###############################################################################
@@ -1226,7 +1296,108 @@ def build_macro_features(macro_df):
     return resultado
 
 
-# 5c. Features estacionales en t+h
+# 5c. Features de encaje (BBVA-específicas, con rezago 1 día)
+def build_encaje_features(df_encaje, peru_bday):
+    """
+    Deriva features de encaje a partir de EncajeD.xlsx.
+    Todas las variables usan información de t-1 (sin leakage).
+
+    Features generadas:
+      encaje_lag1         : Caja + Cta Cte BCR del día t-1 (M USD)
+      exceso_lag1         : encaje_lag1 - encaje_exigible_lag1
+      faltante_lag1       : exigible_total_mes - encaje_acum(t-1)
+                            = lo que aún necesita acumular para cerrar el mes
+      techo_10h           : CC + ON al día hábil que queda a 10 días hábiles
+                            del cierre del mes. Disponible solo cuando t está
+                            dentro de los últimos 10 días hábiles del mes.
+      techo_restante_lag1 : techo_10h - retiro_acum_mes(t-1)
+                            = presupuesto de retiro aún disponible
+      proporcion_usada    : retiro_acum_mes(t-1) / techo_10h (0 si techo=0)
+
+    Retorna DataFrame indexado por fecha, alineado con los datos de encaje.
+    """
+    if df_encaje.empty:
+        return pd.DataFrame()
+
+    df = df_encaje.copy()
+    resultado = pd.DataFrame(index=df.index)
+
+    # Encaje disponible (solo Caja + Cta Cte BCR; Overnight NO cuenta)
+    if "caja" in df.columns and "cta_cte_bcr" in df.columns:
+        encaje = df["caja"] + df["cta_cte_bcr"]
+    else:
+        logger.warning("  build_encaje_features: faltan columnas caja / cta_cte_bcr")
+        return pd.DataFrame()
+
+    overnight = df.get("overnight_bcr", pd.Series(0.0, index=df.index))
+    exigible  = df.get("encaje_exigible", pd.Series(np.nan, index=df.index))
+    retiro    = df.get("retiro_neto", pd.Series(np.nan, index=df.index))
+
+    # ── 1. Encaje y exceso con rezago 1 día ─────────────────────────────────
+    resultado["encaje_lag1"]   = encaje.shift(1)
+    resultado["exceso_lag1"]   = (encaje - exigible).shift(1)
+
+    # ── 2. Faltante = lo que el banco aún necesita acumular este mes ─────────
+    # exigible_total_mes = encaje_exigible × días_calendario_en_mes
+    # encaje_acum(t-1)   = suma de encaje diario desde inicio del mes hasta t-1
+    #
+    # Sólo días donde encaje_exigible no es NaN participan en el cálculo.
+    exigible_mensual = exigible.groupby(exigible.index.to_period("M")).transform("first")
+    dias_mes = pd.Series(
+        df.index.to_series().dt.daysinmonth.values, index=df.index
+    )
+    exigible_total = exigible_mensual * dias_mes
+
+    encaje_acum = encaje.groupby(encaje.index.to_period("M")).cumsum()
+    faltante_raw = exigible_total - encaje_acum          # positivo = necesita más
+    resultado["faltante_lag1"] = faltante_raw.shift(1)
+
+    # ── 3. Techo (CC + ON a 10 días hábiles del cierre del mes) ─────────────
+    # Para cada fecha, identificar el día que queda a 10 días hábiles del
+    # cierre del mes en su respectivo mes. El techo se define solo una vez
+    # por mes (en ese día puntual) y se propaga hacia adelante dentro del mes.
+    cc_on = encaje + overnight   # CC + ON es el instrumento observado antes de ON
+
+    techo_por_fecha = pd.Series(np.nan, index=df.index)
+    for periodo, grupo in cc_on.groupby(cc_on.index.to_period("M")):
+        inicio = periodo.start_time
+        if inicio.month == 12:
+            fin = pd.Timestamp(year=inicio.year + 1, month=1, day=1) - pd.Timedelta(days=1)
+        else:
+            fin = pd.Timestamp(year=inicio.year, month=inicio.month + 1, day=1) - pd.Timedelta(days=1)
+
+        bdays_mes = pd.bdate_range(start=inicio, end=fin, freq=peru_bday)
+        n_bd = len(bdays_mes)
+        if n_bd < 10:
+            continue
+
+        fecha_techo = bdays_mes[n_bd - 10]   # día hábil que está a 10 días del cierre
+        if fecha_techo in cc_on.index:
+            val_techo = cc_on.loc[fecha_techo]
+            fechas_grupo = grupo.index
+            fechas_post = fechas_grupo[fechas_grupo >= fecha_techo]
+            techo_por_fecha.loc[fechas_post] = val_techo
+
+    resultado["techo_10h"] = techo_por_fecha.shift(1)   # rezago 1 día (conocido en t)
+
+    # ── 4. Retiro acumulado del mes hasta t-1 ────────────────────────────────
+    retiro_acum_mes = retiro.groupby(retiro.index.to_period("M")).cumsum().shift(1)
+
+    # ── 5. Techo restante y proporción usada ─────────────────────────────────
+    resultado["techo_restante_lag1"] = resultado["techo_10h"] - retiro_acum_mes.abs()
+    resultado["proporcion_usada"] = (
+        retiro_acum_mes.abs() / resultado["techo_10h"].replace(0, np.nan)
+    ).clip(0, None)
+
+    n_validos = resultado["faltante_lag1"].notna().sum()
+    logger.info(
+        f"  build_encaje_features: {n_validos:,} filas con faltante_lag1 válido | "
+        f"techo_10h disponible: {resultado['techo_10h'].notna().sum():,} filas"
+    )
+    return resultado
+
+
+# 5d. Features estacionales en t+h
 def _get_bdays_en_mes(fecha, peru_bday):
     """Retorna todos los días hábiles del mes de la fecha dada."""
     inicio_mes = fecha.replace(day=1)
@@ -1528,7 +1699,9 @@ def build_feature_matrix(
     fechas_elecciones,
     h_min,
     h_max,
-    hmm_features=None,   # pd.Series(hmm_estado, index=fecha_t) pre-computada
+    hmm_features=None,     # pd.Series(hmm_estado, index=fecha_t) pre-computada
+    encaje_features=None,  # pd.DataFrame(index=fecha_t) con features de encaje (BBVA)
+    banco_encaje="BBVA",   # banco al que aplican esas features
 ):
     """
     Construye el dataset de entrenamiento para un banco de forma vectorizada.
@@ -1632,6 +1805,19 @@ def build_feature_matrix(
     else:
         df["hmm_estado"] = pd.NA
 
+    # ── 8. Features de encaje (solo para el banco configurado, ej. BBVA) ─────
+    # encaje_features está indexado por fecha_t y contiene valores del día t-1.
+    # Columnas: encaje_lag1, exceso_lag1, faltante_lag1, techo_10h,
+    #           techo_restante_lag1, proporcion_usada.
+    # Para bancos distintos al banco_encaje → columnas quedan en NaN.
+    if encaje_features is not None and not encaje_features.empty:
+        if banco == banco_encaje:
+            df = df.merge(encaje_features, left_on="fecha_t", right_index=True, how="left")
+            logger.info(f"  {banco}: features de encaje incorporadas ({len(encaje_features.columns)} cols)")
+        else:
+            for col in encaje_features.columns:
+                df[col] = np.nan
+
     # ── Reducir a float32 antes de reordenar ────────────────────────────────
     # Mitad de memoria y evita el OOM en la consolidación interna de pandas
     float_cols = df.select_dtypes(include="float64").columns
@@ -1723,6 +1909,11 @@ def build_full_matrix(
         else:
             bank_features_dict[banco] = pd.DataFrame()
 
+    # Pre-calcular features de encaje (solo para el banco configurado, ej. BBVA)
+    banco_encaje = params.get("banco_encaje", "BBVA")
+    df_encaje = load_encaje_data(params)
+    encaje_feat = build_encaje_features(df_encaje, peru_bday)
+
     # Pre-computar HMM expanding SOLO para SISTEMA (régimen sistémico, no por banco)
     # El mismo hmm_estado se aplica a todos los bancos individuales.
     hmm_sistema = pd.Series(dtype="Int8")
@@ -1756,7 +1947,9 @@ def build_full_matrix(
             fechas_elecciones=fechas_elecciones,
             h_min=params["h_min"],
             h_max=params["h_max"],
-            hmm_features=hmm_sistema,   # mismo régimen sistémico para todos los bancos
+            hmm_features=hmm_sistema,       # mismo régimen sistémico para todos los bancos
+            encaje_features=encaje_feat,    # features de encaje (solo aplican a banco_encaje)
+            banco_encaje=banco_encaje,
         )
         if df_banco_mat.empty:
             continue
@@ -1953,6 +2146,15 @@ def build_data_dictionary(params):
     add("dias_al_cierre_anio_cos","Calendario","cos(2π·pos_anio/P_anio) — ciclo anual hábil dinámico",                       None, "t+h")
     add("elec_sin",              "Calendario", "sin(2π·bd_desde_elec/1260) — ciclo electoral 5 años (solo 1ras vueltas)",    None, "t+h")
     add("elec_cos",              "Calendario", "cos(2π·bd_desde_elec/1260) — ciclo electoral 5 años (solo 1ras vueltas)",    None, "t+h")
+
+    # ── Features de encaje BBVA (EncajeD.xlsx, rezago 1 día) ─────────────────
+    _benc = params.get("banco_encaje", "BBVA")
+    add("encaje_lag1",         f"EncajeD / {_benc}", "Caja + Cta Cte BCR en t-1 (M USD). Solo banco configurado en banco_encaje.", 1, "t")
+    add("exceso_lag1",         f"EncajeD / {_benc}", "Encaje(t-1) − Exigible(t-1): exceso acumulado disponible (M USD).", 1, "t")
+    add("faltante_lag1",       f"EncajeD / {_benc}", "Exigible_total_mes − encaje_acum(t-1): saldo aún pendiente de acumular en el mes (M USD).", 1, "t")
+    add("techo_10h",           f"EncajeD / {_benc}", "CC+ON al día hábil 10 antes del cierre del mes, rezagado 1 día. Techo operativo de retiros.", 1, "t")
+    add("techo_restante_lag1", f"EncajeD / {_benc}", "techo_10h − retiro_acumulado_mes(t-1): presupuesto de retiro aún disponible (M USD).", 1, "t")
+    add("proporcion_usada",    f"EncajeD / {_benc}", "retiro_acum_mes(t-1) / techo_10h: fracción del techo ya utilizada (0-1+).", 1, "t")
 
     # ── Target ────────────────────────────────────────────────────────────────
     add("target", "Datos bancarios", "Flujo neto = D(b, t+h) - R(b, t+h). NaN si no hay datos.", None, "t+h")
