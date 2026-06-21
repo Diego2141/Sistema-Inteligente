@@ -188,10 +188,6 @@ MODELO_CV = "xgb"
 assert MODELO_CV in ("xgb", "lgbm", "xgb_qt"), \
     f"MODELO_CV debe ser 'xgb', 'lgbm' o 'xgb_qt', recibido: {MODELO_CV!r}"
 
-# ── Regularización Optuna ─────────────────────────────────────────────────────
-FIX_REG_ALPHA  = False
-FIX_REG_LAMBDA = False
-
 # ── Parámetro s (suavizado Pinball-Arctan) ────────────────────────────────────
 # True  → s fijo en S_FACTOR_FIJO × std_y (recomendado por el paper 2406.02293)
 #          Optuna no busca s; libera trials para otros hiperparámetros
@@ -698,8 +694,8 @@ def _objective_optuna(trial, X_tr, y_tr, X_va, y_va, std_y):
         "min_child_weight": trial.suggest_int("min_child_weight", 10, 200),
         "colsample_bytree": trial.suggest_float("colsample_bytree", 0.4, 1.0),
         "subsample"       : trial.suggest_float("subsample", 0.5, 1.0),
-        "reg_alpha"       : 0.0 if FIX_REG_ALPHA else trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True),
-        "reg_lambda"      : trial.suggest_float("reg_lambda", 0.1, 5.0) if FIX_REG_LAMBDA else trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
+        "reg_alpha"       : trial.suggest_float("reg_alpha",  1e-4, 10.0, log=True),
+        "reg_lambda"      : trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
         "tree_method"     : "hist",
         "nthread"         : _XGB_NTHREAD,
         "seed"            : 42,
@@ -789,8 +785,8 @@ def _objetivo_optuna_lgbm(trial, X_tr, y_tr, X_va, y_va):
         "min_child_samples": trial.suggest_int(  "min_child_samples", 10,   200),
         "subsample"        : trial.suggest_float("subsample",         0.5,   1.0),
         "colsample_bytree" : trial.suggest_float("colsample_bytree",  0.4,  1.0),
-        "reg_alpha"        : 0.0 if FIX_REG_ALPHA else trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True),
-        "reg_lambda"       : trial.suggest_float("reg_lambda", 0.1, 5.0) if FIX_REG_LAMBDA else trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
+        "reg_alpha"        : trial.suggest_float("reg_alpha",  1e-4, 10.0, log=True),
+        "reg_lambda"       : trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
         "subsample_freq"   : 1,
     }
     n_est  = trial.suggest_int("n_estimators", 100, 1000)
@@ -848,8 +844,8 @@ def _objetivo_optuna_xgb_qt_tau(trial, tau, X_tr, y_tr, X_va, y_va, std_y):
         "min_child_weight": trial.suggest_int(  "min_child_weight", 10,   200),
         "colsample_bytree": trial.suggest_float("colsample_bytree",  0.4,  1.0),
         "subsample"       : trial.suggest_float("subsample",         0.5,  1.0),
-        "reg_alpha"       : 0.0 if FIX_REG_ALPHA else trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True),
-        "reg_lambda"      : trial.suggest_float("reg_lambda", 0.1, 5.0) if FIX_REG_LAMBDA else trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
+        "reg_alpha"       : trial.suggest_float("reg_alpha",  1e-4, 10.0, log=True),
+        "reg_lambda"      : trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
         "tree_method"     : "hist",
         "nthread"         : _XGB_NTHREAD,   # limita threads por trial en paralelo
         "seed"            : 42,
@@ -1230,7 +1226,7 @@ def graficar_fanchart_acum_test_fold(
     modo  = "EXPANDING" if EXPANDING else "ROLLING"
 
     fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 7, nrows * 5), sharey=False)
-    axes_flat = axes.flatten() if len(origenes) > 1 else [axes]
+    axes_flat = np.array(axes).flatten()
 
     fig.suptitle(
         f"Fan chart ACUMULADO TEST OOS — Fold {fold['fold']} — {banco} [{modo}]\n"
@@ -1346,7 +1342,7 @@ def graficar_fanchart_acum_punto_test_fold(
     modo  = "EXPANDING" if EXPANDING else "ROLLING"
 
     fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 7, nrows * 5), sharey=False)
-    axes_flat = axes.flatten() if len(origenes) > 1 else [axes]
+    axes_flat = np.array(axes).flatten()
 
     fig.suptitle(
         f"Acumulado TEST OOS — Realizado vs Media vs Mediana — Fold {fold['fold']} — {banco} [{modo}]\n"
@@ -1439,7 +1435,7 @@ def graficar_fanchart_acum_punto_q05_test_fold(
     modo  = "EXPANDING" if EXPANDING else "ROLLING"
 
     fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 7, nrows * 5), sharey=False)
-    axes_flat = axes.flatten() if len(origenes) > 1 else [axes]
+    axes_flat = np.array(axes).flatten()
 
     fig.suptitle(
         f"Acumulado TEST OOS — Realizado / Media / Mediana / Q05-acum — Fold {fold['fold']} — {banco} [{modo}]\n"
@@ -1559,7 +1555,7 @@ def graficar_hiperparametros_wfcv(df_test_m, banco):
     folds = df_test_m["fold"].values
     fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 5, nrows * 3.5),
                              gridspec_kw={"hspace": 0.55, "wspace": 0.35})
-    axes_flat = axes.flatten() if n > 1 else [axes]
+    axes_flat = np.array(axes).flatten()
     fig.suptitle(
         f"Estabilidad HP — Walk-forward CV v3 [{' EXPANDING' if EXPANDING else 'ROLLING'}] — {banco}\n"
         f"TRAIN {VENTANA_TRAIN_AÑOS}yr / VAL {VENTANA_VAL_AÑOS}yr / TEST {VENTANA_TEST_AÑOS}yr  "
@@ -1817,7 +1813,7 @@ def graficar_fanchart_test_fold(
     modo  = "EXPANDING" if EXPANDING else "ROLLING"
 
     fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 7, nrows * 5), sharey=False)
-    axes_flat = axes.flatten() if len(origenes) > 1 else [axes]
+    axes_flat = np.array(axes).flatten()
 
     s4_tag = "  |  🟠 naranja = Step004 (GARCH global, lookahead)" if preds_overlay is not None else ""
     fig.suptitle(
@@ -2465,6 +2461,10 @@ def evaluar_banco(banco: str):
             continue
 
         std_y = float(y_train.std())
+        if std_y < 1.0:
+            logger.warning(f"    Fold {fold['fold']}: std_y={std_y:.4f} anormalmente bajo — "
+                           f"forzado a 1.0 para evitar división por cero en objetivo GARCH")
+            std_y = 1.0
         logger.info(f"    X_train={len(X_train):,} | X_val={len(X_val):,} | "
                     f"X_test={len(X_test):,} | std_y={std_y:,.0f}")
 
