@@ -781,7 +781,7 @@ def _leer_bcrp_excel(ruta, nombre, hoja=0):
         return pd.Series(dtype=float, name=nombre)
 
 
-_BBG_HOJAS     = {"BVL": "BVL", "CDS_PERU_5Y": "CDS", "COPPER": "Cobre"}
+_BBG_HOJAS     = {"CDS_PERU_5Y": "CDS", "COPPER": "Cobre"}
 _BBG_DATE_FMTS = ["%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%Y%m%d"]
 
 
@@ -1417,101 +1417,6 @@ def _get_bdays_en_trim(fecha, peru_bday):
     else:
         fin_trim = fecha.replace(month=(trim + 1) * 3 + 1, day=1) - pd.Timedelta(days=1)
     return pd.bdate_range(start=inicio_trim, end=fin_trim, freq=peru_bday)
-
-
-def seasonal_features(fecha, bdays_mes_cache, peru_holidays, fechas_elecciones):
-    """
-    Calcula features del CALENDARIO para la fecha futura t+h.
-    Estas variables son siempre conocidas porque son determinísticas.
-    """
-    fecha = pd.Timestamp(fecha)
-
-    # Cache de días hábiles del mes
-    clave_mes = (fecha.year, fecha.month)
-    if clave_mes not in bdays_mes_cache:
-        try:
-            from pandas.tseries.offsets import CustomBusinessDay
-            peru_bday_local = CustomBusinessDay(holidays=peru_holidays)
-        except Exception:
-            from pandas.tseries.offsets import BDay
-            peru_bday_local = BDay()
-        bdays_mes_cache[clave_mes] = _get_bdays_en_mes(fecha, peru_bday_local)
-
-    bdays_mes = bdays_mes_cache[clave_mes]
-    total_bdays_mes = len(bdays_mes)
-
-    try:
-        pos_en_mes = list(bdays_mes).index(fecha) + 1  # 1-indexed
-    except ValueError:
-        pos_en_mes = 1
-
-    dias_al_cierre_mes = total_bdays_mes - pos_en_mes
-    dias_desde_cierre_mes = pos_en_mes - 1
-
-    # Features de trimestre
-    try:
-        from pandas.tseries.offsets import CustomBusinessDay
-        peru_bday_local = CustomBusinessDay(holidays=peru_holidays)
-    except Exception:
-        from pandas.tseries.offsets import BDay
-        peru_bday_local = BDay()
-
-    bdays_trim = _get_bdays_en_trim(fecha, peru_bday_local)
-    try:
-        pos_en_trim = list(bdays_trim).index(fecha) + 1
-    except ValueError:
-        pos_en_trim = 1
-
-    total_bdays_trim = len(bdays_trim)
-    is_penult_bday_trim = int(pos_en_trim == total_bdays_trim - 1)
-    is_ultimo_bday_trim = int(pos_en_trim == total_bdays_trim)
-    is_1er_bday_trim = int(pos_en_trim == 1)
-    is_2do_bday_trim = int(pos_en_trim == 2)
-    is_3er_bday_trim = int(pos_en_trim == 3)
-
-    # Feriados
-    is_pre_feriado = int((fecha + pd.Timedelta(days=1)) in peru_holidays or
-                         (fecha + pd.Timedelta(days=2)) in peru_holidays)
-    is_post_feriado = int((fecha - pd.Timedelta(days=1)) in peru_holidays or
-                          (fecha - pd.Timedelta(days=2)) in peru_holidays)
-
-    # Elecciones — is_eleccion eliminado: elecciones peruanas siempre en domingo (día no hábil)
-    if fechas_elecciones:
-        is_pre_eleccion = int(0 < (pd.DatetimeIndex(fechas_elecciones) - fecha).days.min() <= 7
-                              if any((pd.DatetimeIndex(fechas_elecciones) - fecha).days > 0) else False)
-        is_post_eleccion = int(0 < (fecha - pd.DatetimeIndex(fechas_elecciones)).days.min() <= 7
-                               if any((fecha - pd.DatetimeIndex(fechas_elecciones)).days > 0) else False)
-    else:
-        is_pre_eleccion = 0
-        is_post_eleccion = 0
-
-    # Otros indicadores
-    dia_semana = fecha.dayofweek  # 0=lunes
-    mes = fecha.month
-    is_quincena = int(pos_en_mes == 15 or dias_al_cierre_mes == 0)
-    is_cierre_encaje = int(dias_al_cierre_mes <= 1)  # Últimos 2 días hábiles del mes
-    is_fin_anio = int(mes == 12 and fecha.day >= 28)
-
-    return {
-        "dias_al_cierre_mes": dias_al_cierre_mes,
-        "dias_desde_cierre_mes": dias_desde_cierre_mes,
-        "pos_en_mes": pos_en_mes,
-        "total_bdays_mes": total_bdays_mes,
-        "is_penult_bday_trim": is_penult_bday_trim,
-        "is_ultimo_bday_trim": is_ultimo_bday_trim,
-        "is_1er_bday_trim": is_1er_bday_trim,
-        "is_2do_bday_trim": is_2do_bday_trim,
-        "is_3er_bday_trim": is_3er_bday_trim,
-        "dia_semana": dia_semana,
-        "mes": mes,
-        "is_quincena": is_quincena,
-        "is_cierre_encaje": is_cierre_encaje,
-        "is_fin_anio": is_fin_anio,
-        "is_pre_feriado": is_pre_feriado,
-        "is_post_feriado": is_post_feriado,
-        "is_pre_eleccion": is_pre_eleccion,
-        "is_post_eleccion": is_post_eleccion,
-    }
 
 
 ###############################################################################
