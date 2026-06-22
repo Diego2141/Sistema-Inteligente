@@ -21,8 +21,6 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import matplotlib.ticker as mticker
 from pathlib import Path
-from scipy.optimize import minimize
-
 try:
     from hmmlearn import hmm as hmmlearn_hmm
     from sklearn.preprocessing import StandardScaler
@@ -97,62 +95,6 @@ def cargar_embig():
         return pd.Series(dtype=float, name="EMBI_PERU")
 
 
-# ── GARCH(1,1) por ventana ─────────────────────────────────────────────────────
-
-def _garch_fit(arr: np.ndarray):
-    """MLE de GARCH(1,1). Retorna (ω, α, β, escala, var_unc) o None."""
-    escala = float(np.std(arr))
-    if escala < 1e-9 or len(arr) < 60:
-        return None
-    x = (arr / escala).astype(float)
-    n, vu = len(x), float(np.var(x))
-
-    def _s2(w, a, b):
-        s2 = np.empty(n); s2[0] = vu
-        for t in range(1, n):
-            s2[t] = w + a * x[t-1]**2 + b * s2[t-1]
-        return s2
-
-    def _nll(p):
-        w, a, b = p
-        if w <= 0 or a <= 0 or b <= 0 or a + b >= 0.9999:
-            return 1e10
-        s2 = _s2(w, a, b)
-        if np.any(s2 <= 0):
-            return 1e10
-        return 0.5 * float(np.sum(np.log(s2) + x**2 / s2))
-
-    try:
-        res = minimize(_nll, [0.01, 0.08, 0.88], method="L-BFGS-B",
-                       bounds=[(1e-7, 0.5)] * 2 + [(1e-7, 0.9999)],
-                       options={"maxiter": 500, "ftol": 1e-10, "gtol": 1e-7})
-        return None if res.fun > 1e9 else (*res.x, escala, vu)
-    except Exception:
-        return None
-
-
-def _garch_vol(params: tuple, arr: np.ndarray, s2_init: float = None) -> np.ndarray:
-    """Recursión causal σ_t. s2_init=None → usa var_unc (in-sample)."""
-    w, a, b, escala, vu = params
-    x = (arr / escala).astype(float)
-    n = len(x)
-    s2 = np.empty(n)
-    s2[0] = vu if s2_init is None else s2_init
-    for t in range(1, n):
-        s2[t] = w + a * x[t-1]**2 + b * s2[t-1]
-    return np.sqrt(np.maximum(s2, 0)) * escala
-
-
-def _garch_last_s2(params: tuple, arr: np.ndarray) -> float:
-    """Propaga la recursión GARCH por arr y retorna el último σ²."""
-    w, a, b, escala, vu = params
-    x = (arr / escala).astype(float)
-    s2 = vu
-    for t in range(1, len(x)):
-        s2 = w + a * x[t-1]**2 + b * s2
-    return w + a * x[-1]**2 + b * s2   # σ²_{n+1}
-
-
 # ── HMM ───────────────────────────────────────────────────────────────────────
 
 def _fit_hmm(X: np.ndarray):
@@ -176,33 +118,34 @@ def _predecir(modelo, scaler, ss, X: np.ndarray) -> np.ndarray:
 
 def hmm_evolucion(flujo: pd.Series, primer_ventana: int = HMM_PRIMER_VENTANA) -> dict:
     """
-    Para cada año Y: re-estima GARCH+HMM en [inicio, Y] y re-etiqueta toda la
-    historia con ese modelo. Devuelve {año: (DatetimeIndex, estados, sigma_series)}.
+    Para cada año Y: ajusta HMM en [inicio, Y] con sigma rolling 22d como segunda
+    dimensión de observación. Re-etiqueta toda la historia con ese modelo.
+    Devuelve {año: (DatetimeIndex, estados, sigma_series)}.
 
-    GARCH re-estimado en cada bloque → ω, α, β solo ven datos hasta Y.
+    sigma rolling 22d es más reactiva que GARCH: cae rápido al salir de stress,
+    sin la persistencia artificial del parámetro β.
     """
     año_inicio   = flujo.index.year.min()
     año_fin_prim = año_inicio + primer_ventana - 1
     años_oos     = sorted(y for y in flujo.index.year.unique() if y > año_fin_prim)
 
     resultados = {}
-    print(f"\n  [EVOLUCIÓN] GARCH+HMM re-estimado por bloque | primer_ventana={primer_ventana}a")
+    print(f"\n  [EVOLUCIÓN] HMM con sigma_rolling_22d | primer_ventana={primer_ventana}a")
 
     def _bloque(flujo_bloque, label):
-        params = _garch_fit(flujo_bloque.values)
-        if params is None:
-            print(f"    {label}: GARCH falló")
+        sigma = flujo_bloque.rolling(22, min_periods=5).std()
+        validos = sigma.notna() & flujo_bloque.notna()
+        if validos.sum() < 50:
+            print(f"    {label}: datos insuficientes tras rolling ({validos.sum()} obs)")
             return None
-        w, a, b, escala, _ = params
-        sigma = _garch_vol(params, flujo_bloque.values)
-        X = np.column_stack([flujo_bloque.values, sigma])
+        fb = flujo_bloque[validos]
+        sb = sigma[validos]
+        X = np.column_stack([fb.values, sb.values])
         modelo, scaler, ss = _fit_hmm(X)
         estados = _predecir(modelo, scaler, ss, X)
         pct = (estados == 2).mean() * 100
-        print(f"    hasta {label}: {len(flujo_bloque):,} obs | "
-              f"GARCH ω={w:.4f} α={a:.3f} β={b:.3f} (α+β={a+b:.3f}) | "
-              f"severo={pct:.0f}%")
-        return flujo_bloque.index, estados, pd.Series(sigma, index=flujo_bloque.index)
+        print(f"    hasta {label}: {len(fb):,} obs | sigma_22d p50={sb.median():.0f} | severo={pct:.0f}%")
+        return fb.index, estados, sb
 
     # Bloque base
     flujo_prim = flujo[flujo.index.year <= año_fin_prim]

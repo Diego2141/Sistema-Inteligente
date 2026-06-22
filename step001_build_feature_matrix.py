@@ -1058,7 +1058,7 @@ def _find_min_d(
     return round(max_d, 4)
 
 
-def _calcular_hmm_expanding(flujo: pd.Series, garch_vol: pd.Series,
+def _calcular_hmm_expanding(flujo: pd.Series, sigma_22d: pd.Series,
                             primer_ventana_años: int = 6) -> pd.Series:
     """
     Pre-computa hmm_estado[t] para todo t con expanding window, sin leakage.
@@ -1080,7 +1080,7 @@ def _calcular_hmm_expanding(flujo: pd.Series, garch_vol: pd.Series,
     if not _HMM_DISPONIBLE:
         return pd.Series(pd.NA, index=flujo.index, dtype="Int8", name="hmm_estado")
 
-    df_base = pd.concat([flujo.rename("flujo"), garch_vol.rename("garch_vol")],
+    df_base = pd.concat([flujo.rename("flujo"), sigma_22d.rename("sigma_22d")],
                         axis=1).dropna()
     df_base = df_base[df_base.index >= HMM_INICIO]
     if df_base.empty:
@@ -1141,8 +1141,8 @@ def build_bank_features(df_banco, lags_cortos, lag_semana, lag_mes, ventanas_vol
     Incluye features de régimen de volatilidad del flujo neto (D−R):
       sigma_flujo_5d / 20d : std rolling del flujo neto realizado.
       ma_flujo_5d / 20d    : media rolling del flujo neto (nivel reciente).
-      garch_vol            : volatilidad condicional GARCH(1,1) del flujo neto.
-                             Captura clustering de volatilidad mejor que rolling std.
+      sigma_22d            : desviación estándar rolling 22d del flujo neto.
+                             Más reactiva que GARCH al salir de periodos de estrés.
     """
     VENTANAS_FLUJO = [5, 20]
 
@@ -1159,7 +1159,7 @@ def build_bank_features(df_banco, lags_cortos, lag_semana, lag_mes, ventanas_vol
             + ["R_conf_t1", "R_conf_t2", "D_conf_t1"]
             + [f"sigma_flujo_{v}d" for v in VENTANAS_FLUJO]
             + [f"ma_flujo_{v}d"    for v in VENTANAS_FLUJO]
-            + ["garch_vol", "flujo_neto_acum_mes"]
+            + ["sigma_22d", "flujo_neto_acum_mes"]
             + ["flujo_neto_sum_5d", "flujo_neto_sum_22d", "flujo_neto_sum_66d"]
         )
         return pd.DataFrame(columns=cols)
@@ -1195,7 +1195,7 @@ def build_bank_features(df_banco, lags_cortos, lag_semana, lag_mes, ventanas_vol
         resultado[f"sigma_flujo_{v}d"] = flujo.rolling(v).std()
         resultado[f"ma_flujo_{v}d"]    = flujo.rolling(v).mean()
 
-    resultado["garch_vol"] = _garch_vol(flujo)
+    resultado["sigma_22d"] = flujo.rolling(22, min_periods=5).std()
 
     # Ratio de volatilidad corta/larga del flujo neto: > 1 → régimen de alta vol reciente
     resultado["sigma_flujo_ratio"] = (
@@ -1825,11 +1825,11 @@ def build_full_matrix(
     if _HMM_DISPONIBLE:
         logger.info("  Pre-computando HMM expanding sobre SISTEMA...")
         bf_sis = bank_features_dict.get(NOMBRE_SISTEMA, pd.DataFrame())
-        if not bf_sis.empty and "garch_vol" in bf_sis.columns and \
+        if not bf_sis.empty and "sigma_22d" in bf_sis.columns and \
                 f"{NOMBRE_SISTEMA}_R" in df_bancarios.columns:
             flujo_sis = (df_bancarios[f"{NOMBRE_SISTEMA}_D"]
                          - df_bancarios[f"{NOMBRE_SISTEMA}_R"])
-            hmm_sistema = _calcular_hmm_expanding(flujo_sis, bf_sis["garch_vol"],
+            hmm_sistema = _calcular_hmm_expanding(flujo_sis, bf_sis["sigma_22d"],
                                               primer_ventana_años=6)
             n_etiq = hmm_sistema.notna().sum()
             logger.info(f"    SISTEMA: hmm_estado calculado — {n_etiq:,} días etiquetados")
@@ -1962,11 +1962,12 @@ def build_data_dictionary(params):
             f"Desv. estándar rolling {v}d del flujo neto D−R (régimen de volatilidad)", None, None)
         add(f"ma_flujo_{v}d",    "Datos bancarios",
             f"Media móvil {v}d del flujo neto D−R (nivel reciente del flujo)", None, None)
-    add("garch_vol", "Datos bancarios",
-        "Volatilidad condicional GARCH(1,1) del flujo neto D−R (puro NumPy, sin arch)", None, None)
+    add("sigma_22d", "Datos bancarios",
+        "Desv. estándar rolling 22d del flujo neto D−R. Más reactiva que GARCH: "
+        "cae rápido al salir de un episodio de stress (sin persistencia artificial).", None, None)
     add("hmm_estado", "Calculado (HMM expanding)",
         f"Estado de régimen oculto: 0=calma, 1=moderado, 2=severo. "
-        f"Gaussian HMM {HMM_N_ESTADOS} estados sobre [flujo_neto, garch_vol]. "
+        f"Gaussian HMM {HMM_N_ESTADOS} estados sobre [flujo_neto, sigma_22d]. "
         f"Pre-computado con expanding window sin leakage (mín {HMM_MIN_AÑOS}a). "
         f"NaN en burn-in ({HMM_INICIO}→+{HMM_MIN_AÑOS}a) o si hmmlearn no instalado. "
         f"Si no aporta señal, agregar a FEATURES_EXCLUIR.", None, None)
