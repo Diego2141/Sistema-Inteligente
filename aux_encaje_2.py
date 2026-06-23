@@ -31,8 +31,10 @@ df["encaje"]         = df["cta_cte"] + df["caja"]
 df["encaje_ovn"]     = df["encaje"] + df["overnight"]
 df["var_encaje_ovn"] = df["encaje_ovn"].diff()
 
-df["anio_mes"]    = df["fecha"].dt.to_period("M")
-df["NecAcumMes"]  = df.groupby("anio_mes")["exigible"].cumsum()
+df["anio_mes"]      = df["fecha"].dt.to_period("M")
+df["NecAcumMes"]    = df.groupby("anio_mes")["exigible"].cumsum()
+df["EncajeAcumMes"] = df.groupby("anio_mes")["encaje"].cumsum()
+df["Avance"]        = df["EncajeAcumMes"] / df["NecAcumMes"]
 df.drop(columns="anio_mes", inplace=True)
 
 print(df[["fecha", "encaje", "encaje_ovn", "var_encaje_ovn"]].tail(10).to_string(index=False))
