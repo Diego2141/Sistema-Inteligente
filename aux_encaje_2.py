@@ -40,11 +40,38 @@ df.drop(columns=["anio_mes", "ExigibleTotalMes"], inplace=True)
 
 print(df[["fecha", "encaje", "encaje_ovn", "var_encaje_ovn"]].tail(10).to_string(index=False))
 
+# ── Balance mensual: Σ(var_encaje_ovn) vs Σ(retiro_neto) ─────────────────────
+balance = (
+    df.groupby(df["fecha"].dt.to_period("M"))
+    .agg(
+        suma_var_ovn  = ("var_encaje_ovn", "sum"),
+        suma_retiro   = ("retiro_neto",    "sum"),
+    )
+    .reset_index()
+)
+balance["residuo"]     = balance["suma_var_ovn"] - balance["suma_retiro"]
+balance["cumple"]      = balance["residuo"].abs() < 1e6   # tolerancia 1M
+balance["fecha"]       = balance["fecha"].dt.to_timestamp()
+
+print(f"\n── Balance mensual (Σ var_encaje_ovn vs Σ retiro_neto) ─────────────")
+print(f"  Meses analizados : {len(balance)}")
+print(f"  Meses que cumplen: {balance['cumple'].sum()}  ({balance['cumple'].mean()*100:.0f}%)")
+print(f"  Residuo mediano  : {balance['residuo'].median()/1e6:.0f}M")
+print(f"  Residuo P90 abs  : {balance['residuo'].abs().quantile(0.90)/1e6:.0f}M")
+print()
+print(balance[["fecha","suma_var_ovn","suma_retiro","residuo","cumple"]]
+      .rename(columns={"suma_var_ovn":"Σ VarOVN","suma_retiro":"Σ Retiro","residuo":"Residuo"})
+      .to_string(index=False))
+
 # ── Export ─────────────────────────────────────────────────────────────────────
 DIR_OUT = RUTA.parent.parent.parent / "2. Output" / "encaje_bbva"
 DIR_OUT.mkdir(parents=True, exist_ok=True)
 ruta_out = DIR_OUT / "bbva_encaje_features.xlsx"
 
-df.to_excel(ruta_out, index=False)
+with pd.ExcelWriter(ruta_out, engine="openpyxl") as writer:
+    df.to_excel(writer, sheet_name="Datos", index=False)
+    balance.to_excel(writer, sheet_name="Balance_Mensual", index=False)
+
 print(f"\nExportado: {ruta_out}")
-print(f"Columnas : {list(df.columns)}")
+print(f"  Hoja 'Datos'          : {len(df):,} filas")
+print(f"  Hoja 'Balance_Mensual': {len(balance)} filas")
