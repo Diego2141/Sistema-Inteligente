@@ -16,7 +16,7 @@ import pandas as pd
 RUTA_IN  = pathlib.Path(
     r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Raw\bbva_encaje.xlsx"
 )
-RUTA_OUT = RUTA_IN  # sobreescribe el mismo archivo
+RUTA_OUT = RUTA_IN.parent / "bbva_encaje_enriquecido.xlsx"
 
 # ── Carga ─────────────────────────────────────────────────────────────────────
 print("Leyendo bbva_encaje.xlsx...")
