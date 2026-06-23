@@ -35,9 +35,47 @@ df["var_encaje_ovn"] = df["encaje_ovn"].diff()
 df["anio_mes"]          = df["fecha"].dt.to_period("M")
 df["NecAcumMes"]        = df.groupby("anio_mes")["exigible"].cumsum()
 df["EncajeAcumMes"]     = df.groupby("anio_mes")["encaje"].cumsum()
-df["ExigibleTotalMes"]  = df.groupby("anio_mes")["exigible"].transform("sum")
-df["Avance"]            = df["EncajeAcumMes"] / df["ExigibleTotalMes"]
-df.drop(columns=["anio_mes", "ExigibleTotalMes"], inplace=True)
+
+# Opción A — estimación sin leakage: exigible(t) × días del mes
+df["dias_en_mes"]           = df["fecha"].dt.days_in_month
+df["ExigibleTotalMes_est"]  = df["exigible"] * df["dias_en_mes"]
+df["Avance"]                = df["EncajeAcumMes"] / df["ExigibleTotalMes_est"]
+
+# ── Validación: comparar estimación vs real al cierre de cada mes ─────────────
+ExigibleTotalMes_real = df.groupby("anio_mes")["exigible"].transform("sum")
+
+validacion = (
+    df.groupby("anio_mes")
+    .apply(lambda g: pd.Series({
+        "fecha_cierre"    : g["fecha"].iloc[-1],
+        "real"            : g["exigible"].sum(),
+        "estimado_cierre" : g["ExigibleTotalMes_est"].iloc[-1],   # último día del mes
+        "estimado_medio"  : g["ExigibleTotalMes_est"].mean(),     # promedio de estimaciones del mes
+    }))
+    .reset_index(drop=True)
+)
+validacion["error_cierre_pct"] = (
+    (validacion["estimado_cierre"] - validacion["real"]) / validacion["real"] * 100
+)
+validacion["error_medio_pct"] = (
+    (validacion["estimado_medio"] - validacion["real"]) / validacion["real"] * 100
+)
+
+mape_cierre = validacion["error_cierre_pct"].abs().mean()
+mape_medio  = validacion["error_medio_pct"].abs().mean()
+
+print(f"\n── Validación Opción A: exigible(t) × días_en_mes ──────────────────")
+print(f"  Meses evaluados          : {len(validacion)}")
+print(f"  MAPE (último día del mes): {mape_cierre:.2f}%")
+print(f"  MAPE (promedio del mes)  : {mape_medio:.2f}%")
+print(f"  Error máx abs (cierre)   : {validacion['error_cierre_pct'].abs().max():.2f}%")
+print(f"  Error mediano (cierre)   : {validacion['error_cierre_pct'].abs().median():.2f}%")
+print()
+print(validacion[["fecha_cierre","real","estimado_cierre","error_cierre_pct"]]
+      .rename(columns={"error_cierre_pct":"Error%"})
+      .to_string(index=False))
+
+df.drop(columns=["anio_mes", "dias_en_mes"], inplace=True)
 
 print(df[["fecha", "encaje", "encaje_ovn", "var_encaje_ovn"]].tail(10).to_string(index=False))
 
@@ -68,6 +106,36 @@ print(balance[["fecha","suma_var_ovn","suma_retiro","residuo","cumple"]]
 DIR_OUT = RUTA.parent.parent.parent / "2. Output" / "encaje_bbva"
 DIR_OUT.mkdir(parents=True, exist_ok=True)
 ruta_out = DIR_OUT / "bbva_encaje_features.xlsx"
+
+# ── Gráfico validación Opción A ───────────────────────────────────────────────
+fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+fig.suptitle("Validación Opción A: exigible(t) × días_en_mes vs real del mes",
+             fontsize=12, fontweight="bold")
+
+ax = axes[0]
+ax.scatter(validacion["real"]/1e9, validacion["estimado_cierre"]/1e9,
+           alpha=0.7, s=40, color="#1f77b4")
+lim = [validacion[["real","estimado_cierre"]].min().min()/1e9,
+       validacion[["real","estimado_cierre"]].max().max()/1e9]
+ax.plot(lim, lim, "k--", lw=1, label="Línea perfecta")
+ax.set_xlabel("Exigible real del mes (B USD)")
+ax.set_ylabel("Estimado al cierre del mes (B USD)")
+ax.set_title(f"Real vs Estimado  |  MAPE={mape_cierre:.2f}%")
+ax.legend()
+
+ax = axes[1]
+ax.bar(validacion["fecha_cierre"], validacion["error_cierre_pct"],
+       color=np.where(validacion["error_cierre_pct"] >= 0, "#2196F3", "#F44336"),
+       alpha=0.7, width=20)
+ax.axhline(0, color="k", lw=0.8)
+ax.set_ylabel("Error % (estimado vs real)")
+ax.set_title("Error porcentual por mes")
+
+plt.tight_layout()
+ruta_val = DIR_OUT / "validacion_opcionA.png"
+fig.savefig(ruta_val, dpi=130, bbox_inches="tight")
+plt.close()
+print(f"\nGráfico validación guardado: {ruta_val.name}")
 
 # ── Gráfico de dispersión ─────────────────────────────────────────────────────
 x = balance["suma_var_ovn"] / 1e9
@@ -158,6 +226,7 @@ with pd.ExcelWriter(ruta_out, engine="openpyxl") as writer:
     df_reg[["fecha", "var_encaje_ovn", "retiro_neto"]].assign(
         residuo=y_d - yhat
     ).to_excel(writer, sheet_name="Regresion_Diaria", index=False)
+    validacion.to_excel(writer, sheet_name="Validacion_OpcionA", index=False)
 
 print(f"\nExportado: {ruta_out}")
 print(f"  Hoja 'Datos'          : {len(df):,} filas")
