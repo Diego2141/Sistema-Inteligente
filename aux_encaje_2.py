@@ -155,6 +155,9 @@ print(f"  Gráfico guardado: {ruta_daily.name}")
 with pd.ExcelWriter(ruta_out, engine="openpyxl") as writer:
     df.to_excel(writer, sheet_name="Datos", index=False)
     balance.to_excel(writer, sheet_name="Balance_Mensual", index=False)
+    df_reg[["fecha", "var_encaje_ovn", "retiro_neto"]].assign(
+        residuo=y_d - yhat
+    ).to_excel(writer, sheet_name="Regresion_Diaria", index=False)
 
 print(f"\nExportado: {ruta_out}")
 print(f"  Hoja 'Datos'          : {len(df):,} filas")
