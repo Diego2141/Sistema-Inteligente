@@ -63,6 +63,12 @@ df["NecMinDiario_90"] = (
 # libre_90: el encaje de hoy supera la necesidad mínima → banco puede hacer retiros
 df["libre_90"] = df["encaje"] >= df["NecMinDiario_90"]
 
+# margen_encaje_90: exceso de encaje sobre el mínimo necesario (señal forward-looking)
+#   > 0 → banco tiene colchón y puede hacer retiros
+#   < 0 → banco necesita depositar más encaje
+df["margen_encaje_90"] = df["encaje"] - df["NecMinDiario_90"]
+df["margen_pct_90"]    = df["margen_encaje_90"] / df["NecMinDiario_90"].replace(0, np.nan)
+
 # dia_liberacion_90: primer día del mes donde Avance ≥ 90%
 #   = banco ya aseguró el umbral aunque encaje = 0 los días restantes
 _anio_mes_tmp = df["fecha"].dt.to_period("M")
@@ -366,6 +372,95 @@ ruta_lib = DIR_OUT / "dia_liberacion_90.png"
 fig.savefig(ruta_lib, dpi=130, bbox_inches="tight")
 plt.close()
 print(f"\nGráfico liberación guardado: {ruta_lib.name}")
+
+# ── Análisis margen_encaje_90 ─────────────────────────────────────────────────
+print(f"\n── Análisis margen_encaje_90 (señal forward-looking) ───────────────")
+print(f"  Días con margen > 0  : {(df['margen_encaje_90'] > 0).sum():,}  ({(df['margen_encaje_90'] > 0).mean()*100:.0f}%)")
+print(f"  Mediana margen       : {df['margen_encaje_90'].median()/1e6:+.0f}M")
+print(f"  P25 / P75 margen     : {df['margen_encaje_90'].quantile(0.25)/1e6:+.0f}M  /  {df['margen_encaje_90'].quantile(0.75)/1e6:+.0f}M")
+
+# Correlación margen vs retiro (mismo día y lag 1)
+df_m = df[["fecha", "margen_encaje_90", "margen_pct_90", "retiro_neto"]].dropna()
+r_same = np.corrcoef(df_m["margen_encaje_90"], df_m["retiro_neto"])[0, 1]
+r_lag1 = np.corrcoef(
+    df_m["margen_encaje_90"].iloc[:-1],
+    df_m["retiro_neto"].iloc[1:]
+)[0, 1]
+print(f"\n  Correlación margen vs retiro_neto (mismo día) : r = {r_same:+.4f}")
+print(f"  Correlación margen vs retiro_neto (lag 1 día) : r = {r_lag1:+.4f}")
+
+# Quintiles de margen_pct_90 → retiro promedio
+df_m["quintil_margen"] = pd.qcut(df_m["margen_pct_90"], q=5,
+                                  labels=["Q1 (menor)", "Q2", "Q3", "Q4", "Q5 (mayor)"])
+qt = df_m.groupby("quintil_margen", observed=True)["retiro_neto"].mean() / 1e6
+print(f"\n  Retiro neto promedio por quintil de margen_pct_90:")
+for q, v in qt.items():
+    print(f"    {q}: {v:+.0f}M")
+
+# ── Gráfico margen_encaje_90 ──────────────────────────────────────────────────
+fig, axes = plt.subplots(3, 1, figsize=(15, 13))
+fig.suptitle(
+    "Margen de encaje sobre el mínimo necesario (90%)\n"
+    "Señal forward-looking: margen > 0 → banco puede hacer retiros",
+    fontsize=12, fontweight="bold",
+)
+
+# Panel 1: serie temporal margen_encaje_90 con retiro_neto superpuesto
+ax = axes[0]
+anio_ej = 2023
+mask_ej = df["fecha"].dt.year == anio_ej
+df_ej3  = df[mask_ej]
+cols_m  = np.where(df_ej3["margen_encaje_90"] >= 0, "#4CAF50", "#F44336")
+ax.bar(df_ej3["fecha"], df_ej3["margen_encaje_90"] / 1e9,
+       color=cols_m, alpha=0.7, width=1, label="Margen (verde=+, rojo=−)")
+ax2 = ax.twinx()
+ax2.plot(df_ej3["fecha"], df_ej3["retiro_neto"] / 1e9,
+         color="navy", lw=1.0, alpha=0.7, label="Retiro neto")
+ax2.set_ylabel("Retiro neto (B USD)", fontsize=9, color="navy")
+ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:.1f}B"))
+ax.set_ylabel("Margen encaje (B USD)", fontsize=9)
+ax.set_title(f"Margen diario vs Retiro neto — {anio_ej}")
+ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:.1f}B"))
+ax.axhline(0, color="k", lw=0.8, ls="--")
+lines1, labels1 = ax.get_legend_handles_labels()
+lines2, labels2 = ax2.get_legend_handles_labels()
+ax.legend(lines1 + lines2, labels1 + labels2, fontsize=9)
+
+# Panel 2: scatter margen_pct_90 vs retiro_neto
+ax = axes[1]
+sc = ax.scatter(df_m["margen_pct_90"].clip(-2, 5),
+                df_m["retiro_neto"] / 1e9,
+                c=df_m["fecha"].dt.year, cmap="plasma",
+                alpha=0.2, s=10, linewidths=0)
+coef_m = np.polyfit(df_m["margen_pct_90"].clip(-2, 5), df_m["retiro_neto"], 1)
+xr_m   = np.linspace(-2, 5, 200)
+ax.plot(xr_m, np.polyval(coef_m, xr_m) / 1e9, color="black", lw=2,
+        label=f"r (mismo día) = {r_same:+.3f}  |  r (lag 1) = {r_lag1:+.3f}")
+ax.axvline(0, color="red", lw=1, ls="--", label="margen = 0")
+ax.axhline(0, color="gray", lw=0.5, ls=":")
+plt.colorbar(sc, ax=ax, label="Año")
+ax.set_xlabel("margen_pct_90  (encaje / mínimo − 1)", fontsize=10)
+ax.set_ylabel("Retiro neto (B USD)", fontsize=10)
+ax.set_title("Dispersión: margen relativo vs retiro neto diario")
+ax.legend(fontsize=9)
+ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:.1f}B"))
+
+# Panel 3: retiro promedio por quintil de margen
+ax = axes[2]
+colores_q = ["#d32f2f", "#ef9a9a", "#fff9c4", "#a5d6a7", "#388e3c"]
+ax.bar(qt.index.astype(str), qt.values,
+       color=colores_q, alpha=0.85, edgecolor="white")
+ax.axhline(0, color="k", lw=0.8)
+ax.set_xlabel("Quintil de margen_pct_90", fontsize=10)
+ax.set_ylabel("Retiro neto promedio (M USD)", fontsize=10)
+ax.set_title("Retiro neto promedio por quintil de margen — ¿mayor margen → más retiros?")
+ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:+.0f}M"))
+
+plt.tight_layout()
+ruta_margen = DIR_OUT / "margen_encaje_90.png"
+fig.savefig(ruta_margen, dpi=130, bbox_inches="tight")
+plt.close()
+print(f"\nGráfico margen guardado: {ruta_margen.name}")
 
 # ── Export ─────────────────────────────────────────────────────────────────────
 with pd.ExcelWriter(ruta_out, engine="openpyxl") as writer:
