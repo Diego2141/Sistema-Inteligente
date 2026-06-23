@@ -24,6 +24,20 @@ df = df.sort_values("fecha").reset_index(drop=True)
 
 print(f"Período  : {df['fecha'].min().date()} → {df['fecha'].max().date()}")
 print(f"Filas    : {len(df):,}")
-print(f"Columnas : {list(df.columns)}")
 print()
-print(df.head())
+
+# ── Columnas derivadas ─────────────────────────────────────────────────────────
+df["encaje"]         = df["cta_cte"] + df["caja"]
+df["encaje_ovn"]     = df["encaje"] + df["overnight"]
+df["var_encaje_ovn"] = df["encaje_ovn"].diff()
+
+print(df[["fecha", "encaje", "encaje_ovn", "var_encaje_ovn"]].tail(10).to_string(index=False))
+
+# ── Export ─────────────────────────────────────────────────────────────────────
+DIR_OUT = RUTA.parent.parent.parent / "2. Output"
+DIR_OUT.mkdir(parents=True, exist_ok=True)
+ruta_out = DIR_OUT / "bbva_encaje_features.xlsx"
+
+df.to_excel(ruta_out, index=False)
+print(f"\nExportado: {ruta_out}")
+print(f"Columnas : {list(df.columns)}")
