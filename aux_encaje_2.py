@@ -38,7 +38,7 @@ df.drop(columns="anio_mes", inplace=True)
 print(df[["fecha", "encaje", "encaje_ovn", "var_encaje_ovn"]].tail(10).to_string(index=False))
 
 # ── Export ─────────────────────────────────────────────────────────────────────
-DIR_OUT = RUTA.parent.parent.parent / "2. Output"
+DIR_OUT = RUTA.parent.parent.parent / "2. Output" / "encaje_bbva"
 DIR_OUT.mkdir(parents=True, exist_ok=True)
 ruta_out = DIR_OUT / "bbva_encaje_features.xlsx"
 
