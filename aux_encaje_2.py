@@ -52,31 +52,47 @@ df["Avance"]               = df["EncajeAcumMes"] / df["ExigibleTotalMes_est"]
 # ── Validación: A y C vs real al cierre de cada mes ──────────────────────────
 ExigibleTotalMes_real = df.groupby("anio_mes")["exigible"].transform("sum")
 
+# Error diario para cada observación (vs real del mes completo)
+ExigibleReal = df.groupby("anio_mes")["exigible"].transform("sum")
+df["error_A_pct"] = (df["ExigibleTotalMes_A"] - ExigibleReal) / ExigibleReal * 100
+df["error_C_pct"] = (df["ExigibleTotalMes_C"] - ExigibleReal) / ExigibleReal * 100
+
+# Resumen global
+mape_A = df["error_A_pct"].abs().mean()
+mape_C = df["error_C_pct"].abs().mean()
+
+# Error promedio absoluto por día del mes
+err_dia = df.groupby("dia_mes")[["error_A_pct","error_C_pct"]].apply(
+    lambda g: pd.Series({
+        "MAPE_A": g["error_A_pct"].abs().mean(),
+        "MAPE_C": g["error_C_pct"].abs().mean(),
+    })
+).reset_index()
+
+print(f"\n── Validación Opción A vs C (error promedio diario) ────────────────")
+print(f"  MAPE global A : {mape_A:.3f}%")
+print(f"  MAPE global C : {mape_C:.3f}%")
+print()
+print(f"  {'Día':>4}  {'MAPE A':>8}  {'MAPE C':>8}  {'Mejor':>6}")
+for _, row in err_dia.iterrows():
+    mejor = "C" if row["MAPE_C"] < row["MAPE_A"] else "A"
+    print(f"  {int(row['dia_mes']):>4}  {row['MAPE_A']:>7.2f}%  {row['MAPE_C']:>7.2f}%  {mejor:>6}")
+
+# Resumen al cierre
 validacion = (
     df.groupby("anio_mes")
     .apply(lambda g: pd.Series({
-        "fecha_cierre"   : g["fecha"].iloc[-1],
-        "real"           : g["exigible"].sum(),
-        "estimado_A"     : g["ExigibleTotalMes_A"].iloc[-1],
-        "estimado_C"     : g["ExigibleTotalMes_C"].iloc[-1],
-        "error_A_pct"    : (g["ExigibleTotalMes_A"].iloc[-1] - g["exigible"].sum()) / g["exigible"].sum() * 100,
-        "error_C_pct"    : (g["ExigibleTotalMes_C"].iloc[-1] - g["exigible"].sum()) / g["exigible"].sum() * 100,
+        "fecha_cierre": g["fecha"].iloc[-1],
+        "real"        : g["exigible"].sum(),
+        "estimado_A"  : g["ExigibleTotalMes_A"].iloc[-1],
+        "estimado_C"  : g["ExigibleTotalMes_C"].iloc[-1],
+        "error_A_pct" : g["error_A_pct"].iloc[-1],
+        "error_C_pct" : g["error_C_pct"].iloc[-1],
     }))
     .reset_index(drop=True)
 )
 
-mape_A = validacion["error_A_pct"].abs().mean()
-mape_C = validacion["error_C_pct"].abs().mean()
-
-print(f"\n── Validación Opción A vs C (al cierre de cada mes) ────────────────")
-print(f"  Meses evaluados : {len(validacion)}")
-print(f"  MAPE Opción A   : {mape_A:.3f}%")
-print(f"  MAPE Opción C   : {mape_C:.3f}%")
-print(f"  Error máx abs A : {validacion['error_A_pct'].abs().max():.3f}%")
-print(f"  Error máx abs C : {validacion['error_C_pct'].abs().max():.3f}%")
-print()
-print(validacion[["fecha_cierre","real","estimado_A","estimado_C","error_A_pct","error_C_pct"]]
-      .to_string(index=False))
+df.drop(columns=["error_A_pct", "error_C_pct"], inplace=True)
 
 df.drop(columns=["anio_mes", "dia_mes", "dias_en_mes",
                  "ExigibleTotalMes_A", "ExigibleTotalMes_C"], inplace=True)
@@ -113,32 +129,36 @@ ruta_out = DIR_OUT / "bbva_encaje_features.xlsx"
 
 # ── Gráfico validación A vs C ─────────────────────────────────────────────────
 fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-fig.suptitle("Validación Opción A vs C — Error al cierre de cada mes",
+fig.suptitle(f"Validación Opción A vs C — Error promedio por día del mes\n"
+             f"MAPE global  A={mape_A:.2f}%  |  C={mape_C:.2f}%",
              fontsize=12, fontweight="bold")
 
+# Panel A — MAPE por día del mes
 ax = axes[0]
-ax.scatter(validacion["real"]/1e9, validacion["estimado_A"]/1e9,
-           alpha=0.6, s=35, color="#1f77b4", label=f"Opción A  MAPE={mape_A:.2f}%")
-ax.scatter(validacion["real"]/1e9, validacion["estimado_C"]/1e9,
-           alpha=0.6, s=35, color="#ff7f0e", marker="^", label=f"Opción C  MAPE={mape_C:.2f}%")
-lim = [validacion[["real","estimado_A","estimado_C"]].min().min()/1e9,
-       validacion[["real","estimado_A","estimado_C"]].max().max()/1e9]
-ax.plot(lim, lim, "k--", lw=1, label="Línea perfecta")
-ax.set_xlabel("Exigible real del mes (B USD)")
-ax.set_ylabel("Estimado al cierre (B USD)")
-ax.set_title("Real vs Estimado (al cierre del mes)")
+ax.plot(err_dia["dia_mes"], err_dia["MAPE_A"], color="#1f77b4",
+        marker="o", ms=4, lw=1.5, label=f"Opción A  (global {mape_A:.2f}%)")
+ax.plot(err_dia["dia_mes"], err_dia["MAPE_C"], color="#ff7f0e",
+        marker="^", ms=4, lw=1.5, label=f"Opción C  (global {mape_C:.2f}%)")
+ax.axhline(0, color="k", lw=0.5)
+ax.set_xlabel("Día del mes")
+ax.set_ylabel("MAPE promedio (%)")
+ax.set_title("Error promedio absoluto por día del mes")
 ax.legend(fontsize=9)
 
+# Panel B — scatter real vs estimado (todos los días, no solo cierre)
 ax = axes[1]
-x = np.arange(len(validacion))
-w = 0.35
-ax.bar(x - w/2, validacion["error_A_pct"], w, color="#1f77b4", alpha=0.7, label="Error A %")
-ax.bar(x + w/2, validacion["error_C_pct"], w, color="#ff7f0e", alpha=0.7, label="Error C %")
-ax.axhline(0, color="k", lw=0.8)
-ax.set_xticks(x[::6])
-ax.set_xticklabels(validacion["fecha_cierre"].iloc[::6].dt.strftime("%Y-%m"), rotation=45, fontsize=8)
-ax.set_ylabel("Error % (estimado vs real)")
-ax.set_title("Error porcentual por mes")
+sample = df.sample(min(2000, len(df)), random_state=42)
+ExigibleReal_s = sample.groupby(sample["fecha"].dt.to_period("M"))["exigible"].transform("sum") \
+    if False else ExigibleReal.loc[sample.index]
+ax.scatter(ExigibleReal.loc[sample.index]/1e9, sample["ExigibleTotalMes_A"]/1e9,
+           alpha=0.2, s=8, color="#1f77b4", label="Opción A")
+ax.scatter(ExigibleReal.loc[sample.index]/1e9, sample["ExigibleTotalMes_C"]/1e9,
+           alpha=0.2, s=8, color="#ff7f0e", label="Opción C")
+lim = [ExigibleReal.min()/1e9, ExigibleReal.max()/1e9]
+ax.plot(lim, lim, "k--", lw=1, label="Perfecta")
+ax.set_xlabel("Exigible real del mes (B USD)")
+ax.set_ylabel("Estimado (B USD)")
+ax.set_title("Real vs Estimado — todos los días")
 ax.legend(fontsize=9)
 
 plt.tight_layout()
