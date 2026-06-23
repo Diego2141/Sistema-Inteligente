@@ -50,10 +50,6 @@ df["ExigibleTotalMes_est"] = df["ExigibleTotalMes_C"]
 # Avance actual (solo lo acumulado hasta hoy)
 df["Avance"] = df["EncajeAcumMes"] / df["ExigibleTotalMes_est"]
 
-# Enfoque 1: proyección carry forward → encaje de hoy se mantiene los días restantes
-df["EncajeAcumMes_proy_E1"] = df["EncajeAcumMes"] + df["encaje"] * df["dias_restantes"]
-df["Avance_proy_E1"]        = df["EncajeAcumMes_proy_E1"] / df["ExigibleTotalMes_est"]
-
 # ── Día de liberación (umbral 90%) ────────────────────────────────────────────
 # NecMinDiario_90: encaje mínimo por día para los días restantes y cerrar en ≥90%
 #   = max(0, 90%·exigible_total - acumulado) / días_restantes
@@ -80,13 +76,7 @@ _dias_lib_map = (
 df["dia_liberacion_90"] = _anio_mes_tmp.map(_dias_lib_map)
 df.drop(columns=["_ya_lib"], inplace=True)
 
-# Avance real al cierre del mes (solo para validación — usa datos futuros)
-EncajeAcumMes_real   = df.groupby("anio_mes")["encaje"].transform("sum")
-ExigibleTotalMes_real = df.groupby("anio_mes")["exigible"].transform("sum")
-df["Avance_real"]    = EncajeAcumMes_real / ExigibleTotalMes_real
-
 # ── Validación: A y C vs real al cierre de cada mes ──────────────────────────
-ExigibleTotalMes_real = df.groupby("anio_mes")["exigible"].transform("sum")
 
 # Error diario para cada observación (vs real del mes completo)
 ExigibleReal = df.groupby("anio_mes")["exigible"].transform("sum")
@@ -161,46 +151,6 @@ print(balance[["fecha","suma_var_ovn","suma_retiro","residuo","cumple"]]
 DIR_OUT = RUTA.parent.parent.parent / "2. Output" / "encaje_bbva"
 DIR_OUT.mkdir(parents=True, exist_ok=True)
 ruta_out = DIR_OUT / "bbva_encaje_features.xlsx"
-
-# ── Gráfico comparativo de Avance ────────────────────────────────────────────
-# Tomar un año representativo para visualizar la evolución intra-mensual
-anio_ejemplo = 2023
-mask = df["fecha"].dt.year == anio_ejemplo
-df_ej = df[mask].copy()
-
-fig, axes = plt.subplots(2, 1, figsize=(14, 9), sharex=True)
-fig.suptitle(f"Comparación de Avance — Año {anio_ejemplo}\n"
-             "Avance actual vs Proyección E1 (carry forward) vs Real al cierre",
-             fontsize=12, fontweight="bold")
-
-ax = axes[0]
-ax.plot(df_ej["fecha"], df_ej["Avance"],         color="#1f77b4", lw=1.2, label="Avance actual (EncajeAcum / Est.C)")
-ax.plot(df_ej["fecha"], df_ej["Avance_proy_E1"], color="#ff7f0e", lw=1.2, ls="--", label="Avance proyectado E1 (carry forward)")
-ax.plot(df_ej["fecha"], df_ej["Avance_real"],    color="#2ca02c", lw=1.0, ls=":",  label="Avance real al cierre del mes")
-ax.axhline(1.0, color="red", lw=0.8, ls="--", label="Umbral 100%")
-ax.set_ylabel("Avance (ratio)")
-ax.set_title("Los tres Avances — evolución diaria")
-ax.legend(fontsize=9)
-ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:.0%}"))
-
-# Error de proyección vs real
-ax = axes[1]
-error_E1 = (df_ej["Avance_proy_E1"] - df_ej["Avance_real"]) * 100
-ax.bar(df_ej["fecha"], error_E1,
-       color=np.where(error_E1 >= 0, "#ff7f0e", "#1f77b4"), alpha=0.7, width=1)
-ax.axhline(0, color="k", lw=0.8)
-ax.set_ylabel("Error (proy E1 − real) en pp")
-ax.set_title("Error de la proyección E1 vs Avance real")
-
-plt.tight_layout()
-ruta_av = DIR_OUT / "avance_comparativo.png"
-fig.savefig(ruta_av, dpi=130, bbox_inches="tight")
-plt.close()
-print(f"\nGráfico Avance guardado: {ruta_av.name}")
-
-# Error global de la proyección E1
-err_proy = (df["Avance_proy_E1"] - df["Avance_real"]).abs().mean() * 100
-print(f"  MAE global Avance_proy_E1 vs Avance_real: {err_proy:.2f} pp")
 
 # ── Gráfico validación A vs C ─────────────────────────────────────────────────
 fig, axes = plt.subplots(1, 2, figsize=(14, 5))
