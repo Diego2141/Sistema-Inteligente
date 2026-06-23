@@ -194,14 +194,13 @@ ax.set_ylabel("MAPE promedio (%)")
 ax.set_title("Error promedio absoluto por día del mes")
 ax.legend(fontsize=9)
 
-# Panel B — scatter real vs estimado (todos los días, no solo cierre)
+# Panel B — scatter real vs estimado (muestra de días)
 ax = axes[1]
-sample = df.sample(min(2000, len(df)), random_state=42)
-ExigibleReal_s = sample.groupby(sample["fecha"].dt.to_period("M"))["exigible"].transform("sum") \
-    if False else ExigibleReal.loc[sample.index]
-ax.scatter(ExigibleReal.loc[sample.index]/1e9, sample["ExigibleTotalMes_A"]/1e9,
+idx = df.sample(min(2000, len(df)), random_state=42).index
+ExigibleTotalMes_A_plot = df.loc[idx, "exigible"] * df.loc[idx, "dias_en_mes"]
+ax.scatter(ExigibleReal.loc[idx]/1e9, ExigibleTotalMes_A_plot/1e9,
            alpha=0.2, s=8, color="#1f77b4", label="Opción A")
-ax.scatter(ExigibleReal.loc[sample.index]/1e9, sample["ExigibleTotalMes_C"]/1e9,
+ax.scatter(ExigibleReal.loc[idx]/1e9, df.loc[idx, "ExigibleTotalMes_est"]/1e9,
            alpha=0.2, s=8, color="#ff7f0e", label="Opción C")
 lim = [ExigibleReal.min()/1e9, ExigibleReal.max()/1e9]
 ax.plot(lim, lim, "k--", lw=1, label="Perfecta")
