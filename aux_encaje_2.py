@@ -36,46 +36,50 @@ df["anio_mes"]          = df["fecha"].dt.to_period("M")
 df["NecAcumMes"]        = df.groupby("anio_mes")["exigible"].cumsum()
 df["EncajeAcumMes"]     = df.groupby("anio_mes")["encaje"].cumsum()
 
-# Opción A — estimación sin leakage: exigible(t) × días del mes
-df["dias_en_mes"]           = df["fecha"].dt.days_in_month
-df["ExigibleTotalMes_est"]  = df["exigible"] * df["dias_en_mes"]
-df["Avance"]                = df["EncajeAcumMes"] / df["ExigibleTotalMes_est"]
+df["dia_mes"]           = df["fecha"].dt.day
+df["dias_en_mes"]       = df["fecha"].dt.days_in_month
 
-# ── Validación: comparar estimación vs real al cierre de cada mes ─────────────
+# Opción A — exigible(t) × días del mes
+df["ExigibleTotalMes_A"] = df["exigible"] * df["dias_en_mes"]
+
+# Opción C — acumulado prorrateado: más robusto desde día 5 en adelante
+df["ExigibleTotalMes_C"] = (df["NecAcumMes"] / df["dia_mes"]) * df["dias_en_mes"]
+
+# Feature principal: usar C
+df["ExigibleTotalMes_est"] = df["ExigibleTotalMes_C"]
+df["Avance"]               = df["EncajeAcumMes"] / df["ExigibleTotalMes_est"]
+
+# ── Validación: A y C vs real al cierre de cada mes ──────────────────────────
 ExigibleTotalMes_real = df.groupby("anio_mes")["exigible"].transform("sum")
 
 validacion = (
     df.groupby("anio_mes")
     .apply(lambda g: pd.Series({
-        "fecha_cierre"    : g["fecha"].iloc[-1],
-        "real"            : g["exigible"].sum(),
-        "estimado_cierre" : g["ExigibleTotalMes_est"].iloc[-1],   # último día del mes
-        "estimado_medio"  : g["ExigibleTotalMes_est"].mean(),     # promedio de estimaciones del mes
+        "fecha_cierre"   : g["fecha"].iloc[-1],
+        "real"           : g["exigible"].sum(),
+        "estimado_A"     : g["ExigibleTotalMes_A"].iloc[-1],
+        "estimado_C"     : g["ExigibleTotalMes_C"].iloc[-1],
+        "error_A_pct"    : (g["ExigibleTotalMes_A"].iloc[-1] - g["exigible"].sum()) / g["exigible"].sum() * 100,
+        "error_C_pct"    : (g["ExigibleTotalMes_C"].iloc[-1] - g["exigible"].sum()) / g["exigible"].sum() * 100,
     }))
     .reset_index(drop=True)
 )
-validacion["error_cierre_pct"] = (
-    (validacion["estimado_cierre"] - validacion["real"]) / validacion["real"] * 100
-)
-validacion["error_medio_pct"] = (
-    (validacion["estimado_medio"] - validacion["real"]) / validacion["real"] * 100
-)
 
-mape_cierre = validacion["error_cierre_pct"].abs().mean()
-mape_medio  = validacion["error_medio_pct"].abs().mean()
+mape_A = validacion["error_A_pct"].abs().mean()
+mape_C = validacion["error_C_pct"].abs().mean()
 
-print(f"\n── Validación Opción A: exigible(t) × días_en_mes ──────────────────")
-print(f"  Meses evaluados          : {len(validacion)}")
-print(f"  MAPE (último día del mes): {mape_cierre:.2f}%")
-print(f"  MAPE (promedio del mes)  : {mape_medio:.2f}%")
-print(f"  Error máx abs (cierre)   : {validacion['error_cierre_pct'].abs().max():.2f}%")
-print(f"  Error mediano (cierre)   : {validacion['error_cierre_pct'].abs().median():.2f}%")
+print(f"\n── Validación Opción A vs C (al cierre de cada mes) ────────────────")
+print(f"  Meses evaluados : {len(validacion)}")
+print(f"  MAPE Opción A   : {mape_A:.3f}%")
+print(f"  MAPE Opción C   : {mape_C:.3f}%")
+print(f"  Error máx abs A : {validacion['error_A_pct'].abs().max():.3f}%")
+print(f"  Error máx abs C : {validacion['error_C_pct'].abs().max():.3f}%")
 print()
-print(validacion[["fecha_cierre","real","estimado_cierre","error_cierre_pct"]]
-      .rename(columns={"error_cierre_pct":"Error%"})
+print(validacion[["fecha_cierre","real","estimado_A","estimado_C","error_A_pct","error_C_pct"]]
       .to_string(index=False))
 
-df.drop(columns=["anio_mes", "dias_en_mes"], inplace=True)
+df.drop(columns=["anio_mes", "dia_mes", "dias_en_mes",
+                 "ExigibleTotalMes_A", "ExigibleTotalMes_C"], inplace=True)
 
 print(df[["fecha", "encaje", "encaje_ovn", "var_encaje_ovn"]].tail(10).to_string(index=False))
 
@@ -107,32 +111,38 @@ DIR_OUT = RUTA.parent.parent.parent / "2. Output" / "encaje_bbva"
 DIR_OUT.mkdir(parents=True, exist_ok=True)
 ruta_out = DIR_OUT / "bbva_encaje_features.xlsx"
 
-# ── Gráfico validación Opción A ───────────────────────────────────────────────
-fig, axes = plt.subplots(1, 2, figsize=(13, 5))
-fig.suptitle("Validación Opción A: exigible(t) × días_en_mes vs real del mes",
+# ── Gráfico validación A vs C ─────────────────────────────────────────────────
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+fig.suptitle("Validación Opción A vs C — Error al cierre de cada mes",
              fontsize=12, fontweight="bold")
 
 ax = axes[0]
-ax.scatter(validacion["real"]/1e9, validacion["estimado_cierre"]/1e9,
-           alpha=0.7, s=40, color="#1f77b4")
-lim = [validacion[["real","estimado_cierre"]].min().min()/1e9,
-       validacion[["real","estimado_cierre"]].max().max()/1e9]
+ax.scatter(validacion["real"]/1e9, validacion["estimado_A"]/1e9,
+           alpha=0.6, s=35, color="#1f77b4", label=f"Opción A  MAPE={mape_A:.2f}%")
+ax.scatter(validacion["real"]/1e9, validacion["estimado_C"]/1e9,
+           alpha=0.6, s=35, color="#ff7f0e", marker="^", label=f"Opción C  MAPE={mape_C:.2f}%")
+lim = [validacion[["real","estimado_A","estimado_C"]].min().min()/1e9,
+       validacion[["real","estimado_A","estimado_C"]].max().max()/1e9]
 ax.plot(lim, lim, "k--", lw=1, label="Línea perfecta")
 ax.set_xlabel("Exigible real del mes (B USD)")
-ax.set_ylabel("Estimado al cierre del mes (B USD)")
-ax.set_title(f"Real vs Estimado  |  MAPE={mape_cierre:.2f}%")
-ax.legend()
+ax.set_ylabel("Estimado al cierre (B USD)")
+ax.set_title("Real vs Estimado (al cierre del mes)")
+ax.legend(fontsize=9)
 
 ax = axes[1]
-ax.bar(validacion["fecha_cierre"], validacion["error_cierre_pct"],
-       color=np.where(validacion["error_cierre_pct"] >= 0, "#2196F3", "#F44336"),
-       alpha=0.7, width=20)
+x = np.arange(len(validacion))
+w = 0.35
+ax.bar(x - w/2, validacion["error_A_pct"], w, color="#1f77b4", alpha=0.7, label="Error A %")
+ax.bar(x + w/2, validacion["error_C_pct"], w, color="#ff7f0e", alpha=0.7, label="Error C %")
 ax.axhline(0, color="k", lw=0.8)
+ax.set_xticks(x[::6])
+ax.set_xticklabels(validacion["fecha_cierre"].iloc[::6].dt.strftime("%Y-%m"), rotation=45, fontsize=8)
 ax.set_ylabel("Error % (estimado vs real)")
 ax.set_title("Error porcentual por mes")
+ax.legend(fontsize=9)
 
 plt.tight_layout()
-ruta_val = DIR_OUT / "validacion_opcionA.png"
+ruta_val = DIR_OUT / "validacion_opciones.png"
 fig.savefig(ruta_val, dpi=130, bbox_inches="tight")
 plt.close()
 print(f"\nGráfico validación guardado: {ruta_val.name}")
