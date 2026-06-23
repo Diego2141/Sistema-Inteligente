@@ -22,7 +22,7 @@ Identidad contable del balance de encaje:
     el exceso de encaje acumulado durante el período mensual.
 
 Datos requeridos:
-  H:/DPINV/CARPETAS PERSONALES/DIEGO/3. Sistema Inteligente/1. Data/Raw/EncajeD.xlsx
+  H:/DPINV/CARPETAS PERSONALES/DIEGO/3. Sistema Inteligente/1. Data/Raw/bbva_encaje.xlsx
 
 Outputs (guardados en Output/encaje/ relativo a este script):
   encaje_01_componentes_tiempo.png
@@ -49,7 +49,7 @@ warnings.filterwarnings("ignore")
 RUTA_DATOS = pathlib.Path(
     r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Raw\bbva_encaje.xlsx"
 )
-# RUTA_DATOS: .../3. Sistema Inteligente/1. Data/Raw/EncajeD.xlsx
+# RUTA_DATOS: .../3. Sistema Inteligente/1. Data/Raw/bbva_encaje.xlsx
 # Subir 3 niveles da la raíz del proyecto → Output/encaje
 DIR_OUTPUT = RUTA_DATOS.parent.parent.parent / "2. Output" / "encaje"
 DIR_OUTPUT.mkdir(parents=True, exist_ok=True)
@@ -60,7 +60,7 @@ COLORES = {
     "exceso":    "#2ca02c",
     "retiro":    "#d62728",
     "exigible":  "#9467bd",
-    "activos":   "#8c564b",
+
 }
 FASES_COLORES = {
     "A_inicio(1-4)":    "#4daf4a",
@@ -103,7 +103,7 @@ df["dia_mes"]        = df["fecha"].dt.day
 df["ano"]            = df["fecha"].dt.year
 df["mes"]            = df["fecha"].dt.month
 # Encaje = Caja + Cta Cte BCR  (Overnight NO cuenta para el encaje)
-# Cuando Cta Cte cae → se compensa con: Δovernight + Δactivos + retiro_neto
+# Cuando Cta Cte cae → se compensa con: Δovernight + retiro_neto (+ otros canales del balance)
 df["encaje"]         = df["caja"] + df["cta_cte_bcr"]
 df["exceso_encaje"]  = df["encaje"] - df["encaje_exigible"]
 
@@ -421,7 +421,7 @@ print(f"  Guardado: {ruta.name}")
 
 # =============================================================================
 # GRÁFICA 3: Identidad contable — distribución de la caída de Cta Cte
-# Cuando Δcta_cte < 0 → se distribuye en Δovernight, Δactivos, retiro_neto
+# Cuando Δcta_cte < 0 → se distribuye en Δovernight, retiro_neto (y otros canales)
 # =============================================================================
 print("Generando gráfica 3: sustitución Cta Cte ↔ Overnight y retiro por fase...")
 
@@ -516,7 +516,7 @@ for i, (f, lbl) in enumerate(zip(fase_order, labels_bp), start=1):
     ax.text(i, media, f" {media:.0f}M", va="center", fontsize=8,
             color="black", fontweight="bold")
 
-# Panel B: barras de Δcomponentes por fase (sin activos — no disponible)
+# Panel B: barras de Δcomponentes por fase
 ax = axes[1]
 comp_names  = ["Δ Cta Cte BCR", "Δ Overnight BCR", "Retiro Neto"]
 comp_cols_b = ["d_cta_cte", "d_overnight", "retiro_neto"]
@@ -1047,11 +1047,8 @@ print("    Encaje     = Caja + Cta Cte BCR  (Overnight NO es encaje)")
 print("    Exceso     = Encaje − Exigible")
 print("    Δ Exceso(t)= Exceso(t) − Exceso(t−1)  [diferencia simple diaria]")
 print()
-print("    NOTA: Una versión anterior incluía Overnight en el exceso,")
-print("    lo que generaba una correlación espuria r=+0.90 con el retiro.")
-print("    Δexceso_malo = Δcta_cte + Δovernight + Δcaja  (overnight en ambos lados)")
-print("    Identidad:    Δcta_cte + Δovernight + Δactivos + retiro_neto = 0")
-print("    → El overnight se cancelaba consigo mismo, inflando el r artificialmente.")
+print("    NOTA: el overnight NO computa como encaje — es el instrumento de rentabilización.")
+print("    Canales observados: Δcta_cte + Δovernight + retiro_neto + otros = 0")
 
 print("\n[2] CORRELACIONES CON RETIRO NETO")
 corr_data = {
