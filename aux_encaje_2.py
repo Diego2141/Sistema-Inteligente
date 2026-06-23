@@ -97,6 +97,61 @@ fig.savefig(ruta_plot, dpi=130, bbox_inches="tight")
 plt.close()
 print(f"\nGráfico guardado: {ruta_plot.name}")
 
+# ── Regresión diaria: var_encaje_ovn → retiro_neto ───────────────────────────
+df_reg = df[["fecha", "var_encaje_ovn", "retiro_neto"]].dropna()
+x_d = df_reg["var_encaje_ovn"].values
+y_d = df_reg["retiro_neto"].values
+
+coef_d = np.polyfit(x_d, y_d, 1)
+yhat   = np.polyval(coef_d, x_d)
+r_d    = np.corrcoef(x_d, y_d)[0, 1]
+r2_d   = r_d ** 2
+ss_res = ((y_d - yhat) ** 2).sum()
+ss_tot = ((y_d - y_d.mean()) ** 2).sum()
+
+print(f"\n── Regresión diaria: var_encaje_ovn → retiro_neto ──────────────────")
+print(f"  N          : {len(df_reg):,}")
+print(f"  r          : {r_d:+.4f}")
+print(f"  R²         : {r2_d:.2%}")
+print(f"  Pendiente  : {coef_d[0]:.4f}  (β = 1 implicaría identidad perfecta)")
+print(f"  Intercepto : {coef_d[1]/1e6:.1f}M")
+
+xr_d = np.linspace(np.percentile(x_d, 1), np.percentile(x_d, 99), 300)
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+fig.suptitle("Regresión diaria: Var EncajeOVN → Retiro Neto",
+             fontsize=13, fontweight="bold")
+
+# Panel A — scatter con regresión
+ax = axes[0]
+sc = ax.scatter(x_d / 1e9, y_d / 1e9,
+                c=df_reg["fecha"].dt.year, cmap="plasma",
+                alpha=0.25, s=12, linewidths=0)
+ax.plot(xr_d / 1e9, np.polyval(coef_d, xr_d) / 1e9,
+        color="black", lw=2, label=f"r = {r_d:+.3f}  |  R² = {r2_d:.1%}")
+ax.axhline(0, color="gray", lw=0.5, ls=":")
+ax.axvline(0, color="gray", lw=0.5, ls=":")
+plt.colorbar(sc, ax=ax, label="Año")
+ax.set_xlabel("Var EncajeOVN  (B USD)", fontsize=10)
+ax.set_ylabel("Retiro Neto  (B USD)", fontsize=10)
+ax.set_title(f"Scatter diario  (N={len(df_reg):,})", fontsize=10)
+ax.legend(fontsize=9)
+
+# Panel B — residuos en el tiempo
+residuos = (y_d - yhat) / 1e9
+ax = axes[1]
+ax.bar(df_reg["fecha"], residuos, color=np.where(residuos >= 0, "#2196F3", "#F44336"),
+       alpha=0.5, width=1.2)
+ax.axhline(0, color="k", lw=0.8)
+ax.set_ylabel("Residuo  (B USD)", fontsize=10)
+ax.set_title("Residuos diarios en el tiempo", fontsize=10)
+
+plt.tight_layout()
+ruta_daily = DIR_OUT / "regresion_diaria_scatter.png"
+fig.savefig(ruta_daily, dpi=130, bbox_inches="tight")
+plt.close()
+print(f"  Gráfico guardado: {ruta_daily.name}")
+
 with pd.ExcelWriter(ruta_out, engine="openpyxl") as writer:
     df.to_excel(writer, sheet_name="Datos", index=False)
     balance.to_excel(writer, sheet_name="Balance_Mensual", index=False)
