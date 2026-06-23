@@ -47,7 +47,7 @@ warnings.filterwarnings("ignore")
 # CONFIGURACIÓN
 # =============================================================================
 RUTA_DATOS = pathlib.Path(
-    r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Raw\EncajeD.xlsx"
+    r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Raw\bbva_encaje.xlsx"
 )
 # RUTA_DATOS: .../3. Sistema Inteligente/1. Data/Raw/EncajeD.xlsx
 # Subir 3 niveles da la raíz del proyecto → Output/encaje
@@ -73,11 +73,29 @@ FASES_COLORES = {
 # CARGA Y PREPARACIÓN
 # =============================================================================
 print("Cargando datos...")
-df = pd.read_excel(RUTA_DATOS)
+_raw = pd.read_excel(RUTA_DATOS, header=None)
+# Detectar si la primera fila es un encabezado (no numérica en col 0)
+_primera = _raw.iloc[0, 0]
+_tiene_header = not isinstance(_primera, (int, float)) and not isinstance(_primera, pd.Timestamp)
+try:
+    pd.Timestamp(_primera)
+    _tiene_header = False
+except Exception:
+    _tiene_header = True
+
+if _tiene_header:
+    df = pd.read_excel(RUTA_DATOS, header=0)
+else:
+    df = _raw.copy()
+
+# Asignar nombres por posición (estructura conocida de bbva_encaje.xlsx):
+# col0=fecha  col1=entidad  col2=codigo  col3=overnight_bcrp
+# col4=cta_cte_bcr  col5=caja  col6=tose_total_ded  col7=exigible  col8=retiro_neto
+df = df.iloc[:, :9].copy()
 df.columns = [
-    "fecha", "moneda", "banco", "codigo",
-    "overnight_bcr", "caja", "cta_cte_bcr",
-    "encaje_exigible", "activos", "retiro_neto"
+    "fecha", "entidad", "codigo",
+    "overnight_bcr", "cta_cte_bcr", "caja",
+    "tose_total_deducido", "encaje_exigible", "retiro_neto"
 ]
 df = df.sort_values("fecha").reset_index(drop=True)
 
@@ -90,10 +108,11 @@ df["encaje"]         = df["caja"] + df["cta_cte_bcr"]
 df["exceso_encaje"]  = df["encaje"] - df["encaje_exigible"]
 
 # Variaciones diarias (Δ)
-df["d_cta_cte"]      = df["cta_cte_bcr"].diff()
-df["d_overnight"]    = df["overnight_bcr"].diff()
-df["d_activos"]      = df["activos"].diff()
-df["d_exceso"]       = df["exceso_encaje"].diff()
+df["d_cta_cte"]   = df["cta_cte_bcr"].diff()
+df["d_overnight"] = df["overnight_bcr"].diff()
+df["d_exceso"]    = df["exceso_encaje"].diff()
+# Verificar tasa exigible implícita (debería ≈ 36%)
+df["tasa_exigible_impl"] = (df["encaje_exigible"] / df["tose_total_deducido"]).replace([np.inf, -np.inf], np.nan)
 
 # Fase del período de encaje
 def asignar_fase(d):
@@ -118,6 +137,8 @@ print(f"  Registros: {len(df):,}")
 print(f"  Retiro neto: min={df['retiro_neto'].min()/1e9:.2f}B  "
       f"max={df['retiro_neto'].max()/1e9:.2f}B  "
       f"std={df['retiro_neto'].std()/1e6:.0f}M")
+tasa_med = df["tasa_exigible_impl"].median()
+print(f"  Tasa exigible implícita (mediana): {tasa_med:.2%}  [esperado ≈ 36%]")
 print()
 
 # =============================================================================
@@ -173,20 +194,27 @@ df["proporcion_usada"] = (
 ).clip(lower=0)
 
 # =============================================================================
+# CUMPLIMIENTO DIARIO: % del exigible mensual cubierto hasta hoy
+# =============================================================================
+df["pct_cumplimiento"] = (
+    df["encaje_acum_mes"] / df["exigible_total_mes"].replace(0, np.nan)
+).clip(0, None)
+df["pct_cumplimiento_lag1"] = df["pct_cumplimiento"].shift(1)
+
+# Umbral hipótesis: banco "libre" cuando ya cubrió ≥ 90% del exigible mensual
+UMBRAL_LIBRE = 0.90
+
+# =============================================================================
 # ESTADO LIBRE: banco puede retirar (transición irreversible dentro del mes)
-# Condición de entrada: faltante_lag1 ≤ encaje_lag1
-#   → con un día más al nivel actual, ya cumpliría el exigible del mes
-# Una vez activo, permanece el resto del mes (encaje_acum solo crece)
+# Condición de entrada: pct_cumplimiento_lag1 ≥ UMBRAL_LIBRE (≥90%)
 # =============================================================================
 df["encaje_lag1"] = df["encaje"].shift(1)
 
-# condicion_libre = False en el primer día del mes (faltante_lag1 viene del mes anterior)
 _primer_dia_mes = df.groupby(["ano","mes"]).cumcount() == 0
 df["condicion_libre"] = (
     (~_primer_dia_mes) &
-    df["faltante_lag1"].notna() &
-    df["encaje_lag1"].notna() &
-    (df["faltante_lag1"] <= df["encaje_lag1"])
+    df["pct_cumplimiento_lag1"].notna() &
+    (df["pct_cumplimiento_lag1"] >= UMBRAL_LIBRE)
 ).astype(int)
 
 df["libre"] = (
@@ -270,16 +298,19 @@ _exc  = df["exceso_encaje"].shift(1).values
 _on1  = df["overnight_bcr"].shift(1).values
 _rest = df["techo_restante"].values
 _prop = df["proporcion_usada"].values
+_pct  = df["pct_cumplimiento_lag1"].values
 
 R2 = {
-    "dia_mes³":              r2_ols(np.column_stack([_ones, _dia, _dia**2, _dia**3]), _y),
-    "faltante_lag1":         r2_ols(np.column_stack([_ones, _falt]), _y),
-    "exceso_lag1":           r2_ols(np.column_stack([_ones, _exc]), _y),
-    "overnight_lag1":        r2_ols(np.column_stack([_ones, _on1]), _y),
-    "dia_mes³ + faltante":   r2_ols(np.column_stack([_ones, _dia, _dia**2, _dia**3, _falt]), _y),
-    "dia_mes³ + exceso":     r2_ols(np.column_stack([_ones, _dia, _dia**2, _dia**3, _exc]), _y),
-    "techo_restante_lag1":   r2_ols(np.column_stack([_ones, _rest]), _y),
-    "proporcion_usada_lag1": r2_ols(np.column_stack([_ones, _prop]), _y),
+    "dia_mes³":                  r2_ols(np.column_stack([_ones, _dia, _dia**2, _dia**3]), _y),
+    "pct_cumplimiento_lag1":     r2_ols(np.column_stack([_ones, _pct]), _y),
+    "faltante_lag1":             r2_ols(np.column_stack([_ones, _falt]), _y),
+    "exceso_lag1":               r2_ols(np.column_stack([_ones, _exc]), _y),
+    "overnight_lag1":            r2_ols(np.column_stack([_ones, _on1]), _y),
+    "dia_mes³ + pct_cumpl":      r2_ols(np.column_stack([_ones, _dia, _dia**2, _dia**3, _pct]), _y),
+    "dia_mes³ + faltante":       r2_ols(np.column_stack([_ones, _dia, _dia**2, _dia**3, _falt]), _y),
+    "dia_mes³ + exceso":         r2_ols(np.column_stack([_ones, _dia, _dia**2, _dia**3, _exc]), _y),
+    "techo_restante_lag1":       r2_ols(np.column_stack([_ones, _rest]), _y),
+    "proporcion_usada_lag1":     r2_ols(np.column_stack([_ones, _prop]), _y),
 }
 
 # =============================================================================
@@ -290,15 +321,17 @@ fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
 fig.suptitle("BBVA – Componentes de Encaje en el Tiempo (USD)", fontsize=13, fontweight="bold")
 
 ax = axes[0]
-ax.fill_between(df["fecha"], df["cta_cte_bcr"]/1e9, alpha=0.6,
+ax.fill_between(df["fecha"], df["cta_cte_bcr"]/1e9, alpha=0.5,
                 color=COLORES["cta_cte"], label="Cta Cte BCR (encaje)")
+ax.fill_between(df["fecha"], df["caja"]/1e9, alpha=0.4,
+                color="#17becf", label="Caja (encaje)")
 ax.plot(df["fecha"], df["overnight_bcr"]/1e9, color=COLORES["overnight"],
-        lw=0.8, alpha=0.8, label="Overnight BCR (no es encaje)")
+        lw=0.8, alpha=0.8, label="Overnight BCR (no es encaje — rentabiliza)")
 ax.plot(df["fecha"], df["encaje_exigible"]/1e9, color=COLORES["exigible"],
-        lw=1.5, ls="--", label="Encaje Exigible")
+        lw=1.5, ls="--", label="Encaje Exigible (TOSE×tasa)")
 ax.set_ylabel("B USD")
 ax.legend(loc="upper left", fontsize=8)
-ax.set_title("Encaje = Caja + Cta Cte BCR  |  Overnight: instrumento separado (no encaje)", fontsize=10)
+ax.set_title("Encaje = Caja + Cta Cte BCR  |  Overnight: no computa como encaje", fontsize=10)
 ax.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.1fB"))
 
 ax = axes[1]
@@ -390,15 +423,16 @@ print(f"  Guardado: {ruta.name}")
 # GRÁFICA 3: Identidad contable — distribución de la caída de Cta Cte
 # Cuando Δcta_cte < 0 → se distribuye en Δovernight, Δactivos, retiro_neto
 # =============================================================================
-print("Generando gráfica 3: identidad contable Δcta_cte → canales...")
+print("Generando gráfica 3: sustitución Cta Cte ↔ Overnight y retiro por fase...")
 
-df_sc = df[["d_cta_cte", "d_overnight", "d_activos", "retiro_neto", "fase"]].dropna()
+df_sc = df[["d_cta_cte", "d_overnight", "retiro_neto", "fase"]].dropna()
 corr_val = df_sc["d_cta_cte"].corr(df_sc["retiro_neto"])
+corr_on  = df_sc["d_cta_cte"].corr(df_sc["d_overnight"])
 
 fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 fig.suptitle(
-    "Identidad Contable: Δ Cta Cte BCR → Overnight + Activos + Retiro Neto\n"
-    "Cuando Cta Cte cae, el dinero va al exterior (retiro), overnight y activos",
+    "Sustitución Cta Cte ↔ Overnight BCR y Canal de Retiro Neto\n"
+    "Cuando Cta Cte cae → va a Overnight (rentabilización) o al exterior (retiro)",
     fontsize=11, fontweight="bold"
 )
 
@@ -421,28 +455,28 @@ ax.set_ylabel("Retiro Neto (M USD)")
 ax.set_title("Δ Cta Cte vs Retiro Neto por fase", fontsize=10)
 ax.legend(fontsize=7, markerscale=2)
 
-# Panel B: barras de destino de la caída de Cta Cte por fase
+# Panel B: barras de canales por fase (overnight + retiro_neto)
 ax = axes[1]
 fase_order_g = ["A_inicio(1-4)", "B_acum(5-21)", "C_rentab(22-28)", "D_cierre(29-31)"]
 labels_g     = ["Inicio\n(1-4)", "Acum.\n(5-21)", "Rentab.\n(22-28)", "Cierre\n(29-31)"]
-canales      = ["d_overnight", "d_activos", "retiro_neto"]
-canales_nom  = ["→ Overnight BCR", "→ Activos", "→ Retiro Neto"]
-canales_col  = [COLORES["overnight"], COLORES["activos"], COLORES["retiro"]]
+canales      = ["d_overnight", "retiro_neto"]
+canales_nom  = ["→ Overnight BCR", "→ Retiro Neto"]
+canales_col  = [COLORES["overnight"], COLORES["retiro"]]
 medias_f     = df.groupby("fase")[canales].mean() / 1e6
-x = np.arange(len(fase_order_g)); width = 0.22
+x = np.arange(len(fase_order_g)); width = 0.30
 for j, (n, c, col) in enumerate(zip(canales_nom, canales, canales_col)):
     vals = [medias_f.loc[f, c] for f in fase_order_g]
-    ax.bar(x + j*width - width, vals, width, label=n, color=col, alpha=0.85)
+    ax.bar(x + j*width - width/2, vals, width, label=n, color=col, alpha=0.85)
 ax.axhline(0, color="k", lw=0.8)
 ax.set_xticks(x); ax.set_xticklabels(labels_g, fontsize=9)
 ax.set_ylabel("M USD (promedio diario)")
-ax.set_title("Destino de la caída de Cta Cte por fase\n(promedio diario por canal)", fontsize=10)
+ax.set_title("Destino de la variación de Cta Cte por fase\n"
+             "(promedio diario: overnight y retiro neto)", fontsize=10)
 ax.legend(fontsize=9)
 ax.text(0.98, 0.97,
-        "Días 22-28: Cta Cte → Overnight (82%)\n"
-        "Días 29-31: Overnight → Retiro Neto\n"
-        "El retiro grande ocurre cuando el banco\n"
-        "convierte overnight en divisas al exterior.",
+        f"Δcta_cte vs Δovernight: r={corr_on:+.3f}\n"
+        "Días 22-28: Cta Cte → Overnight\n"
+        "Días 29-31: Overnight → Retiro Neto",
         transform=ax.transAxes, fontsize=8, va="top", ha="right",
         bbox=dict(boxstyle="round", facecolor="lightyellow", alpha=0.8))
 
@@ -457,7 +491,7 @@ print(f"  Guardado: {ruta.name}")
 # =============================================================================
 print("Generando gráfica 4: boxplot por fases...")
 fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-fig.suptitle("BBVA – Retiro Neto y Componentes de Encaje por Fase del Mes",
+fig.suptitle("BBVA – Retiro Neto y Variación de Componentes por Fase del Mes",
              fontsize=12, fontweight="bold")
 
 # Panel A: boxplot retiro neto por fase
@@ -482,30 +516,30 @@ for i, (f, lbl) in enumerate(zip(fase_order, labels_bp), start=1):
     ax.text(i, media, f" {media:.0f}M", va="center", fontsize=8,
             color="black", fontweight="bold")
 
-# Panel B: barras apiladas de Δcomponentes por fase
+# Panel B: barras de Δcomponentes por fase (sin activos — no disponible)
 ax = axes[1]
-comp_names = ["Δ Cta Cte BCR", "Δ Overnight BCR", "Δ Activos", "Retiro Neto"]
-comp_cols  = ["d_cta_cte", "d_overnight", "d_activos", "retiro_neto"]
-comp_colors= [COLORES["cta_cte"], COLORES["overnight"], COLORES["activos"], COLORES["retiro"]]
-medias_fase = df.groupby("fase")[comp_cols].mean() / 1e6
+comp_names  = ["Δ Cta Cte BCR", "Δ Overnight BCR", "Retiro Neto"]
+comp_cols_b = ["d_cta_cte", "d_overnight", "retiro_neto"]
+comp_colors = [COLORES["cta_cte"], COLORES["overnight"], COLORES["retiro"]]
+medias_fase = df.groupby("fase")[comp_cols_b].mean() / 1e6
 
 x = np.arange(len(fase_order))
-width = 0.18
-for j, (name, col, color) in enumerate(zip(comp_names, comp_cols, comp_colors)):
+width = 0.25
+for j, (name, col, color) in enumerate(zip(comp_names, comp_cols_b, comp_colors)):
     vals = [medias_fase.loc[f, col] for f in fase_order]
-    ax.bar(x + j*width - 1.5*width, vals, width, label=name, color=color, alpha=0.8)
+    ax.bar(x + j*width - width, vals, width, label=name, color=color, alpha=0.8)
 
 ax.axhline(0, color="k", lw=0.8)
 ax.set_xticks(x)
 ax.set_xticklabels(labels_bp, fontsize=8)
 ax.set_ylabel("Millones USD (promedio diario)")
-ax.set_title("Variación diaria promedio de componentes por fase", fontsize=10)
+ax.set_title("Variación diaria promedio por fase\n(Cta Cte, Overnight, Retiro Neto)", fontsize=10)
 ax.legend(fontsize=8, loc="lower left")
 
-# Nota de la identidad
 ax.text(0.98, 0.97,
-        "Identidad:\nΔcta_cte + Δovernight + Δactivos + retiro_neto ≈ 0\n"
-        "Suma de barras por fase ≈ 0",
+        "Días 22-28: Δcta_cte < 0 → Δovernight > 0\n"
+        "(rentabilización del exceso)\n"
+        "Días 29-31: Overnight baja → Retiro sube",
         transform=ax.transAxes, fontsize=7.5, va="top", ha="right",
         bbox=dict(boxstyle="round", facecolor="lightyellow", alpha=0.8))
 
@@ -518,40 +552,40 @@ print(f"  Guardado: {ruta.name}")
 # =============================================================================
 # GRÁFICA 5: Verificación de la identidad contable día a día
 # =============================================================================
-print("Generando gráfica 5: verificación identidad contable...")
-df_id = df[["fecha","d_cta_cte","d_overnight","d_activos","retiro_neto"]].dropna()
-df_id["suma_identidad"] = (df_id["d_cta_cte"] + df_id["d_overnight"] +
-                           df_id["d_activos"] + df_id["retiro_neto"])
+print("Generando gráfica 5: sustitución Cta Cte ↔ Overnight en el tiempo...")
+df_id = df[["fecha","d_cta_cte","d_overnight","retiro_neto"]].dropna()
+# Suma observable: Δcta_cte + Δovernight + retiro_neto
+# Si ≈ 0 → estos tres son los únicos canales; si no → hay otros (bonos, interbancario, etc.)
+df_id["suma_obs"] = df_id["d_cta_cte"] + df_id["d_overnight"] + df_id["retiro_neto"]
 
 fig, axes = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
 fig.suptitle(
-    "Verificación de la Identidad Contable de Encaje\n"
-    "Δcta_cte + Δovernight + Δactivos + retiro_neto  (debe ≈ 0)",
+    "Sustitución Cta Cte ↔ Overnight BCR y Retiro Neto\n"
+    "Δcta_cte + Δovernight + retiro_neto — residuo indica otros canales del balance",
     fontsize=12, fontweight="bold"
 )
 
 ax = axes[0]
-ax.plot(df_id["fecha"], df_id["d_cta_cte"]/1e9,    color=COLORES["cta_cte"],   lw=0.8, label="Δ Cta Cte BCR")
+ax.plot(df_id["fecha"], df_id["d_cta_cte"]/1e9,   color=COLORES["cta_cte"],   lw=0.8, label="Δ Cta Cte BCR")
 ax.plot(df_id["fecha"], df_id["d_overnight"]/1e9,  color=COLORES["overnight"], lw=0.8, label="Δ Overnight BCR")
-ax.plot(df_id["fecha"], df_id["d_activos"]/1e9,    color=COLORES["activos"],   lw=0.8, label="Δ Activos")
 ax.plot(df_id["fecha"], df_id["retiro_neto"]/1e9,  color=COLORES["retiro"],    lw=0.8, label="Retiro Neto")
 ax.axhline(0, color="k", lw=0.5)
 ax.set_ylabel("B USD (variación diaria)")
-ax.legend(fontsize=8, loc="upper left", ncol=2)
-ax.set_title("Componentes individuales", fontsize=10)
+ax.legend(fontsize=8, loc="upper left", ncol=3)
+ax.set_title("Componentes individuales observados", fontsize=10)
 
 ax = axes[1]
-ax.plot(df_id["fecha"], df_id["suma_identidad"]/1e9, color="purple", lw=0.8,
-        label="SUMA (debe ≈ 0)")
+ax.plot(df_id["fecha"], df_id["suma_obs"]/1e9, color="purple", lw=0.8,
+        label="Suma (si ≈ 0: canales completos)")
 ax.axhline(0, color="k", lw=1.2, ls="--")
-media_suma = df_id["suma_identidad"].mean()
-std_suma   = df_id["suma_identidad"].std()
-ax.text(0.02, 0.95, f"Media de la suma: {media_suma/1e6:.1f}M\nStd: {std_suma/1e6:.0f}M",
+media_suma = df_id["suma_obs"].mean()
+std_suma   = df_id["suma_obs"].std()
+ax.text(0.02, 0.95, f"Media residuo: {media_suma/1e6:.1f}M\nStd: {std_suma/1e6:.0f}M",
         transform=ax.transAxes, fontsize=9, va="top",
         bbox=dict(boxstyle="round", facecolor="lightyellow", alpha=0.8))
 ax.set_ylabel("B USD")
 ax.legend(fontsize=9)
-ax.set_title("Residuo de la identidad (error de cierre)", fontsize=10)
+ax.set_title("Residuo (otros canales del balance: bonos, interbancario, posición FX...)", fontsize=10)
 
 plt.tight_layout()
 ruta = DIR_OUTPUT / "encaje_05_identidad_contable.png"
@@ -848,6 +882,89 @@ plt.close()
 print(f"  Guardado: {ruta.name}")
 
 # =============================================================================
+# GRÁFICA 10: Hipótesis 90% — cumplimiento vs overnight y retiro neto
+# =============================================================================
+print("Generando gráfica 10: hipótesis umbral 90% cumplimiento...")
+
+fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+fig.suptitle(
+    f"BBVA – Hipótesis: al cubrir ≥{UMBRAL_LIBRE:.0%} del encaje exigible el banco mueve fondos\n"
+    "pct_cumplimiento = encaje_acum_mes / exigible_total_mes",
+    fontsize=12, fontweight="bold"
+)
+
+# Panel A: % cumplimiento promedio por día del mes
+ax = axes[0]
+by_day_pct = df.groupby("dia_mes")["pct_cumplimiento"].agg(["mean","median"]) * 100
+ax.plot(by_day_pct.index, by_day_pct["mean"],   color="#1f77b4", lw=2,    label="Promedio")
+ax.plot(by_day_pct.index, by_day_pct["median"], color="#ff7f0e", lw=1.5,  ls="--", label="Mediana")
+ax.axhline(UMBRAL_LIBRE * 100, color="red", ls="--", lw=1.5,
+           label=f"Umbral {UMBRAL_LIBRE:.0%}")
+for fase, col in FASES_COLORES.items():
+    d0, d1 = {"A_inicio(1-4)":(0.5,4.5),"B_acum(5-21)":(4.5,21.5),
+               "C_rentab(22-28)":(21.5,28.5),"D_cierre(29-31)":(28.5,31.5)}[fase]
+    ax.axvspan(d0, d1, alpha=0.07, color=col)
+ax.set_xlabel("Día del mes")
+ax.set_ylabel("% cumplimiento")
+ax.set_title(f"% del exigible mensual cubierto por día\n(≥{UMBRAL_LIBRE:.0%} → banco entra en 'modo libre')", fontsize=10)
+ax.legend(fontsize=9)
+
+# Panel B: Retiro neto y Δovernight por quintil de pct_cumplimiento_lag1
+ax = axes[1]
+df_q = df[["retiro_neto","d_overnight","pct_cumplimiento_lag1"]].dropna().copy()
+try:
+    df_q["quintil"] = pd.qcut(df_q["pct_cumplimiento_lag1"], 5, labels=False, duplicates="drop")
+except Exception:
+    df_q["quintil"] = pd.cut(df_q["pct_cumplimiento_lag1"], 5, labels=False)
+
+q_stats = df_q.groupby("quintil").agg(
+    retiro_med  = ("retiro_neto",           "median"),
+    on_med      = ("d_overnight",           "median"),
+    pct_min     = ("pct_cumplimiento_lag1", "min"),
+    pct_max     = ("pct_cumplimiento_lag1", "max"),
+    n           = ("retiro_neto",           "count"),
+).reset_index()
+
+x_q = np.arange(len(q_stats))
+w   = 0.35
+ax.bar(x_q - w/2, q_stats["retiro_med"]/1e6,  w, color=COLORES["retiro"],    alpha=0.8, label="Retiro Neto (mediana, M USD)")
+ax.bar(x_q + w/2, q_stats["on_med"]/1e6,      w, color=COLORES["overnight"], alpha=0.8, label="Δ Overnight (mediana, M USD)")
+ax.axhline(0, color="k", lw=0.8)
+xlabs = [f"Q{int(r['quintil'])+1}\n{r['pct_min']:.0%}–{r['pct_max']:.0%}" for _, r in q_stats.iterrows()]
+ax.set_xticks(x_q); ax.set_xticklabels(xlabs, fontsize=8)
+ax.set_ylabel("M USD (mediana)")
+ax.set_title(f"Retiro neto y Δovernight\npor quintil de % cumplimiento (t-1)", fontsize=10)
+ax.legend(fontsize=8)
+ax.text(0.02, 0.03,
+        f"Hipótesis: Q5 (≥{UMBRAL_LIBRE:.0%}) muestra\n"
+        "retiro mayor y Δovernight mayor\n(banco libera fondos)",
+        transform=ax.transAxes, fontsize=8, va="bottom",
+        bbox=dict(boxstyle="round", facecolor="lightyellow", alpha=0.8))
+
+# Panel C: Scatter pct_cumplimiento_lag1 vs retiro_neto (días con libre=True)
+ax = axes[2]
+mask_libre = df["libre"]
+mask_fren  = ~df["libre"]
+ax.scatter(df.loc[mask_fren, "pct_cumplimiento_lag1"] * 100,
+           df.loc[mask_fren, "retiro_neto"] / 1e6,
+           alpha=0.15, s=8, color=COLORES["retiro"],    label="Frenado")
+ax.scatter(df.loc[mask_libre, "pct_cumplimiento_lag1"] * 100,
+           df.loc[mask_libre, "retiro_neto"] / 1e6,
+           alpha=0.20, s=8, color="#2ca02c", label="Libre (≥90%)")
+ax.axvline(UMBRAL_LIBRE * 100, color="red", ls="--", lw=1.2, label=f"Umbral {UMBRAL_LIBRE:.0%}")
+ax.axhline(0, color="gray", lw=0.5)
+ax.set_xlabel("% cumplimiento acumulado (t-1)")
+ax.set_ylabel("Retiro Neto (M USD)")
+ax.set_title("Scatter: cumplimiento vs retiro neto\n(verde = días en estado libre ≥90%)", fontsize=10)
+ax.legend(fontsize=8)
+
+plt.tight_layout()
+ruta = DIR_OUTPUT / "encaje_10_hipotesis_90pct.png"
+fig.savefig(ruta, dpi=130, bbox_inches="tight")
+plt.close()
+print(f"  Guardado: {ruta.name}")
+
+# =============================================================================
 # EXPORTAR EXCEL CON DATOS DE ANÁLISIS
 # =============================================================================
 print("Exportando Excel con datos del análisis...")
@@ -857,22 +974,27 @@ ruta_excel = DIR_OUTPUT / "encaje_analisis_datos.xlsx"
 # Hoja 1: datos diarios con todas las features computadas
 cols_diario = [
     "fecha", "dia_mes", "ano", "mes", "fase",
-    "caja", "cta_cte_bcr", "overnight_bcr", "activos", "encaje_exigible",
+    "caja", "cta_cte_bcr", "overnight_bcr",
+    "tose_total_deducido", "encaje_exigible", "tasa_exigible_impl",
     "encaje", "exceso_encaje",
     "encaje_acum_mes", "exigible_total_mes", "faltante", "faltante_lag1",
     "encaje_lag1", "condicion_libre", "libre", "dias_desde_libre",
+    "exceso_proyectado", "exceso_proyectado_lag1",
+    "pct_cumplimiento", "pct_cumplimiento_lag1",
     "retiro_neto", "retiro_acum_mes",
     "cc_on", "techo_10h", "techo_restante", "proporcion_usada",
-    "d_cta_cte", "d_overnight", "d_activos",
+    "d_cta_cte", "d_overnight",
 ]
 cols_diario_ok = [c for c in cols_diario if c in df.columns]
 df_export = df[cols_diario_ok].copy()
 # Escalar a millones para legibilidad
-cols_m = ["caja","cta_cte_bcr","overnight_bcr","activos","encaje_exigible",
+cols_m = ["caja","cta_cte_bcr","overnight_bcr",
+          "tose_total_deducido","encaje_exigible",
           "encaje","exceso_encaje","encaje_acum_mes","exigible_total_mes",
           "faltante","faltante_lag1","encaje_lag1",
+          "exceso_proyectado","exceso_proyectado_lag1",
           "retiro_neto","retiro_acum_mes","cc_on","techo_10h",
-          "techo_restante","d_cta_cte","d_overnight","d_activos"]
+          "techo_restante","d_cta_cte","d_overnight"]
 for c in cols_m:
     if c in df_export.columns:
         df_export[c] = df_export[c] / 1e6
@@ -931,70 +1053,56 @@ print("    Δexceso_malo = Δcta_cte + Δovernight + Δcaja  (overnight en ambos
 print("    Identidad:    Δcta_cte + Δovernight + Δactivos + retiro_neto = 0")
 print("    → El overnight se cancelaba consigo mismo, inflando el r artificialmente.")
 
-print("\n[2] CORRELACIONES CORRECTAS CON RETIRO NETO")
+print("\n[2] CORRELACIONES CON RETIRO NETO")
 corr_data = {
-    "Δ Cta Cte BCR (driver principal)": df["retiro_neto"].corr(df["d_cta_cte"]),
-    "Δ Exceso encaje (correcto, sin ON)": df["retiro_neto"].corr(df["d_exceso"]),
-    "Δ Activos                        ": df["retiro_neto"].corr(df["d_activos"]),
+    "Δ Cta Cte BCR (driver encaje)   ": df["retiro_neto"].corr(df["d_cta_cte"]),
     "Δ Overnight BCR                  ": df["retiro_neto"].corr(df["d_overnight"]),
+    "Δ Exceso encaje (Caja+CtaCte−Exig)": df["retiro_neto"].corr(df["d_exceso"]),
     "Exceso encaje (nivel)            ": df["retiro_neto"].corr(df["exceso_encaje"]),
+    "TOSE total deducido              ": df["retiro_neto"].corr(df["tose_total_deducido"]),
 }
 for nombre, r in corr_data.items():
     print(f"    {nombre}  r={r:+.4f}  R²={r**2:.2%}")
-print()
-print("    → El r=+0.90 reportado anteriormente era INCORRECTO (overnight incluido).")
-print("    → El valor correcto de Δexceso es r=+0.38 / R²=14%.")
-print("    → Lo más valioso para el pronóstico sigue siendo el patrón calendárico.")
+tasa_med = df["tasa_exigible_impl"].median()
+tasa_std = df["tasa_exigible_impl"].std()
+print(f"\n    Tasa exigible implícita (Exigible/TOSE): mediana={tasa_med:.3%}  std={tasa_std:.3%}")
+print(f"    → {'OK: cercana al 36% esperado' if abs(tasa_med - 0.36) < 0.02 else 'REVISAR: difiere del 36% legal'}")
 
-print("\n[3] VERIFICACIÓN DE LA IDENTIDAD CONTABLE")
-df_id_tmp = df[["d_cta_cte","d_overnight","d_activos","retiro_neto"]].dropna().copy()
+print("\n[3] SUSTITUCIÓN CTA CTE ↔ OVERNIGHT Y RETIRO NETO")
+df_id_tmp = df[["d_cta_cte","d_overnight","retiro_neto"]].dropna().copy()
 df_id_tmp["residuo"] = df_id_tmp.sum(axis=1)
 res = df_id_tmp["residuo"] / 1e6
+print(f"    Suma (Δcta_cte + Δovernight + retiro_neto):")
 print(f"    Media residuo:  {res.mean():+.1f}M")
 print(f"    Std residuo:    {res.std():.0f}M")
-print(f"    Min / Max:      {res.min():.0f}M  /  {res.max():.0f}M")
+print(f"    P50 |residuo|:  {res.abs().median():.0f}M    P90: {res.abs().quantile(0.90):.0f}M")
 print()
-print(f"    Días con |residuo| < 10M  (≈ cero):    {(res.abs()<10).sum():4d}  ({(res.abs()<10).mean()*100:.1f}%)")
-print(f"    Días con |residuo| < 100M (pequeño):   {(res.abs()<100).sum():4d}  ({(res.abs()<100).mean()*100:.1f}%)")
-print(f"    Días con |residuo| >= 500M (grande):   {(res.abs()>=500).sum():4d}  ({(res.abs()>=500).mean()*100:.1f}%)")
-print(f"    Mediana del residuo absoluto:          {res.abs().quantile(0.50):.0f}M")
-print(f"    P90 del residuo absoluto:              {res.abs().quantile(0.90):.0f}M")
-print()
-print("    → CONCLUSIÓN: la identidad NO se cumple perfectamente.")
-print("    → La mitad de los días el residuo supera 155M — no es ruido de redondeo.")
-print("    → EncajeD.xlsx captura solo 5 variables; el balance real del banco")
-print("      incluye otros canales no observados (bonos, posición interbancaria,")
-print("      depósitos de clientes, posición FX, etc.) que absorben la diferencia.")
-print("    → No podemos afirmar que el retiro sea 'la válvula principal'")
-print("      con los datos disponibles.")
+print("    → Residuo grande → hay otros canales del balance (bonos, interbancario,")
+print("      posición FX) que absorben la diferencia. Normal con datos parciales.")
 
 print("\n[3b] VARIACIÓN DIARIA PROMEDIO DE CADA COMPONENTE (M USD)")
 for col, nombre in [("d_cta_cte",   "Δ Cta Cte BCR  "),
                      ("d_overnight", "Δ Overnight BCR"),
-                     ("d_activos",   "Δ Activos      "),
                      ("retiro_neto", "Retiro Neto    ")]:
     v = df_id_tmp[col]
     print(f"    {nombre}  media={v.mean()/1e6:+7.1f}M  "
           f"std={v.std()/1e6:6.0f}M  "
           f"p10={v.quantile(.10)/1e6:+7.0f}M  "
           f"p90={v.quantile(.90)/1e6:+7.0f}M")
-print(f"    {'Residuo (no≈0)  ':22s}  media={res.mean():+7.1f}M  "
-      f"std={res.std():6.0f}M")
 
 print("\n[3c] DISTRIBUCIÓN DE LA CAÍDA DE CTA CTE (días con Δcta_cte < 0)")
 mask_cae = df["d_cta_cte"] < 0
 total = df.loc[mask_cae, "d_cta_cte"].sum()
 d_on  = df.loc[mask_cae, "d_overnight"].sum()
-d_act = df.loc[mask_cae, "d_activos"].sum()
 d_ret = df.loc[mask_cae, "retiro_neto"].sum()
 print(f"    Caída total Cta Cte: {total/1e9:+.1f}B")
 print(f"      → Overnight:       {d_on/1e9:+.1f}B  ({d_on/abs(total)*100:.0f}%)")
-print(f"      → Activos:         {d_act/1e9:+.1f}B  ({d_act/abs(total)*100:.0f}%)")
 print(f"      → Retiro Neto:     {d_ret/1e9:+.1f}B  ({d_ret/abs(total)*100:.0f}%)")
+print(f"      → Otros canales:   {(total+d_on+d_ret)/1e9:+.1f}B  ({(total+d_on+d_ret)/abs(total)*100:.0f}%)")
 
 print("\n[3d] CONTRIBUCIÓN DE CADA CANAL POR FASE (promedio diario, M USD)")
-comp_cols_r = ["d_cta_cte","d_overnight","d_activos","retiro_neto"]
-comp_names_r= ["Δ Cta Cte","Δ Overnight","Δ Activos ","Retiro    "]
+comp_cols_r = ["d_cta_cte","d_overnight","retiro_neto"]
+comp_names_r= ["Δ Cta Cte","Δ Overnight","Retiro    "]
 fase_medias = df.groupby("fase")[comp_cols_r].mean() / 1e6
 print(f"    {'Fase':<22}", "  ".join(f"{n:>10}" for n in comp_names_r))
 for f in ["A_inicio(1-4)","B_acum(5-21)","C_rentab(22-28)","D_cierre(29-31)"]:
@@ -1062,8 +1170,8 @@ print("    → El techo es útil como restricción operativa, no como predictor 
 print("    → Para pronóstico: mejor usarlo en la última semana del mes (días 22-31).")
 
 print("\n[10] ESTADO LIBRE: DÍA DE INICIO Y COMPORTAMIENTO DEL RETIRO")
-print(f"    Condición: faltante_lag1 ≤ encaje_lag1")
-print(f"    (con un día más al nivel actual, el banco ya cumpliría el exigible)")
+print(f"    Condición: pct_cumplimiento_lag1 ≥ {UMBRAL_LIBRE:.0%}")
+print(f"    (banco cubrió ≥{UMBRAL_LIBRE:.0%} del exigible mensual acumulado hasta ayer → puede retirar/mover ON)")
 print()
 med_libre = df_mensual["dia_inicio_libre"].median()
 p10_libre = df_mensual["dia_inicio_libre"].quantile(0.10)
