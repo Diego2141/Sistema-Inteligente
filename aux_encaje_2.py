@@ -54,6 +54,32 @@ df["Avance"] = df["EncajeAcumMes"] / df["ExigibleTotalMes_est"]
 df["EncajeAcumMes_proy_E1"] = df["EncajeAcumMes"] + df["encaje"] * df["dias_restantes"]
 df["Avance_proy_E1"]        = df["EncajeAcumMes_proy_E1"] / df["ExigibleTotalMes_est"]
 
+# ── Día de liberación (umbral 90%) ────────────────────────────────────────────
+# NecMinDiario_90: encaje mínimo por día para los días restantes y cerrar en ≥90%
+#   = max(0, 90%·exigible_total - acumulado) / días_restantes
+#   Si ya se acumuló ≥90%, la necesidad es 0: banco completamente libre
+UMBRAL_90 = 0.90
+df["NecMinDiario_90"] = (
+    (UMBRAL_90 * df["ExigibleTotalMes_est"] - df["EncajeAcumMes"]).clip(lower=0)
+    / df["dias_restantes"].clip(lower=1)
+)
+
+# libre_90: el encaje de hoy supera la necesidad mínima → banco puede hacer retiros
+df["libre_90"] = df["encaje"] >= df["NecMinDiario_90"]
+
+# dia_liberacion_90: primer día del mes donde Avance ≥ 90%
+#   = banco ya aseguró el umbral aunque encaje = 0 los días restantes
+_anio_mes_tmp = df["fecha"].dt.to_period("M")
+df["_ya_lib"] = df["Avance"] >= UMBRAL_90
+_dias_lib_map = (
+    df.assign(_am=_anio_mes_tmp)
+    .groupby("_am")
+    .apply(lambda g: g.loc[g["_ya_lib"], "dia_mes"].iloc[0]
+                     if g["_ya_lib"].any() else np.nan)
+)
+df["dia_liberacion_90"] = _anio_mes_tmp.map(_dias_lib_map)
+df.drop(columns=["_ya_lib"], inplace=True)
+
 # Avance real al cierre del mes (solo para validación — usa datos futuros)
 EncajeAcumMes_real   = df.groupby("anio_mes")["encaje"].transform("sum")
 ExigibleTotalMes_real = df.groupby("anio_mes")["exigible"].transform("sum")
@@ -298,6 +324,100 @@ fig.savefig(ruta_daily, dpi=130, bbox_inches="tight")
 plt.close()
 print(f"  Gráfico guardado: {ruta_daily.name}")
 
+# ── Análisis día de liberación ────────────────────────────────────────────────
+_am = df["fecha"].dt.to_period("M")
+
+# Resumen mensual: día de liberación + retiro_neto en días libres vs no libres
+lib_resumen = (
+    df.groupby(_am)
+    .agg(
+        dia_liberacion_90 = ("dia_liberacion_90", "first"),
+        retiro_dias_libres    = ("retiro_neto",
+                                 lambda g: g[df.loc[g.index, "libre_90"]].mean()),
+        retiro_dias_no_libres = ("retiro_neto",
+                                 lambda g: g[~df.loc[g.index, "libre_90"]].mean()),
+        pct_dias_libres       = ("libre_90", "mean"),
+    )
+    .reset_index()
+)
+lib_resumen["fecha"] = lib_resumen["fecha"].dt.to_timestamp()
+
+print(f"\n── Día de liberación (Avance ≥ 90%) ────────────────────────────────")
+print(f"  Umbral        : {UMBRAL_90:.0%}")
+print(f"  Días libres   : {df['libre_90'].sum():,}  ({df['libre_90'].mean()*100:.0f}% del total)")
+print(f"  Día mediano de liberación  : día {lib_resumen['dia_liberacion_90'].median():.0f} del mes")
+print(f"  Meses sin liberación       : {lib_resumen['dia_liberacion_90'].isna().sum()}")
+print(f"\n  Retiro promedio en días libres   : {df.loc[df['libre_90'], 'retiro_neto'].mean()/1e6:+.0f}M")
+print(f"  Retiro promedio en días no libres: {df.loc[~df['libre_90'], 'retiro_neto'].mean()/1e6:+.0f}M")
+
+# ── Gráfico día de liberación ─────────────────────────────────────────────────
+fig, axes = plt.subplots(3, 1, figsize=(15, 13), sharex=False)
+fig.suptitle(
+    f"Análisis de Liberación — Umbral {UMBRAL_90:.0%}\n"
+    "'Libre' = encaje de hoy ≥ encaje mínimo para cerrar el mes en ≥90%",
+    fontsize=12, fontweight="bold",
+)
+
+# Panel 1: día de liberación a lo largo del tiempo
+ax = axes[0]
+valid = lib_resumen.dropna(subset=["dia_liberacion_90"])
+ax.bar(valid["fecha"], valid["dia_liberacion_90"],
+       width=20, color="#1565C0", alpha=0.75)
+ax.axhline(valid["dia_liberacion_90"].median(), color="red", lw=1.2, ls="--",
+           label=f"Mediana = día {valid['dia_liberacion_90'].median():.0f}")
+ax.set_ylabel("Día del mes")
+ax.set_title("Día del mes en que Avance acumulado cruza 90% (liberación total)")
+ax.legend(fontsize=9)
+ax.set_ylim(0, 31)
+
+# Panel 2: NecMinDiario_90 vs encaje real (año representativo)
+ax = axes[1]
+anio_ej = 2023
+mask_ej = df["fecha"].dt.year == anio_ej
+df_ej2  = df[mask_ej]
+ax.fill_between(df_ej2["fecha"], df_ej2["NecMinDiario_90"] / 1e9,
+                alpha=0.25, color="#F44336", label="Mínimo necesario (90%)")
+ax.plot(df_ej2["fecha"], df_ej2["NecMinDiario_90"] / 1e9,
+        color="#F44336", lw=1.2)
+ax.plot(df_ej2["fecha"], df_ej2["encaje"] / 1e9,
+        color="#1565C0", lw=1.4, label="Encaje actual")
+
+# Sombrear días libres
+for _, row in df_ej2[df_ej2["libre_90"]].iterrows():
+    ax.axvspan(row["fecha"], row["fecha"] + pd.Timedelta(days=1),
+               alpha=0.10, color="#4CAF50", zorder=0)
+
+from matplotlib.patches import Patch
+ax.legend(handles=[
+    ax.lines[1], ax.lines[0],
+    Patch(color="#4CAF50", alpha=0.4, label="Días libres (retiros posibles)"),
+], fontsize=9)
+ax.set_ylabel("B USD")
+ax.set_title(f"Encaje actual vs Mínimo necesario para ≥90% — Año {anio_ej}")
+ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:.1f}B"))
+
+# Panel 3: retiro neto promedio días libres vs no libres por mes
+ax = axes[2]
+ax.bar(lib_resumen["fecha"],
+       lib_resumen["retiro_dias_libres"] / 1e6,
+       width=20, color="#4CAF50", alpha=0.8, label="Días libres")
+ax.bar(lib_resumen["fecha"],
+       lib_resumen["retiro_dias_no_libres"] / 1e6,
+       width=20, color="#F44336", alpha=0.6, label="Días no libres",
+       bottom=lib_resumen["retiro_dias_libres"].fillna(0) / 1e6)
+ax.axhline(0, color="k", lw=0.8)
+ax.set_ylabel("Retiro neto promedio (M USD)")
+ax.set_title("Retiro neto promedio según estado de liberación (por mes)")
+ax.legend(fontsize=9)
+ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:+.0f}M"))
+
+plt.tight_layout()
+ruta_lib = DIR_OUT / "dia_liberacion_90.png"
+fig.savefig(ruta_lib, dpi=130, bbox_inches="tight")
+plt.close()
+print(f"\nGráfico liberación guardado: {ruta_lib.name}")
+
+# ── Export ─────────────────────────────────────────────────────────────────────
 with pd.ExcelWriter(ruta_out, engine="openpyxl") as writer:
     df.to_excel(writer, sheet_name="Datos", index=False)
     balance.to_excel(writer, sheet_name="Balance_Mensual", index=False)
@@ -305,7 +425,9 @@ with pd.ExcelWriter(ruta_out, engine="openpyxl") as writer:
         residuo=y_d - yhat
     ).to_excel(writer, sheet_name="Regresion_Diaria", index=False)
     validacion.to_excel(writer, sheet_name="Validacion_OpcionA", index=False)
+    lib_resumen.to_excel(writer, sheet_name="Liberacion_Mensual", index=False)
 
 print(f"\nExportado: {ruta_out}")
-print(f"  Hoja 'Datos'          : {len(df):,} filas")
-print(f"  Hoja 'Balance_Mensual': {len(balance)} filas")
+print(f"  Hoja 'Datos'             : {len(df):,} filas")
+print(f"  Hoja 'Balance_Mensual'   : {len(balance)} filas")
+print(f"  Hoja 'Liberacion_Mensual': {len(lib_resumen)} filas")
