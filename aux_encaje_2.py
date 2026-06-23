@@ -5,6 +5,7 @@ aux_encaje_2.py
 Análisis de encaje BBVA desde cero.
 """
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -67,6 +68,34 @@ print(balance[["fecha","suma_var_ovn","suma_retiro","residuo","cumple"]]
 DIR_OUT = RUTA.parent.parent.parent / "2. Output" / "encaje_bbva"
 DIR_OUT.mkdir(parents=True, exist_ok=True)
 ruta_out = DIR_OUT / "bbva_encaje_features.xlsx"
+
+# ── Gráfico de dispersión ─────────────────────────────────────────────────────
+x = balance["suma_var_ovn"] / 1e9
+y = balance["suma_retiro"]  / 1e9
+
+coef = np.polyfit(x, y, 1)
+xr   = np.linspace(x.min(), x.max(), 200)
+r    = np.corrcoef(x, y)[0, 1]
+
+fig, ax = plt.subplots(figsize=(8, 6))
+sc = ax.scatter(x, y, c=balance["fecha"].dt.year,
+                cmap="plasma", alpha=0.8, s=60, edgecolors="white", lw=0.4)
+ax.plot(xr, np.polyval(coef, xr), color="black", lw=1.5, ls="--",
+        label=f"Tendencia  r = {r:+.3f}")
+ax.axhline(0, color="gray", lw=0.5, ls=":")
+ax.axvline(0, color="gray", lw=0.5, ls=":")
+plt.colorbar(sc, ax=ax, label="Año")
+ax.set_xlabel("Σ Var EncajeOVN  (B USD)", fontsize=11)
+ax.set_ylabel("Σ Retiro Neto  (B USD)", fontsize=11)
+ax.set_title("Balance mensual: variación de EncajeOVN vs Retiro Neto\n"
+             "Cada punto = un mes  |  si la ecuación se cumple → nube en diagonal",
+             fontsize=11, fontweight="bold")
+ax.legend(fontsize=10)
+plt.tight_layout()
+ruta_plot = DIR_OUT / "balance_scatter.png"
+fig.savefig(ruta_plot, dpi=130, bbox_inches="tight")
+plt.close()
+print(f"\nGráfico guardado: {ruta_plot.name}")
 
 with pd.ExcelWriter(ruta_out, engine="openpyxl") as writer:
     df.to_excel(writer, sheet_name="Datos", index=False)
