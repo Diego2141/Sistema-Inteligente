@@ -48,6 +48,7 @@ import gc
 import json
 import logging
 import os
+import sys
 import time
 import warnings
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
@@ -327,10 +328,11 @@ def crps_approx(y_true, preds):
 ###############################################################################
 
 # Número de procesos paralelos (uno por cuantil) y threads XGBoost por proceso.
-# Con ProcessPoolExecutor cada proceso tiene su propio GIL → paralelismo real.
-# Limitado a 2 para evitar MemoryError en Windows (spawn re-importa el módulo
-# completo por proceso: ~500 MB × N_PROC de overhead antes de entrenar).
-_N_QUANTILES_PARALLEL = min(2, len([0.01, 0.05, 0.50, 0.95, 0.99]))  # ≤ 2
+# Windows/macOS usan spawn → re-importa módulo completo (~500 MB/proceso), límite 2.
+# Linux usa fork (copy-on-write) → overhead mínimo, corre los 5 cuantiles en paralelo.
+_N_QUANTILES   = len([0.01, 0.05, 0.50, 0.95, 0.99])  # = 5
+_spawn_ctx     = sys.platform in ("win32", "darwin")
+_N_QUANTILES_PARALLEL = min(2, _N_QUANTILES) if _spawn_ctx else _N_QUANTILES
 _XGB_NTHREAD = max(2, (os.cpu_count() or 10) // _N_QUANTILES_PARALLEL)
 
 # Cache de parámetros GARCH por fecha de corte de TRAIN — evita re-estimación en el
@@ -673,9 +675,9 @@ def resolver_folds_manuales(
 ###############################################################################
 
 def make_quantile_objective(tau, s, std_y):
-    # _scale normaliza grad y hess para que XGBoost vea magnitudes similares
-    # independientemente de la escala de std_y (evita learning_rate efectivo
-    # muy chico o muy grande al cambiar la escala del target).
+    # _scale ajusta el lambda efectivo de XGBoost según la escala del target
+    # (target no estandarizado: std_y~80,000 → _scale~1e9).
+    # Se aplica a grad; hess ya lo incorpora algebraicamente en su forma simplificada.
     _scale = np.pi * (s ** 2 + std_y ** 2) ** 2 / (2.0 * s ** 3)
     def objective(y_pred, dtrain):
         # Clamp predicciones divergentes: en trials Optuna con malos
@@ -939,7 +941,6 @@ def _entrenar_fold_xgb_qt(X_tr, y_tr, X_va, y_va, std_y, n_trials, fold_num):
             logger.info(f"    [xgb_qt] τ={tau:.2f} fold {fold_num}: "
                         f"pinball/VAL={best_val:.4f}  s={bp['s']:.3f}  "
                         f"n_est={bp['n_estimators']}")
-    gc.collect()  # libera memoria de subprocesos completados antes del mean model
 
     # Mean model — reg:squarederror with best Q50 hyperparameters as base
     bp_mean = best_by_tau.get(0.50, list(best_by_tau.values())[0])
