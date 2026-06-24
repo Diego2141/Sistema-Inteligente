@@ -1457,30 +1457,44 @@ def build_encaje_features(df_encaje, peru_bday):
 
 
 # 5d. Features CC+OVN en BCR (Saldos_CCOVN.xlsx, rezago 1 día)
-def build_ccovn_features(df_ccovn):
+def build_ccovn_features(df_ccovn, peru_bday):
     """
     Deriva features de saldos CC+OVN en el BCR a partir de Saldos_CCOVN.xlsx.
     Todas las variables usan información de t-1 (shift(1)) → sin leakage.
 
+    El índice se reexpande a días hábiles (peru_bday) con forward-fill antes de
+    calcular diff(), de modo que la variación "de un día" siempre mide el cambio
+    entre dos días hábiles consecutivos y no incluye saltos de fin de semana o
+    feriados que inflarían artificialmente la magnitud.
+
     Features generadas (todas con sufijo _lag1):
       ccovn_sistema_lag1    : saldo total del sistema en el BCR en t-1 (USD)
       ccovn_bbva_lag1       : saldo BBVA en el BCR en t-1 (USD)
-      var_ccovn_sistema_lag1: variación diaria del sistema en t-1
-      var_ccovn_bbva_lag1   : variación diaria de BBVA en t-1
+      var_ccovn_sistema_lag1: variación diaria (día hábil a día hábil) del sistema en t-1
+      var_ccovn_bbva_lag1   : variación diaria (día hábil a día hábil) de BBVA en t-1
       bbva_share_lag1       : ccovn_bbva / ccovn_sistema en t-1
 
-    Retorna DataFrame indexado por fecha.
+    Retorna DataFrame indexado por días hábiles (peru_bday).
     """
     if df_ccovn.empty:
         return pd.DataFrame()
 
-    resultado = pd.DataFrame(index=df_ccovn.index)
+    # Reindexar a días hábiles: fines de semana y feriados se forward-fill
+    # (el saldo de cierre del viernes aplica hasta el siguiente día hábil)
+    idx_bd = pd.bdate_range(
+        start=df_ccovn.index.min(),
+        end=df_ccovn.index.max(),
+        freq=peru_bday,
+    )
+    df_bd = df_ccovn.reindex(idx_bd).ffill()
 
-    sis = df_ccovn["ccovn_sistema"]
-    bbv = df_ccovn.get("ccovn_bbva", pd.Series(np.nan, index=df_ccovn.index))
+    sis = df_bd["ccovn_sistema"]
+    bbv = df_bd.get("ccovn_bbva", pd.Series(np.nan, index=df_bd.index))
 
+    resultado = pd.DataFrame(index=df_bd.index)
     resultado["ccovn_sistema_lag1"]     = sis.shift(1)
     resultado["ccovn_bbva_lag1"]        = bbv.shift(1)
+    # diff() sobre idx_bd → variación entre días hábiles consecutivos (correcto)
     resultado["var_ccovn_sistema_lag1"] = sis.diff().shift(1)
     resultado["var_ccovn_bbva_lag1"]    = bbv.diff().shift(1)
     resultado["bbva_share_lag1"]        = (
@@ -1926,7 +1940,7 @@ def build_full_matrix(
 
     # Pre-calcular features CC+OVN (todos los bancos; sistémico + BBVA)
     df_ccovn   = load_ccovn_data(params)
-    ccovn_feat = build_ccovn_features(df_ccovn)
+    ccovn_feat = build_ccovn_features(df_ccovn, peru_bday)
 
     # Pre-computar HMM expanding SOLO para SISTEMA (régimen sistémico, no por banco)
     # El mismo hmm_estado se aplica a todos los bancos individuales.
