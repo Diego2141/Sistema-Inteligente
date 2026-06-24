@@ -328,8 +328,9 @@ def crps_approx(y_true, preds):
 
 # Número de procesos paralelos (uno por cuantil) y threads XGBoost por proceso.
 # Con ProcessPoolExecutor cada proceso tiene su propio GIL → paralelismo real.
-# Reparto óptimo: 5 procesos × (cpu_count // 5) threads = ~cpu_count cores activos.
-_N_QUANTILES_PARALLEL = len([0.01, 0.05, 0.50, 0.95, 0.99])  # = 5
+# Limitado a 2 para evitar MemoryError en Windows (spawn re-importa el módulo
+# completo por proceso: ~500 MB × N_PROC de overhead antes de entrenar).
+_N_QUANTILES_PARALLEL = min(2, len([0.01, 0.05, 0.50, 0.95, 0.99]))  # ≤ 2
 _XGB_NTHREAD = max(2, (os.cpu_count() or 10) // _N_QUANTILES_PARALLEL)
 
 # Cache de parámetros GARCH por fecha de corte de TRAIN — evita re-estimación en el
@@ -672,12 +673,23 @@ def resolver_folds_manuales(
 ###############################################################################
 
 def make_quantile_objective(tau, s, std_y):
+    # _scale normaliza grad y hess para que XGBoost vea magnitudes similares
+    # independientemente de la escala de std_y (evita learning_rate efectivo
+    # muy chico o muy grande al cambiar la escala del target).
     _scale = np.pi * (s ** 2 + std_y ** 2) ** 2 / (2.0 * s ** 3)
     def objective(y_pred, dtrain):
-        u    = dtrain.get_label() - y_pred
-        grad = -((tau - 0.5 + np.arctan(u / s) / np.pi)
-                 + u * s / (np.pi * (s ** 2 + u ** 2))) * _scale
-        hess = 2 * s ** 3 / (np.pi * (s ** 2 + u ** 2) ** 2) * _scale
+        # Clamp predicciones divergentes: en trials Optuna con malos
+        # hiperparámetros las predicciones XGBoost (float32) pueden llegar
+        # a ±inf, produciendo u=±inf → u²=inf → overflow en el hessiano.
+        y_pred = np.clip(y_pred, -1e15, 1e15)
+        u      = dtrain.get_label() - y_pred
+        s2u2   = s ** 2 + u ** 2          # siempre > 0, sin overflow en float64
+        grad   = -((tau - 0.5 + np.arctan(u / s) / np.pi)
+                   + u * s / (np.pi * s2u2)) * _scale
+        # Forma simplificada: hess = ((s²+std_y²)/(s²+u²))²
+        # Algebraicamente idéntica a la original pero evita los intermedios
+        # ~1e33 de _scale × ~1e-13 del cociente que provocan pérdida de precisión.
+        hess   = ((s ** 2 + std_y ** 2) / s2u2) ** 2
         return grad, hess
     return objective
 
@@ -927,6 +939,7 @@ def _entrenar_fold_xgb_qt(X_tr, y_tr, X_va, y_va, std_y, n_trials, fold_num):
             logger.info(f"    [xgb_qt] τ={tau:.2f} fold {fold_num}: "
                         f"pinball/VAL={best_val:.4f}  s={bp['s']:.3f}  "
                         f"n_est={bp['n_estimators']}")
+    gc.collect()  # libera memoria de subprocesos completados antes del mean model
 
     # Mean model — reg:squarederror with best Q50 hyperparameters as base
     bp_mean = best_by_tau.get(0.50, list(best_by_tau.values())[0])
