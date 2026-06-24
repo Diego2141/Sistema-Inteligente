@@ -37,7 +37,8 @@ raw = pd.read_excel(RUTA_IN, header=0)
 col_fecha = raw.columns[0]
 cols_bancos = raw.columns[1:].tolist()
 
-raw[col_fecha] = pd.to_datetime(raw[col_fecha])
+# Formato d-m-yyyy (día primero, separador guión)
+raw[col_fecha] = pd.to_datetime(raw[col_fecha], dayfirst=True, errors="coerce")
 raw = raw.sort_values(col_fecha).reset_index(drop=True)
 
 print(f"\n  Período   : {raw[col_fecha].min().date()} → {raw[col_fecha].max().date()}")
