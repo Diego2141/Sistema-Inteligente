@@ -178,6 +178,8 @@ PARAMS = {
     "ruta_datos_bancarios": r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Raw\Transacciones_BancaLocal.xlsx",
     "ruta_encaje": r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Raw\EncajeD.xlsx",
     "banco_encaje": "BBVA",   # banco al que aplican los datos de encaje
+    "ruta_ccovn":  r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Raw\Saldos_CCOVN.xlsx",
+    "bbva_keyword": "bbva",   # subcadena (case-insensitive) que identifica la columna BBVA en Saldos_CCOVN
     "ruta_confirmados": r"RUTA\confirmados.xlsx",
     "ruta_intervencion": r"RUTA\intervencion.xlsx",
     # "ruta_igv" eliminado: pagos IGV en soles, no relevante para liquidez ME
@@ -487,6 +489,63 @@ def load_encaje_data(params):
 
     except Exception as e:
         logger.warning(f"  No se pudo cargar EncajeD.xlsx: {ruta} | {e}")
+        return pd.DataFrame()
+
+
+def load_ccovn_data(params):
+    """
+    Carga Saldos_CCOVN.xlsx: saldos de cierre CC + OVN por banco en el BCR.
+
+    Formato esperado:
+      - Col A: Fecha (d-m-yyyy)
+      - Cols B…: un banco por columna (valores numéricos en USD)
+
+    Retorna DataFrame con columnas:
+      ccovn_sistema : suma de todos los bancos (USD)
+      ccovn_bbva    : columna que contiene el keyword "bbva" (case-insensitive)
+
+    Indexado por fecha, o DataFrame vacío si el archivo no está disponible.
+    """
+    ruta = params.get("ruta_ccovn", "")
+    if not ruta:
+        logger.info("  CCOVN: ruta no configurada — features ccovn omitidas.")
+        return pd.DataFrame()
+
+    try:
+        raw = pd.read_excel(ruta, header=0)
+        if raw.empty:
+            logger.warning(f"  Saldos_CCOVN.xlsx vacío: {ruta}")
+            return pd.DataFrame()
+
+        col_fecha   = raw.columns[0]
+        cols_bancos = raw.columns[1:].tolist()
+
+        raw[col_fecha] = pd.to_datetime(raw[col_fecha], dayfirst=True, errors="coerce")
+        raw = raw.dropna(subset=[col_fecha]).sort_values(col_fecha)
+
+        for c in cols_bancos:
+            raw[c] = pd.to_numeric(raw[c], errors="coerce")
+
+        keyword = params.get("bbva_keyword", "bbva")
+        cols_bbva = [c for c in cols_bancos if keyword in str(c).lower()]
+        col_bbva  = cols_bbva[0] if cols_bbva else None
+
+        df_out = pd.DataFrame()
+        df_out["ccovn_sistema"] = raw[cols_bancos].sum(axis=1, skipna=True).values
+        df_out["ccovn_bbva"]    = raw[col_bbva].values if col_bbva else np.nan
+        df_out.index = pd.DatetimeIndex(raw[col_fecha].values)
+        df_out.index.name = "fecha"
+        df_out = df_out.sort_index()
+
+        logger.info(
+            f"  Saldos_CCOVN cargado: {len(df_out):,} filas | "
+            f"{df_out.index.min().date()} → {df_out.index.max().date()} | "
+            f"col_bbva='{col_bbva}'"
+        )
+        return df_out
+
+    except Exception as e:
+        logger.warning(f"  No se pudo cargar Saldos_CCOVN.xlsx: {ruta} | {e}")
         return pd.DataFrame()
 
 
@@ -1397,7 +1456,43 @@ def build_encaje_features(df_encaje, peru_bday):
     return resultado
 
 
-# 5d. Features estacionales en t+h
+# 5d. Features CC+OVN en BCR (Saldos_CCOVN.xlsx, rezago 1 día)
+def build_ccovn_features(df_ccovn):
+    """
+    Deriva features de saldos CC+OVN en el BCR a partir de Saldos_CCOVN.xlsx.
+    Todas las variables usan información de t-1 (shift(1)) → sin leakage.
+
+    Features generadas (todas con sufijo _lag1):
+      ccovn_sistema_lag1    : saldo total del sistema en el BCR en t-1 (USD)
+      ccovn_bbva_lag1       : saldo BBVA en el BCR en t-1 (USD)
+      var_ccovn_sistema_lag1: variación diaria del sistema en t-1
+      var_ccovn_bbva_lag1   : variación diaria de BBVA en t-1
+      bbva_share_lag1       : ccovn_bbva / ccovn_sistema en t-1
+
+    Retorna DataFrame indexado por fecha.
+    """
+    if df_ccovn.empty:
+        return pd.DataFrame()
+
+    resultado = pd.DataFrame(index=df_ccovn.index)
+
+    sis = df_ccovn["ccovn_sistema"]
+    bbv = df_ccovn.get("ccovn_bbva", pd.Series(np.nan, index=df_ccovn.index))
+
+    resultado["ccovn_sistema_lag1"]     = sis.shift(1)
+    resultado["ccovn_bbva_lag1"]        = bbv.shift(1)
+    resultado["var_ccovn_sistema_lag1"] = sis.diff().shift(1)
+    resultado["var_ccovn_bbva_lag1"]    = bbv.diff().shift(1)
+    resultado["bbva_share_lag1"]        = (
+        bbv / sis.replace(0, np.nan)
+    ).shift(1)
+
+    n_val = resultado["ccovn_sistema_lag1"].notna().sum()
+    logger.info(f"  build_ccovn_features: {n_val:,} filas válidas en ccovn_sistema_lag1")
+    return resultado
+
+
+# 5e. Features estacionales en t+h
 def _get_bdays_en_mes(fecha, peru_bday):
     """Retorna todos los días hábiles del mes de la fecha dada."""
     inicio_mes = fecha.replace(day=1)
@@ -1607,6 +1702,7 @@ def build_feature_matrix(
     hmm_features=None,     # pd.Series(hmm_estado, index=fecha_t) pre-computada
     encaje_features=None,  # pd.DataFrame(index=fecha_t) con features de encaje (BBVA)
     banco_encaje="BBVA",   # banco al que aplican esas features
+    ccovn_features=None,   # pd.DataFrame(index=fecha_t) con saldos CC+OVN para todos los bancos
 ):
     """
     Construye el dataset de entrenamiento para un banco de forma vectorizada.
@@ -1723,6 +1819,15 @@ def build_feature_matrix(
             for col in encaje_features.columns:
                 df[col] = np.nan
 
+    # ── 9. Features CC+OVN en BCR (Saldos_CCOVN.xlsx, todos los bancos) ──────
+    # ccovn_features está indexado por fecha y contiene valores del día t-1.
+    # ccovn_sistema_lag1 aplica a todos los bancos.
+    # ccovn_bbva_lag1 aplica a todos (es una variable sistémica disponible para
+    # cualquier banco que quiera observar el comportamiento de BBVA).
+    if ccovn_features is not None and not ccovn_features.empty:
+        df = df.merge(ccovn_features, left_on="fecha_t", right_index=True, how="left")
+        logger.info(f"  {banco}: features ccovn incorporadas ({len(ccovn_features.columns)} cols)")
+
     # ── Reducir a float32 antes de reordenar ────────────────────────────────
     # Mitad de memoria y evita el OOM en la consolidación interna de pandas
     float_cols = df.select_dtypes(include="float64").columns
@@ -1819,6 +1924,10 @@ def build_full_matrix(
     df_encaje = load_encaje_data(params)
     encaje_feat = build_encaje_features(df_encaje, peru_bday)
 
+    # Pre-calcular features CC+OVN (todos los bancos; sistémico + BBVA)
+    df_ccovn   = load_ccovn_data(params)
+    ccovn_feat = build_ccovn_features(df_ccovn)
+
     # Pre-computar HMM expanding SOLO para SISTEMA (régimen sistémico, no por banco)
     # El mismo hmm_estado se aplica a todos los bancos individuales.
     hmm_sistema = pd.Series(dtype="Int8")
@@ -1855,6 +1964,7 @@ def build_full_matrix(
             hmm_features=hmm_sistema,       # mismo régimen sistémico para todos los bancos
             encaje_features=encaje_feat,    # features de encaje (solo aplican a banco_encaje)
             banco_encaje=banco_encaje,
+            ccovn_features=ccovn_feat,      # saldos CC+OVN en BCR (aplican a todos los bancos)
         )
         if df_banco_mat.empty:
             continue
@@ -2061,6 +2171,23 @@ def build_data_dictionary(params):
     add("techo_10h",           f"EncajeD / {_benc}", "CC+ON al día hábil 10 antes del cierre del mes, rezagado 1 día. Techo operativo de retiros.", 1, "t")
     add("techo_restante_lag1", f"EncajeD / {_benc}", "techo_10h − retiro_acumulado_mes(t-1): presupuesto de retiro aún disponible (M USD).", 1, "t")
     add("proporcion_usada",    f"EncajeD / {_benc}", "retiro_acum_mes(t-1) / techo_10h: fracción del techo ya utilizada (0-1+).", 1, "t")
+
+    # ── Features CC+OVN en BCR (Saldos_CCOVN.xlsx, rezago 1 día) ─────────────
+    add("ccovn_sistema_lag1",     "Saldos_CCOVN",
+        "Saldo total CC+OVN del sistema en el BCR en t-1 (USD). Disponible desde 2010.",
+        1, "t")
+    add("ccovn_bbva_lag1",        "Saldos_CCOVN",
+        "Saldo CC+OVN de BBVA en el BCR en t-1 (USD). Disponible desde 2010.",
+        1, "t")
+    add("var_ccovn_sistema_lag1", "Saldos_CCOVN",
+        "Variación diaria del saldo CC+OVN del sistema en t-1 (USD).",
+        1, "t")
+    add("var_ccovn_bbva_lag1",    "Saldos_CCOVN",
+        "Variación diaria del saldo CC+OVN de BBVA en t-1 (USD).",
+        1, "t")
+    add("bbva_share_lag1",        "Saldos_CCOVN",
+        "ccovn_bbva(t-1) / ccovn_sistema(t-1): participación de BBVA en el sistema en t-1.",
+        1, "t")
 
     # ── Target ────────────────────────────────────────────────────────────────
     add("target", "Datos bancarios", "Flujo neto = D(b, t+h) - R(b, t+h). NaN si no hay datos.", None, "t+h")
