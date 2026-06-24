@@ -123,9 +123,14 @@ BURN_IN_DIAS_HAB = 22               # warm-up MA22 al inicio de TRAIN
 # True  → mide gain(train) + block-perm(val) + SHAP(val) por fold y consolida
 # False → sin diagnóstico extra (comportamiento original)
 DIAGNOSTICO_FEATURES  = True
-DIAG_BLOCK_SIZE       = 20    # tamaño de bloque para block-permutation (preserva autocorr.)
+# h va de 2 a H_MAX_DIAS_HAB=75 → n_h = 74 filas por fecha_t.
+# block_size debe ser múltiplo de n_h para que cada bloque = exactamente 1 fecha_t
+# y la permutación solo intercambie fechas completas (unidad temporal correcta).
+# Con block_size < n_h se mezclan h-values de distintos horizontes dentro del
+# mismo día, creando combinaciones (fecha_t, h_features, target_h') imposibles.
+DIAG_BLOCK_SIZE       = H_MAX_DIAS_HAB - 1   # = 74 = n_h (h: 2..75)
 DIAG_N_REPEATS        = 3     # repeticiones de la permutación
-DIAG_PERM_MAX_SAMPLES = None  # submuestreo contiguo de VAL (None = todo)
+DIAG_PERM_MAX_SAMPLES = None  # ver _diag_block_perm_promedio; None = todo VAL
 DIAG_SHAP_MAX_SAMPLES = 800   # muestras para SHAP por cuantil
 
 # Pares cíclicos sin/cos que deben permutarse SIMULTÁNEAMENTE (mismo índice de shuffle).
@@ -224,7 +229,7 @@ FANCHART_N_SNAPSHOTS = 4   # 1 cada ~3 meses para TEST de 1 año
 # True  → corre gain / block-perm / SHAP por fold y genera los gráficos
 # False → omite el diagnóstico (más rápido)
 DIAGNOSTICO_FEATURES  = True
-DIAG_BLOCK_SIZE       = 20    # filas por bloque en la permutación (preserva autocorrelación)
+DIAG_BLOCK_SIZE       = H_MAX_DIAS_HAB - 1   # = 74 = n_h (h: 2..75); 1 bloque = 1 fecha_t
 DIAG_N_REPEATS        = 3     # repeticiones por feature para estabilizar la estimación
 DIAG_SHAP_MAX_SAMPLES = 800   # máximo de filas VAL para SHAP (None = todas)
 
@@ -2012,8 +2017,23 @@ def _diag_block_perm_promedio(modelos, X_val, y_val, cols_feat, fold_num):
     X = X_val.reset_index(drop=True)[cols_feat]
     y = np.asarray(y_val)
     if DIAG_PERM_MAX_SAMPLES is not None and len(X) > DIAG_PERM_MAX_SAMPLES:
-        X = X.iloc[:DIAG_PERM_MAX_SAMPLES].copy()
-        y = y[:DIAG_PERM_MAX_SAMPLES]
+        # Muestreo estratificado por h: evita sesgo hacia fechas tempranas o
+        # h pequeños que produce el slice contiguo iloc[:N].
+        if "h" in X.columns:
+            n_h_vals = X["h"].nunique()
+            per_h    = max(1, DIAG_PERM_MAX_SAMPLES // n_h_vals)
+            rng_sub  = np.random.default_rng(99 + fold_num)
+            idx_list = []
+            for _, grp in X.groupby("h"):
+                take = min(len(grp), per_h)
+                idx_list.append(rng_sub.choice(grp.index.values, take, replace=False))
+            idx = np.concatenate(idx_list)
+            idx.sort()   # mantener orden (fecha_t, h) para que los bloques sean contiguos
+            X = X.loc[idx].reset_index(drop=True)
+            y = y[idx]
+        else:
+            X = X.iloc[:DIAG_PERM_MAX_SAMPLES].copy()
+            y = y[:DIAG_PERM_MAX_SAMPLES]
     bs  = max(2, min(DIAG_BLOCK_SIZE, len(X) // 3))
     rng = np.random.default_rng(42 + fold_num)
     acum = pd.Series(0.0, index=cols_feat)
