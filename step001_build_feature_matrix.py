@@ -1462,29 +1462,34 @@ def build_ccovn_features(df_ccovn, peru_bday):
     Deriva features de saldos CC+OVN en el BCR a partir de Saldos_CCOVN.xlsx.
     Todas las variables usan información de t-1 (shift(1)) → sin leakage.
 
-    El índice se reexpande a días hábiles (peru_bday) con forward-fill antes de
-    calcular diff(), de modo que la variación "de un día" siempre mide el cambio
-    entre dos días hábiles consecutivos y no incluye saltos de fin de semana o
-    feriados que inflarían artificialmente la magnitud.
+    Reindexación a freq="B" (lunes-viernes) antes de diff():
+      - Los feriados peruanos (sin datos) se forward-fill desde el día previo.
+      - Los feriados de EE.UU. que NO son feriados en Perú (ej. MLK Day,
+        Presidents Day) quedan incluidos como días hábiles normales, lo que
+        es correcto porque los bancos peruanos operan esos días y el BCRP
+        reporta el saldo. No se usa peru_bday (joint PE+US) para este
+        reindex porque ese calendario los excluiría, generando NaN en la
+        matriz donde sí existen filas de fecha_t.
 
     Features generadas (todas con sufijo _lag1):
       ccovn_sistema_lag1    : saldo total del sistema en el BCR en t-1 (USD)
       ccovn_bbva_lag1       : saldo BBVA en el BCR en t-1 (USD)
-      var_ccovn_sistema_lag1: variación diaria (día hábil a día hábil) del sistema en t-1
-      var_ccovn_bbva_lag1   : variación diaria (día hábil a día hábil) de BBVA en t-1
+      var_ccovn_sistema_lag1: variación entre días hábiles consecutivos del sistema en t-1
+      var_ccovn_bbva_lag1   : variación entre días hábiles consecutivos de BBVA en t-1
       bbva_share_lag1       : ccovn_bbva / ccovn_sistema en t-1
 
-    Retorna DataFrame indexado por días hábiles (peru_bday).
+    Retorna DataFrame indexado por días lun-vie (freq="B").
     """
     if df_ccovn.empty:
         return pd.DataFrame()
 
-    # Reindexar a días hábiles: fines de semana y feriados se forward-fill
-    # (el saldo de cierre del viernes aplica hasta el siguiente día hábil)
+    # Reindexar a lun-vie: cubre feriados PE (ffill) y feriados US (incluidos
+    # como hábiles en Perú). Esto alinea con todas las fechas posibles de la
+    # matriz aunque el calendario sea PE+US.
     idx_bd = pd.bdate_range(
         start=df_ccovn.index.min(),
         end=df_ccovn.index.max(),
-        freq=peru_bday,
+        freq="B",
     )
     df_bd = df_ccovn.reindex(idx_bd).ffill()
 
@@ -1494,7 +1499,7 @@ def build_ccovn_features(df_ccovn, peru_bday):
     resultado = pd.DataFrame(index=df_bd.index)
     resultado["ccovn_sistema_lag1"]     = sis.shift(1)
     resultado["ccovn_bbva_lag1"]        = bbv.shift(1)
-    # diff() sobre idx_bd → variación entre días hábiles consecutivos (correcto)
+    # diff() sobre idx_bd → variación entre días lun-vie consecutivos (correcto)
     resultado["var_ccovn_sistema_lag1"] = sis.diff().shift(1)
     resultado["var_ccovn_bbva_lag1"]    = bbv.diff().shift(1)
     resultado["bbva_share_lag1"]        = (
