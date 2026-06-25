@@ -466,8 +466,8 @@ print("\n" + "=" * 65)
 print("  Estrategia sobreencaje BBVA")
 print("=" * 65)
 
-_UMBRAL_EXCESO_D10 = 0.20   # exceso de Avance sobre ritmo lineal en días 1-10
-_UMBRAL_DIA_LIB    = 12     # dia_liberacion_90 ≤ día 12 → alcanzó 90% muy rápido
+# Percentil de score para clasificar estrategia (top 30% = estrategia activa)
+_UMBRAL_SCORE_PCT = 0.70
 
 # Columnas temporales (se limpian al final)
 df["_am"]            = df["fecha"].dt.to_period("M")
@@ -487,26 +487,13 @@ def _met_estrat(g):
     caida = g["Avance"].max() - (g["Avance"].iloc[-1] if len(g) else np.nan)
     dlib  = g["dia_liberacion_90"].iloc[0] if len(g)    else np.nan
 
-    score = (max(exc, 0) if np.isfinite(exc) else 0.0) * 0.6 + \
-            (max(-ret / 1e9, 0) if np.isfinite(ret) else 0.0) * 0.4
-
-    estr = (
-        (np.isfinite(exc) and exc > _UMBRAL_EXCESO_D10
-         and np.isfinite(ret) and ret < 0)
-        or
-        (np.isfinite(dlib) and dlib <= _UMBRAL_DIA_LIB
-         and np.isfinite(ret) and ret < 0)
-    )
-
     return pd.Series({
-        "exceso_avance_d10":   round(exc,   3) if np.isfinite(exc)   else np.nan,
-        "cobertura_max_d10":   round(cmx,   3) if np.isfinite(cmx)   else np.nan,
-        "retiro_tardio_M":     round(ret/1e6,1) if np.isfinite(ret)  else np.nan,
-        "ritmo_encaje_tardio": round(rrit,  3) if np.isfinite(rrit)  else np.nan,
-        "caida_avance":        round(caida, 3) if np.isfinite(caida) else np.nan,
+        "exceso_avance_d10":   round(exc,    3) if np.isfinite(exc)   else np.nan,
+        "cobertura_max_d10":   round(cmx,    3) if np.isfinite(cmx)   else np.nan,
+        "retiro_tardio_M":     round(ret/1e6, 1) if np.isfinite(ret)  else np.nan,
+        "ritmo_encaje_tardio": round(rrit,   3) if np.isfinite(rrit)  else np.nan,
+        "caida_avance":        round(caida,  3) if np.isfinite(caida) else np.nan,
         "dia_liberacion_90":   dlib,
-        "score":               round(score, 4),
-        "estrategia":          estr,
     })
 
 
@@ -516,7 +503,42 @@ dm["anio"]       = dm["_am"].dt.year
 dm["mes"]        = dm["_am"].dt.month
 dm["fecha_plot"] = dm["_am"].dt.to_timestamp()
 
+# ── Diagnóstico de indicadores ─────────────────────────────────────────────────
+print("\n── Diagnóstico de indicadores (percentiles) ────────────────────")
+print(f"  {'Indicador':<28} {'n':>4}  {'P10':>8}  {'P25':>8}  "
+      f"{'P50':>8}  {'P75':>8}  {'P90':>8}")
+print(f"  {'-'*28} {'-'*4}  {'-'*8}  {'-'*8}  {'-'*8}  {'-'*8}  {'-'*8}")
+for _col, _lbl in [
+    ("exceso_avance_d10", "Exceso avance D10"),
+    ("retiro_tardio_M",   "Retiro tardío (M USD)"),
+    ("dia_liberacion_90", "Día liberación 90%"),
+    ("caida_avance",      "Caída Avance fin mes"),
+]:
+    _s = dm[_col].dropna()
+    print(f"  {_lbl:<28} {len(_s):>4}  "
+          f"{_s.quantile(.10):>8.2f}  {_s.quantile(.25):>8.2f}  "
+          f"{_s.quantile(.50):>8.2f}  {_s.quantile(.75):>8.2f}  "
+          f"{_s.quantile(.90):>8.2f}")
+
+# ── Score relativo (percentil en historial propio) ────────────────────────────
+# exceso_avance_d10: mayor = más sobreencaje temprano → rank ascendente
+# retiro_tardio_M:   más negativo = mayor salida → rank descendente (negamos)
+# dia_liberacion_90: menor día = liberó más rápido → rank descendente (negamos)
+dm["_pct_exc"] = dm["exceso_avance_d10"].rank(pct=True, na_option="keep")
+dm["_pct_ret"] = (-dm["retiro_tardio_M"]).rank(pct=True, na_option="keep")
+dm["_pct_lib"] = (-dm["dia_liberacion_90"]).rank(pct=True, na_option="keep")
+
+dm["score"] = (
+    dm["_pct_exc"].fillna(0.5) * 0.50 +
+    dm["_pct_ret"].fillna(0.5) * 0.30 +
+    dm["_pct_lib"].fillna(0.5) * 0.20
+)
+
+_umbral_score = dm["score"].quantile(_UMBRAL_SCORE_PCT)
+dm["estrategia"] = dm["score"] >= _umbral_score
+
 n_est = dm["estrategia"].sum()
+print(f"\n  Score umbral (P{_UMBRAL_SCORE_PCT*100:.0f}): {_umbral_score:.3f}")
 print(f"  Meses con estrategia detectada: {n_est} / {len(dm)} "
       f"({100 * n_est / max(len(dm), 1):.0f}%)")
 
@@ -529,17 +551,17 @@ piv_es = dm.pivot(index="anio", columns="mes", values="estrategia").sort_index()
 piv_dl = dm.pivot(index="anio", columns="mes", values="dia_liberacion_90").sort_index()
 
 _vals_fin = piv_sc.values.astype(float)
-_vmax     = float(_vals_fin[np.isfinite(_vals_fin)].max()) if np.any(np.isfinite(_vals_fin)) else 1.0
 _cmap_est = plt.cm.YlOrRd
 
 fig, ax = plt.subplots(figsize=(14, max(4, len(piv_sc) * 0.6 + 2)))
 fig.suptitle(
-    "Estrategia sobreencaje BBVA — Score por año y mes\n"
-    "Más oscuro = mayor sobreencaje temprano + retiro tardío  ·  "
-    "Borde azul = estrategia confirmada  ·  Número = día liberación 90%",
+    "Estrategia sobreencaje BBVA — Score (percentil) por año y mes\n"
+    f"Más oscuro = mayor sobreencaje temprano + retiro tardío  ·  "
+    f"Borde azul = estrategia (score ≥ P{_UMBRAL_SCORE_PCT*100:.0f})  ·  "
+    "Número = día liberación 90%",
     fontweight="bold", fontsize=10,
 )
-im = ax.imshow(_vals_fin, aspect="auto", cmap=_cmap_est, vmin=0, vmax=_vmax)
+im = ax.imshow(_vals_fin, aspect="auto", cmap=_cmap_est, vmin=0, vmax=1.0)
 ax.set_xticks(range(12))
 ax.set_xticklabels(_MESES_ABR)
 ax.set_yticks(range(len(piv_sc)))
@@ -563,7 +585,7 @@ for _i, _anio in enumerate(piv_sc.index):
             ax.add_patch(plt.Rectangle((_j - 0.5, _i - 0.5), 1, 1,
                          fill=False, edgecolor="#1565C0", linewidth=2.2))
 
-plt.colorbar(im, ax=ax, label="Score estrategia", shrink=0.75)
+plt.colorbar(im, ax=ax, label="Score (percentil 0–1)", shrink=0.75)
 ax.set_xlabel("Mes")
 ax.set_ylabel("Año")
 from matplotlib.patches import Patch as _Patch
@@ -571,7 +593,7 @@ ax.legend(handles=[
     _Patch(facecolor=_cmap_est(0.25), label="Sobreencaje leve"),
     _Patch(facecolor=_cmap_est(0.75), label="Sobreencaje intenso"),
     plt.Rectangle((0, 0), 1, 1, fill=False, edgecolor="#1565C0", lw=2,
-                  label="Estrategia confirmada"),
+                  label=f"Estrategia confirmada (score ≥ P{_UMBRAL_SCORE_PCT*100:.0f})"),
 ], loc="lower right", fontsize=7, framealpha=0.9)
 plt.tight_layout()
 _p1 = DIR_OUT / "00_heatmap_estrategia.png"
@@ -699,16 +721,25 @@ _resumen_est["frecuencia"] = _resumen_est["meses_estrategia"].apply(
 )
 
 _cols_det = ["fecha_plot", "anio", "mes", "estrategia", "score",
+             "_pct_exc", "_pct_ret", "_pct_lib",
              "exceso_avance_d10", "cobertura_max_d10", "dia_liberacion_90",
              "retiro_tardio_M", "ritmo_encaje_tardio", "caida_avance"]
 try:
     _ruta_est = DIR_OUT / "resultados_estrategia.xlsx"
     with pd.ExcelWriter(_ruta_est, engine="openpyxl") as _wr:
-        dm[_cols_det].rename(columns={"fecha_plot": "fecha"}).to_excel(
-            _wr, sheet_name="Por_mes", index=False)
+        (dm[_cols_det]
+         .rename(columns={"fecha_plot": "fecha",
+                           "_pct_exc": "pct_exceso_d10",
+                           "_pct_ret": "pct_retiro_tardio",
+                           "_pct_lib": "pct_dia_lib"})
+         .to_excel(_wr, sheet_name="Por_mes", index=False))
         _resumen_est.to_excel(_wr, sheet_name="Resumen_anual", index=False)
-        dm[dm["estrategia"]][_cols_det].rename(columns={"fecha_plot": "fecha"}).to_excel(
-            _wr, sheet_name="Meses_estrategia", index=False)
+        (dm[dm["estrategia"]][_cols_det]
+         .rename(columns={"fecha_plot": "fecha",
+                           "_pct_exc": "pct_exceso_d10",
+                           "_pct_ret": "pct_retiro_tardio",
+                           "_pct_lib": "pct_dia_lib"})
+         .to_excel(_wr, sheet_name="Meses_estrategia", index=False))
     print(f"  Guardado: {_ruta_est.name}")
 except Exception as _e:
     print(f"  AVISO: no se pudo exportar Excel — {_e}")
@@ -728,5 +759,7 @@ for _, _r in _resumen_est.sort_values("anio").iterrows():
 print(f"\n  Archivos en: {DIR_OUT}")
 print("=" * 65)
 
-# Limpiar columnas temporales
+# Limpiar columnas temporales del df diario
 df.drop(columns=["_am", "_frac_mes", "_exceso_avance", "_tipo"], inplace=True)
+# Limpiar columnas de percentil intermedias del df mensual
+dm.drop(columns=["_pct_exc", "_pct_ret", "_pct_lib"], inplace=True, errors="ignore")
