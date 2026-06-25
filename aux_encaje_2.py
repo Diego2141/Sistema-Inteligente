@@ -554,13 +554,12 @@ def _met_estrat(g):
         concentracion = np.nan
     concentrada = np.isfinite(concentracion) and concentracion >= UMBRAL_CONCENTRACION
 
-    # Sistema: retiro neto acumulado últimos 6d hábiles y mes completo (días hábiles)
+    # Sistema: retiro neto acumulado últimos 6d hábiles
     sis_6d  = late["retiro_neto_sis"].sum()    if "retiro_neto_sis" in late.columns   else np.nan
     sis_mes = g_bday["retiro_neto_sis"].sum()  if "retiro_neto_sis" in g_bday.columns else np.nan
-    # % = fracción del retiro mensual del sistema que cae en últimos 6d hábiles
-    if (np.isfinite(sis_6d) and np.isfinite(sis_mes)
-            and sis_mes < 0 and sis_6d < 0):
-        pct_sis = sis_6d / sis_mes
+    # % = mismo denominador que BBVA: mediana saldo mensual BBVA
+    if np.isfinite(sis_6d) and np.isfinite(mediana_saldo) and mediana_saldo > 0:
+        pct_sis = -sis_6d / mediana_saldo   # positivo cuando hay retiro neto
     else:
         pct_sis = np.nan
 
@@ -648,20 +647,16 @@ for _i, _anio in enumerate(piv_int.index):
         _ve = piv_est.loc[_anio, _mes]  if _mes in piv_est.columns  else False
         _vr = piv_ret.loc[_anio, _mes]  if _mes in piv_ret.columns  else np.nan
         _vp = piv_pct.loc[_anio, _mes]  if _mes in piv_pct.columns  else np.nan
-        _vc = piv_conc.loc[_anio, _mes] if _mes in piv_conc.columns else np.nan
-        _vk = piv_cond.loc[_anio, _mes] if _mes in piv_cond.columns else False
         _vs = piv_sis.loc[_anio, _mes]  if _mes in piv_sis.columns  else np.nan
         _vq = piv_sisp.loc[_anio, _mes] if _mes in piv_sisp.columns else np.nan
         _fi = float(_vi) if _vi is not None else np.nan
         _fr = float(_vr) if _vr is not None else np.nan
         _fp = float(_vp) if _vp is not None else np.nan
-        _fc = float(_vc) if (_vc is not None and _vc is not pd.NA) else np.nan
         _fs = float(_vs) if (_vs is not None and _vs is not pd.NA) else np.nan
         _fq = float(_vq) if (_vq is not None and _vq is not pd.NA) else np.nan
         if not np.isfinite(_fi):
             continue
         _ctxt = "white" if _fi > _vmax * 0.55 else "black"
-        _conc_str = f"\nc:{_fc*100:.0f}%" if np.isfinite(_fc) else ""
         if np.isfinite(_fs) and np.isfinite(_fq):
             _sis_str = f"\nSis:{_fs:,.0f} ({_fq*100:.0f}%)"
         elif np.isfinite(_fs):
@@ -669,13 +664,13 @@ for _i, _anio in enumerate(piv_int.index):
         else:
             _sis_str = ""
         if np.isfinite(_fr) and np.isfinite(_fp):
-            _lbl = f"{_fr:,.0f}\n({_fp:.0f}%){_conc_str}{_sis_str}"
+            _lbl = f"{_fr:,.0f}\n({_fp:.0f}%){_sis_str}"
         elif np.isfinite(_fr):
-            _lbl = f"{_fr:,.0f}{_conc_str}{_sis_str}"
+            _lbl = f"{_fr:,.0f}{_sis_str}"
         else:
             _lbl = ""
         ax.text(_j, _i, _lbl, ha="center", va="center",
-                fontsize=4.8, color=_ctxt, linespacing=1.2,
+                fontsize=5.0, color=_ctxt, linespacing=1.25,
                 fontweight="bold" if _ve else "normal")
         if _ve:
             ax.add_patch(plt.Rectangle((_j - 0.5, _i - 0.5), 1, 1,
@@ -733,20 +728,16 @@ for _i, _anio in enumerate(piv_int2.index):
         _ve = piv_est.loc[_anio, _mes]  if _mes in piv_est.columns  else False
         _vr = piv_ret.loc[_anio, _mes]  if _mes in piv_ret.columns  else np.nan
         _vp = piv_pct2.loc[_anio, _mes] if _mes in piv_pct2.columns else np.nan
-        _vc = piv_conc.loc[_anio, _mes] if _mes in piv_conc.columns else np.nan
-        _vk = piv_cond.loc[_anio, _mes] if _mes in piv_cond.columns else False
         _vs = piv_sis.loc[_anio, _mes]  if _mes in piv_sis.columns  else np.nan
         _vq = piv_sisp.loc[_anio, _mes] if _mes in piv_sisp.columns else np.nan
         _fi = float(_vi) if _vi is not None else np.nan
         _fr = float(_vr) if _vr is not None else np.nan
         _fp = float(_vp) if _vp is not None else np.nan
-        _fc = float(_vc) if (_vc is not None and _vc is not pd.NA) else np.nan
         _fs = float(_vs) if (_vs is not None and _vs is not pd.NA) else np.nan
         _fq = float(_vq) if (_vq is not None and _vq is not pd.NA) else np.nan
         if not np.isfinite(_fi):
             continue
         _ctxt = "white" if _fi > _vmax2 * 0.55 else "black"
-        _conc_str = f"\nc:{_fc*100:.0f}%" if np.isfinite(_fc) else ""
         if np.isfinite(_fs) and np.isfinite(_fq):
             _sis_str = f"\nSis:{_fs:,.0f} ({_fq*100:.0f}%)"
         elif np.isfinite(_fs):
@@ -754,13 +745,13 @@ for _i, _anio in enumerate(piv_int2.index):
         else:
             _sis_str = ""
         if np.isfinite(_fr) and np.isfinite(_fp):
-            _lbl = f"{_fr:,.0f}\n({_fp:.0f}%){_conc_str}{_sis_str}"
+            _lbl = f"{_fr:,.0f}\n({_fp:.0f}%){_sis_str}"
         elif np.isfinite(_fr):
-            _lbl = f"{_fr:,.0f}{_conc_str}{_sis_str}"
+            _lbl = f"{_fr:,.0f}{_sis_str}"
         else:
             _lbl = ""
         ax2.text(_j, _i, _lbl, ha="center", va="center",
-                 fontsize=4.8, color=_ctxt, linespacing=1.2,
+                 fontsize=5.0, color=_ctxt, linespacing=1.25,
                  fontweight="bold" if _ve else "normal")
         if _ve:
             ax2.add_patch(plt.Rectangle((_j - 0.5, _i - 0.5), 1, 1,
