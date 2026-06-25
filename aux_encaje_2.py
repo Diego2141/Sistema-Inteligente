@@ -519,10 +519,13 @@ _MESES_ABR = ["Ene", "Feb", "Mar", "Abr", "May", "Jun",
 
 # Intensidad normalizada: retiro / umbral  (> 1 = estrategia activada)
 dm["_intensidad"] = (-dm["retiro_acum_5d_M"] / dm["umbral_M"]).clip(lower=0)
+# Porcentaje: retiro / mediana saldo del mes
+dm["_pct"] = (-dm["retiro_acum_5d_M"] / dm["mediana_saldo_M"].replace(0, np.nan) * 100).clip(lower=0)
 
 piv_int = dm.pivot(index="anio", columns="mes", values="_intensidad").sort_index()
 piv_est = dm.pivot(index="anio", columns="mes", values="estrategia").sort_index()
 piv_ret = dm.pivot(index="anio", columns="mes", values="retiro_acum_5d_M").sort_index()
+piv_pct = dm.pivot(index="anio", columns="mes", values="_pct").sort_index()
 
 _vals = piv_int.values.astype(float)
 _vmax = float(np.nanmax(_vals)) if np.any(np.isfinite(_vals)) else 2.0
@@ -532,7 +535,7 @@ fig, ax = plt.subplots(figsize=(14, max(4, len(piv_int) * 0.6 + 2)))
 fig.suptitle(
     f"Estrategia sobreencaje BBVA — Intensidad del retiro por año y mes\n"
     f"Intensidad = retiro 5d / ({UMBRAL_SALDO*100:.0f}% × mediana saldo)  ·  "
-    "> 1 = estrategia activada (borde azul)  ·  Número = retiro en M USD",
+    "> 1 = estrategia activada (borde azul)  ·  Celda: retiro M USD / % mediana saldo",
     fontweight="bold", fontsize=10,
 )
 im = ax.imshow(_vals, aspect="auto", cmap=_cmap, vmin=0, vmax=_vmax)
@@ -547,14 +550,21 @@ for _i, _anio in enumerate(piv_int.index):
         _vi = piv_int.loc[_anio, _mes] if _mes in piv_int.columns else np.nan
         _ve = piv_est.loc[_anio, _mes] if _mes in piv_est.columns else False
         _vr = piv_ret.loc[_anio, _mes] if _mes in piv_ret.columns else np.nan
+        _vp = piv_pct.loc[_anio, _mes] if _mes in piv_pct.columns else np.nan
         _fi = float(_vi) if _vi is not None else np.nan
         _fr = float(_vr) if _vr is not None else np.nan
+        _fp = float(_vp) if _vp is not None else np.nan
         if not np.isfinite(_fi):
             continue
         _ctxt = "white" if _fi > _vmax * 0.55 else "black"
-        _lbl  = f"{_fr:,.0f}" if np.isfinite(_fr) else ""
+        if np.isfinite(_fr) and np.isfinite(_fp):
+            _lbl = f"{_fr:,.0f}\n({_fp:.0f}%)"
+        elif np.isfinite(_fr):
+            _lbl = f"{_fr:,.0f}"
+        else:
+            _lbl = ""
         ax.text(_j, _i, _lbl, ha="center", va="center",
-                fontsize=6.5, color=_ctxt,
+                fontsize=5.8, color=_ctxt, linespacing=1.35,
                 fontweight="bold" if _ve else "normal")
         if _ve:
             ax.add_patch(plt.Rectangle((_j - 0.5, _i - 0.5), 1, 1,
@@ -651,4 +661,4 @@ print(f"\n  Archivos en: {DIR_OUT}")
 
 # Limpiar columnas temporales
 df.drop(columns=["_am"], inplace=True)
-dm.drop(columns=["_intensidad"], inplace=True, errors="ignore")
+dm.drop(columns=["_intensidad", "_pct"], inplace=True, errors="ignore")
