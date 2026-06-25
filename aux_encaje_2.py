@@ -473,9 +473,11 @@ print("  Estrategia sobreencaje BBVA")
 print("=" * 65)
 
 # Fracción de la mediana del saldo mensual que define el umbral (adaptable)
-UMBRAL_SALDO        = 0.50
-# % mínimo del retiro 15d que debe concentrarse en los últimos 6d hábiles
+UMBRAL_SALDO         = 0.50
+# % mínimo del retiro 15d que debe concentrarse en los últimos N días hábiles
 UMBRAL_CONCENTRACION = 0.90
+# Ventana de días hábiles al cierre del mes (aplica a BBVA y Sistema)
+N_DIAS_HABILES       = 6
 
 # ── Retiro neto diario del SISTEMA (toda la banca local) ──────────────────────
 # Porcentaje = retiro sistema últimos 6d / retiro sistema mes completo
@@ -534,8 +536,8 @@ def _met_estrat(g):
     g      = g.sort_values("fecha")
     # Solo días hábiles: lunes-viernes, sin feriados Perú ni USA
     g_bday = g[g["_is_bday"]] if "_is_bday" in g.columns else g
-    late   = g_bday.tail(6)   # últimos 6 días hábiles del mes
-    late15 = g_bday.tail(15)  # últimos 15 días hábiles del mes
+    late   = g_bday.tail(N_DIAS_HABILES)   # últimos N días hábiles del mes
+    late15 = g_bday.tail(15)               # últimos 15 días hábiles del mes
 
     retiro_acum_6d  = late["retiro_neto"].sum()  if len(late)   else np.nan
     retiro_acum_15d = late15["retiro_neto"].sum() if len(late15) else np.nan
@@ -554,16 +556,9 @@ def _met_estrat(g):
         concentracion = np.nan
     concentrada = np.isfinite(concentracion) and concentracion >= UMBRAL_CONCENTRACION
 
-    # Sistema: retiro neto acumulado últimos 6d hábiles
+    # Sistema: retiro neto acumulado últimos N días hábiles
     sis_6d  = late["retiro_neto_sis"].sum()    if "retiro_neto_sis" in late.columns   else np.nan
     sis_mes = g_bday["retiro_neto_sis"].sum()  if "retiro_neto_sis" in g_bday.columns else np.nan
-    # % = mismo denominador que BBVA: mediana saldo mensual BBVA
-    # Solo aplica cuando el sistema tiene retiro neto (sis_6d < 0)
-    if (np.isfinite(sis_6d) and np.isfinite(mediana_saldo)
-            and mediana_saldo > 0 and sis_6d < 0):
-        pct_sis = -sis_6d / mediana_saldo
-    else:
-        pct_sis = np.nan
 
     return pd.Series({
         "retiro_acum_6d_M":  round(retiro_acum_6d  / 1e6, 1) if np.isfinite(retiro_acum_6d)  else np.nan,
@@ -575,7 +570,6 @@ def _met_estrat(g):
         "concentrada":       concentrada,
         "sis_retiro_6d_M":   round(sis_6d  / 1e6, 1) if np.isfinite(sis_6d)  else np.nan,
         "sis_retiro_mes_M":  round(sis_mes / 1e6, 1) if np.isfinite(sis_mes) else np.nan,
-        "sis_pct_conc":      round(pct_sis, 4)        if np.isfinite(pct_sis) else np.nan,
     })
 
 
@@ -613,8 +607,14 @@ _MESES_ABR = ["Ene", "Feb", "Mar", "Abr", "May", "Jun",
 
 # Intensidad normalizada: retiro / umbral  (> 1 = estrategia activada)
 dm["_intensidad"] = (-dm["retiro_acum_6d_M"] / dm["umbral_M"]).clip(lower=0)
-# Porcentaje: retiro / mediana saldo del mes
-dm["_pct"] = (-dm["retiro_acum_6d_M"] / dm["mediana_saldo_M"].replace(0, np.nan) * 100).clip(lower=0)
+# Porcentaje BBVA: share del retiro BBVA sobre retiro total del sistema
+# (solo cuando ambos son retiro neto)
+_mask_share = (dm["retiro_acum_6d_M"] < 0) & (dm["sis_retiro_6d_M"] < 0)
+dm["_pct"] = np.where(
+    _mask_share,
+    dm["retiro_acum_6d_M"] / dm["sis_retiro_6d_M"].replace(0, np.nan) * 100,
+    np.nan,
+)
 
 piv_int  = dm.pivot(index="anio", columns="mes", values="_intensidad").sort_index()
 piv_est  = dm.pivot(index="anio", columns="mes", values="estrategia").sort_index()
@@ -623,7 +623,6 @@ piv_pct  = dm.pivot(index="anio", columns="mes", values="_pct").sort_index()
 piv_conc = dm.pivot(index="anio", columns="mes", values="concentracion").sort_index()
 piv_cond = dm.pivot(index="anio", columns="mes", values="concentrada").sort_index()
 piv_sis  = dm.pivot(index="anio", columns="mes", values="sis_retiro_6d_M").sort_index()
-piv_sisp = dm.pivot(index="anio", columns="mes", values="sis_pct_conc").sort_index()
 
 _vals = piv_int.values.astype(float)
 _vmax = float(np.nanmax(_vals)) if np.any(np.isfinite(_vals)) else 2.0
@@ -632,8 +631,8 @@ _cmap = plt.cm.YlOrRd
 fig, ax = plt.subplots(figsize=(14, max(4, len(piv_int) * 0.6 + 2)))
 fig.suptitle(
     f"Estrategia sobreencaje BBVA — Intensidad del retiro por año y mes\n"
-    f"Intensidad = retiro 6d / ({UMBRAL_SALDO*100:.0f}% × mediana saldo)  ·  "
-    "> 1 = estrategia activada (borde azul)  ·  Celda: retiro M USD / % mediana saldo",
+    f"Intensidad = retiro {N_DIAS_HABILES}d / ({UMBRAL_SALDO*100:.0f}% × mediana saldo)  ·  "
+    f"> 1 = estrategia activada (borde azul)  ·  Celda: retiro M USD / (%) share BBVA del sistema",
     fontweight="bold", fontsize=10,
 )
 im = ax.imshow(_vals, aspect="auto", cmap=_cmap, vmin=0, vmax=_vmax)
@@ -650,16 +649,14 @@ for _i, _anio in enumerate(piv_int.index):
         _vr = piv_ret.loc[_anio, _mes]  if _mes in piv_ret.columns  else np.nan
         _vp = piv_pct.loc[_anio, _mes]  if _mes in piv_pct.columns  else np.nan
         _vs = piv_sis.loc[_anio, _mes]  if _mes in piv_sis.columns  else np.nan
-        _vq = piv_sisp.loc[_anio, _mes] if _mes in piv_sisp.columns else np.nan
         _fi = float(_vi) if _vi is not None else np.nan
         _fr = float(_vr) if _vr is not None else np.nan
-        _fp = float(_vp) if _vp is not None else np.nan
+        _fp = float(_vp) if (_vp is not None and _vp is not pd.NA) else np.nan
         _fs = float(_vs) if (_vs is not None and _vs is not pd.NA) else np.nan
-        _fq = float(_vq) if (_vq is not None and _vq is not pd.NA) else np.nan
         if not np.isfinite(_fi):
             continue
         _ctxt = "white" if _fi > _vmax * 0.55 else "black"
-        # BBVA — parte superior de la celda
+        # BBVA — parte superior: monto + (% share del sistema)
         if np.isfinite(_fr) and np.isfinite(_fp):
             _bbva_lbl = f"{_fr:,.0f}\n({_fp:.0f}%)"
         elif np.isfinite(_fr):
@@ -670,13 +667,10 @@ for _i, _anio in enumerate(piv_int.index):
             ax.text(_j, _i - 0.14, _bbva_lbl, ha="center", va="center",
                     fontsize=5.3, color=_ctxt, linespacing=1.2,
                     fontweight="bold" if _ve else "normal")
-        # Sistema — parte inferior de la celda
+        # Sistema — parte inferior: solo monto
         if np.isfinite(_fs):
-            _sis_lbl = (f"Sis:{_fs:,.0f} ({_fq*100:.0f}%)"
-                        if np.isfinite(_fq) else f"Sis:{_fs:,.0f}")
-            ax.text(_j, _i + 0.30, _sis_lbl, ha="center", va="center",
-                    fontsize=4.5, color=_ctxt, linespacing=1.1,
-                    style="italic")
+            ax.text(_j, _i + 0.30, f"Sis:{_fs:,.0f}", ha="center", va="center",
+                    fontsize=4.5, color=_ctxt, style="italic")
         if _ve:
             ax.add_patch(plt.Rectangle((_j - 0.5, _i - 0.5), 1, 1,
                          fill=False, edgecolor="#1565C0", linewidth=2.2))
@@ -704,8 +698,14 @@ print(f"\n  Guardado: {_p1.name}")
 dm_s = dm.sort_values("fecha_plot").reset_index(drop=True)
 dm_s["_saldo_prev_M"] = dm_s["mediana_saldo_M"].shift(1).fillna(dm_s["mediana_saldo_M"])
 
-dm_s["_int_prev"]  = (-dm_s["retiro_acum_6d_M"] / (UMBRAL_SALDO * dm_s["_saldo_prev_M"].replace(0, np.nan))).clip(lower=0)
-dm_s["_pct_prev"]  = (-dm_s["retiro_acum_6d_M"] / dm_s["_saldo_prev_M"].replace(0, np.nan) * 100).clip(lower=0)
+dm_s["_int_prev"] = (-dm_s["retiro_acum_6d_M"] / (UMBRAL_SALDO * dm_s["_saldo_prev_M"].replace(0, np.nan))).clip(lower=0)
+# % = share BBVA / sistema (igual que heatmap 1)
+_mask_share2 = (dm_s["retiro_acum_6d_M"] < 0) & (dm_s["sis_retiro_6d_M"] < 0)
+dm_s["_pct_prev"] = np.where(
+    _mask_share2,
+    dm_s["retiro_acum_6d_M"] / dm_s["sis_retiro_6d_M"].replace(0, np.nan) * 100,
+    np.nan,
+)
 
 piv_int2 = dm_s.pivot(index="anio", columns="mes", values="_int_prev").sort_index()
 piv_pct2 = dm_s.pivot(index="anio", columns="mes", values="_pct_prev").sort_index()
@@ -716,8 +716,8 @@ _vmax2 = float(np.nanmax(_vals2)) if np.any(np.isfinite(_vals2)) else 2.0
 fig2, ax2 = plt.subplots(figsize=(14, max(4, len(piv_int2) * 0.6 + 2)))
 fig2.suptitle(
     f"Estrategia sobreencaje BBVA — Intensidad usando saldo del mes PREVIO\n"
-    f"Intensidad = retiro 6d / ({UMBRAL_SALDO*100:.0f}% × mediana saldo mes anterior)  ·  "
-    "> 1 = estrategia activada (borde azul)  ·  Celda: retiro M USD / % saldo previo",
+    f"Intensidad = retiro {N_DIAS_HABILES}d / ({UMBRAL_SALDO*100:.0f}% × mediana saldo mes anterior)  ·  "
+    f"> 1 = estrategia activada (borde azul)  ·  Celda: retiro M USD / (%) share BBVA del sistema",
     fontweight="bold", fontsize=10,
 )
 im2 = ax2.imshow(_vals2, aspect="auto", cmap=_cmap, vmin=0, vmax=_vmax2)
@@ -734,16 +734,14 @@ for _i, _anio in enumerate(piv_int2.index):
         _vr = piv_ret.loc[_anio, _mes]  if _mes in piv_ret.columns  else np.nan
         _vp = piv_pct2.loc[_anio, _mes] if _mes in piv_pct2.columns else np.nan
         _vs = piv_sis.loc[_anio, _mes]  if _mes in piv_sis.columns  else np.nan
-        _vq = piv_sisp.loc[_anio, _mes] if _mes in piv_sisp.columns else np.nan
         _fi = float(_vi) if _vi is not None else np.nan
         _fr = float(_vr) if _vr is not None else np.nan
-        _fp = float(_vp) if _vp is not None else np.nan
+        _fp = float(_vp) if (_vp is not None and _vp is not pd.NA) else np.nan
         _fs = float(_vs) if (_vs is not None and _vs is not pd.NA) else np.nan
-        _fq = float(_vq) if (_vq is not None and _vq is not pd.NA) else np.nan
         if not np.isfinite(_fi):
             continue
         _ctxt = "white" if _fi > _vmax2 * 0.55 else "black"
-        # BBVA — parte superior de la celda
+        # BBVA — parte superior: monto + (% share del sistema)
         if np.isfinite(_fr) and np.isfinite(_fp):
             _bbva_lbl = f"{_fr:,.0f}\n({_fp:.0f}%)"
         elif np.isfinite(_fr):
@@ -754,13 +752,10 @@ for _i, _anio in enumerate(piv_int2.index):
             ax2.text(_j, _i - 0.14, _bbva_lbl, ha="center", va="center",
                      fontsize=5.3, color=_ctxt, linespacing=1.2,
                      fontweight="bold" if _ve else "normal")
-        # Sistema — parte inferior de la celda
+        # Sistema — parte inferior: solo monto
         if np.isfinite(_fs):
-            _sis_lbl = (f"Sis:{_fs:,.0f} ({_fq*100:.0f}%)"
-                        if np.isfinite(_fq) else f"Sis:{_fs:,.0f}")
-            ax2.text(_j, _i + 0.30, _sis_lbl, ha="center", va="center",
-                     fontsize=4.5, color=_ctxt, linespacing=1.1,
-                     style="italic")
+            ax2.text(_j, _i + 0.30, f"Sis:{_fs:,.0f}", ha="center", va="center",
+                     fontsize=4.5, color=_ctxt, style="italic")
         if _ve:
             ax2.add_patch(plt.Rectangle((_j - 0.5, _i - 0.5), 1, 1,
                           fill=False, edgecolor="#1565C0", linewidth=2.2))
@@ -832,10 +827,11 @@ try:
              "retiro_acum_6d_M", "retiro_acum_15d_M",
              "mediana_saldo_M", "umbral_M",
              "concentracion", "concentrada",
-             "sis_retiro_6d_M", "sis_retiro_mes_M", "sis_pct_conc"]]
+             "sis_retiro_6d_M", "sis_retiro_mes_M"]]
+         .assign(bbva_share_sis=dm["_pct"].round(1))
          .rename(columns={"_am": "mes_periodo",
-                          "concentracion": "conc_5d_vs_15d",
-                          "sis_pct_conc":  "sis_conc_5d_vs_mes"})
+                          "concentracion":   "conc_6d_vs_15d",
+                          "bbva_share_sis":  "bbva_pct_del_sistema"})
          .to_excel(_wr, sheet_name="Por_mes", index=False))
         _res.rename(columns={"meses_datos":  "meses_con_datos",
                              "meses_estrat": "meses_estrategia"}).to_excel(
