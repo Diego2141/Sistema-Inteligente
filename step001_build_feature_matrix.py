@@ -1457,7 +1457,7 @@ def build_encaje_features(df_encaje, peru_bday):
 
 
 # 5d. Features CC+OVN en BCR (Saldos_CCOVN.xlsx, rezago 1 día)
-def build_ccovn_features(df_ccovn, peru_bday):
+def build_ccovn_features(df_ccovn, peru_bday, flujo_sistema=None):
     """
     Deriva features de saldos CC+OVN en el BCR a partir de Saldos_CCOVN.xlsx.
     Todas las variables usan información de t-1 (shift(1)) → sin leakage.
@@ -1471,12 +1471,24 @@ def build_ccovn_features(df_ccovn, peru_bday):
         reindex porque ese calendario los excluiría, generando NaN en la
         matriz donde sí existen filas de fecha_t.
 
+    Parámetros:
+      flujo_sistema : pd.Series opcional (D-R del sistema, indexada por fecha).
+                      Si se provee, se calcula residuo_ccovn_lag1.
+
     Features generadas (todas con sufijo _lag1):
-      ccovn_sistema_lag1    : saldo total del sistema en el BCR en t-1 (USD)
-      ccovn_bbva_lag1       : saldo BBVA en el BCR en t-1 (USD)
-      var_ccovn_sistema_lag1: variación entre días hábiles consecutivos del sistema en t-1
-      var_ccovn_bbva_lag1   : variación entre días hábiles consecutivos de BBVA en t-1
-      bbva_share_lag1       : ccovn_bbva / ccovn_sistema en t-1
+      ccovn_sistema_lag1        : saldo total del sistema en el BCR en t-1 (USD)
+      ccovn_bbva_lag1           : saldo BBVA en el BCR en t-1 (USD)
+      var_ccovn_sistema_lag1    : variación entre días hábiles consecutivos del sistema en t-1
+      var_ccovn_bbva_lag1       : variación entre días hábiles consecutivos de BBVA en t-1
+      bbva_share_lag1           : ccovn_bbva / ccovn_sistema en t-1
+      var_ccovn_bbva_exceso_lag1: Δsaldo_bbva - bbva_share×Δsaldo_sistema en t-1
+                                  (componente idiosincrático de BBVA, ortogonal al sistema)
+      ccovn_vs_dia_mes_lag1     : saldo_sistema(t-1) - media_historica[rango_dia_habil_mes]
+                                  (desviación respecto al nivel estacional esperado para ese
+                                  puesto del mes: elimina estacionalidad intramonth)
+      residuo_ccovn_lag1        : Δsaldo_sistema(t-1) - flujo_neto_sistema(t-1)
+                                  (error de la identidad Δsaldo≈flujo; solo si flujo_sistema
+                                  no es None)
 
     Retorna DataFrame indexado por días lun-vie (freq="B").
     """
@@ -1502,9 +1514,52 @@ def build_ccovn_features(df_ccovn, peru_bday):
     # diff() sobre idx_bd → variación entre días lun-vie consecutivos (correcto)
     resultado["var_ccovn_sistema_lag1"] = sis.diff().shift(1)
     resultado["var_ccovn_bbva_lag1"]    = bbv.diff().shift(1)
-    resultado["bbva_share_lag1"]        = (
-        bbv / sis.replace(0, np.nan)
+    share = bbv / sis.replace(0, np.nan)
+    resultado["bbva_share_lag1"]        = share.shift(1)
+
+    # ── var_ccovn_bbva_exceso_lag1 ───────────────────────────────────────────
+    # Componente idiosincrático de BBVA en la variación diaria del saldo:
+    #   exceso = Δsaldo_bbva - bbva_share × Δsaldo_sistema
+    # Mide cuánto se apartó BBVA del comportamiento proporcional al sistema.
+    # Ortogonal a la variación sistémica → señal específica del banco.
+    resultado["var_ccovn_bbva_exceso_lag1"] = (
+        bbv.diff() - share * sis.diff()
     ).shift(1)
+
+    # ── ccovn_vs_dia_mes_lag1 ────────────────────────────────────────────────
+    # Desviación del saldo del sistema respecto a su media histórica para ese
+    # mismo puesto (rango) dentro del mes hábil:
+    #   rango = 1 si es el 1er día hábil del mes, 2 si es el 2do, etc.
+    #   media_por_rango = promedio de saldo_sistema para todas las observaciones
+    #                     con el mismo rango, a lo largo de la historia completa.
+    #   ccovn_vs_dia_mes = saldo_sistema - media_por_rango
+    # Elimina el patrón estacional intramonth (ingresos inicio / retiros fin).
+    # XGBoost ya tiene dia_habil_del_mes como feature; esta variable aporta
+    # la desviación INESPERADA respecto a ese patrón estacional.
+    rango_dia = (
+        pd.Series(np.arange(len(df_bd)), index=df_bd.index)
+        .groupby(df_bd.index.to_period("M"))
+        .transform(lambda x: np.arange(1, len(x) + 1))
+    )
+    media_por_rango  = sis.groupby(rango_dia).transform("mean")
+    resultado["ccovn_vs_dia_mes_lag1"] = (sis - media_por_rango).shift(1)
+
+    # ── residuo_ccovn_lag1 ───────────────────────────────────────────────────
+    # Error de la identidad Δsaldo_sistema ≈ flujo_neto_sistema:
+    #   residuo = Δsaldo_sistema - flujo_neto_sistema
+    # Captura variación en el saldo del BCR no explicada por los flujos D-R
+    # reportados (diferencias de timing, componentes no observados, etc.).
+    # Para horizontes cortos actúa como señal de reversión; si residuo > 0,
+    # el saldo cayó más de lo que justifican los flujos → corrección esperada.
+    if flujo_sistema is not None and not flujo_sistema.empty:
+        flujo_bd = flujo_sistema.reindex(idx_bd).ffill()
+        resultado["residuo_ccovn_lag1"] = (sis.diff() - flujo_bd).shift(1)
+        n_res = resultado["residuo_ccovn_lag1"].notna().sum()
+        logger.info(f"  build_ccovn_features: residuo_ccovn_lag1 calculado "
+                    f"({n_res:,} filas válidas)")
+    else:
+        logger.info("  build_ccovn_features: flujo_sistema no disponible — "
+                    "residuo_ccovn_lag1 omitido")
 
     n_val = resultado["ccovn_sistema_lag1"].notna().sum()
     logger.info(f"  build_ccovn_features: {n_val:,} filas válidas en ccovn_sistema_lag1")
@@ -1943,9 +1998,17 @@ def build_full_matrix(
     df_encaje = load_encaje_data(params)
     encaje_feat = build_encaje_features(df_encaje, peru_bday)
 
-    # Pre-calcular features CC+OVN (todos los bancos; sistémico + BBVA)
+    # Pre-calcular features CC+OVN (todos los bancos; sistémico + BBVA).
+    # flujo_neto_sistema = D_SISTEMA - R_SISTEMA, necesario para residuo_ccovn_lag1.
     df_ccovn   = load_ccovn_data(params)
-    ccovn_feat = build_ccovn_features(df_ccovn, peru_bday)
+    flujo_neto_sistema = pd.Series(dtype=float)
+    if not df_bancarios.empty:
+        _r = f"{NOMBRE_SISTEMA}_R"
+        _d = f"{NOMBRE_SISTEMA}_D"
+        if _r in df_bancarios.columns and _d in df_bancarios.columns:
+            flujo_neto_sistema = df_bancarios[_d] - df_bancarios[_r]
+    ccovn_feat = build_ccovn_features(df_ccovn, peru_bday,
+                                      flujo_sistema=flujo_neto_sistema)
 
     # Pre-computar HMM expanding SOLO para SISTEMA (régimen sistémico, no por banco)
     # El mismo hmm_estado se aplica a todos los bancos individuales.
@@ -2206,6 +2269,21 @@ def build_data_dictionary(params):
         1, "t")
     add("bbva_share_lag1",        "Saldos_CCOVN",
         "ccovn_bbva(t-1) / ccovn_sistema(t-1): participación de BBVA en el sistema en t-1.",
+        1, "t")
+    add("var_ccovn_bbva_exceso_lag1", "Saldos_CCOVN",
+        "Δsaldo_bbva(t-1) − bbva_share(t-1)×Δsaldo_sistema(t-1): componente "
+        "idiosincrático de BBVA en la variación diaria del saldo. "
+        "Ortogonal a la variación sistémica.",
+        1, "t")
+    add("ccovn_vs_dia_mes_lag1",  "Saldos_CCOVN",
+        "saldo_sistema(t-1) − media_historica[rango_dia_habil_del_mes]: "
+        "desviación del saldo respecto al nivel estacional esperado para ese "
+        "puesto del mes hábil. Elimina la estacionalidad intramonth.",
+        1, "t")
+    add("residuo_ccovn_lag1",     "Saldos_CCOVN + Datos bancarios",
+        "Δsaldo_sistema(t-1) − flujo_neto_sistema(t-1): error de la identidad "
+        "Δsaldo≈flujo. Señal de reversión para horizontes cortos. "
+        "Solo disponible si flujo_neto_sistema está en bancarios.",
         1, "t")
 
     # ── Target ────────────────────────────────────────────────────────────────
