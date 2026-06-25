@@ -607,22 +607,24 @@ _MESES_ABR = ["Ene", "Feb", "Mar", "Abr", "May", "Jun",
 
 # Intensidad normalizada: retiro / umbral  (> 1 = estrategia activada)
 dm["_intensidad"] = (-dm["retiro_acum_6d_M"] / dm["umbral_M"]).clip(lower=0)
-# Porcentaje BBVA: share del retiro BBVA sobre retiro total del sistema
-# (solo cuando ambos son retiro neto)
-_mask_share = (dm["retiro_acum_6d_M"] < 0) & (dm["sis_retiro_6d_M"] < 0)
-dm["_pct"] = np.where(
-    _mask_share,
+# % BBVA: retiro BBVA / mediana saldo mensual
+dm["_pct"] = (-dm["retiro_acum_6d_M"] / dm["mediana_saldo_M"].replace(0, np.nan) * 100).clip(lower=0)
+# % Sistema en celda: BBVA / Sistema (cuánto representa BBVA del retiro del sistema)
+_mask_ratio = (dm["retiro_acum_6d_M"] < 0) & (dm["sis_retiro_6d_M"] < 0)
+dm["_sis_ratio"] = np.where(
+    _mask_ratio,
     dm["retiro_acum_6d_M"] / dm["sis_retiro_6d_M"].replace(0, np.nan) * 100,
     np.nan,
 )
 
-piv_int  = dm.pivot(index="anio", columns="mes", values="_intensidad").sort_index()
-piv_est  = dm.pivot(index="anio", columns="mes", values="estrategia").sort_index()
-piv_ret  = dm.pivot(index="anio", columns="mes", values="retiro_acum_6d_M").sort_index()
-piv_pct  = dm.pivot(index="anio", columns="mes", values="_pct").sort_index()
-piv_conc = dm.pivot(index="anio", columns="mes", values="concentracion").sort_index()
-piv_cond = dm.pivot(index="anio", columns="mes", values="concentrada").sort_index()
-piv_sis  = dm.pivot(index="anio", columns="mes", values="sis_retiro_6d_M").sort_index()
+piv_int      = dm.pivot(index="anio", columns="mes", values="_intensidad").sort_index()
+piv_est      = dm.pivot(index="anio", columns="mes", values="estrategia").sort_index()
+piv_ret      = dm.pivot(index="anio", columns="mes", values="retiro_acum_6d_M").sort_index()
+piv_pct      = dm.pivot(index="anio", columns="mes", values="_pct").sort_index()
+piv_conc     = dm.pivot(index="anio", columns="mes", values="concentracion").sort_index()
+piv_cond     = dm.pivot(index="anio", columns="mes", values="concentrada").sort_index()
+piv_sis      = dm.pivot(index="anio", columns="mes", values="sis_retiro_6d_M").sort_index()
+piv_sis_rat  = dm.pivot(index="anio", columns="mes", values="_sis_ratio").sort_index()
 
 _vals = piv_int.values.astype(float)
 _vmax = float(np.nanmax(_vals)) if np.any(np.isfinite(_vals)) else 2.0
@@ -632,7 +634,7 @@ fig, ax = plt.subplots(figsize=(14, max(4, len(piv_int) * 0.6 + 2)))
 fig.suptitle(
     f"Estrategia sobreencaje BBVA — Intensidad del retiro por año y mes\n"
     f"Intensidad = retiro {N_DIAS_HABILES}d / ({UMBRAL_SALDO*100:.0f}% × mediana saldo)  ·  "
-    f"> 1 = estrategia activada (borde azul)  ·  Celda: retiro M USD / (%) share BBVA del sistema",
+    f"> 1 = estrategia activada (borde azul)  ·  Celda: BBVA retiro / (% saldo)  ·  Sis: monto (% BBVA/Sis)",
     fontweight="bold", fontsize=10,
 )
 im = ax.imshow(_vals, aspect="auto", cmap=_cmap, vmin=0, vmax=_vmax)
@@ -648,15 +650,17 @@ for _i, _anio in enumerate(piv_int.index):
         _ve = piv_est.loc[_anio, _mes]  if _mes in piv_est.columns  else False
         _vr = piv_ret.loc[_anio, _mes]  if _mes in piv_ret.columns  else np.nan
         _vp = piv_pct.loc[_anio, _mes]  if _mes in piv_pct.columns  else np.nan
-        _vs = piv_sis.loc[_anio, _mes]  if _mes in piv_sis.columns  else np.nan
-        _fi = float(_vi) if _vi is not None else np.nan
-        _fr = float(_vr) if _vr is not None else np.nan
-        _fp = float(_vp) if (_vp is not None and _vp is not pd.NA) else np.nan
-        _fs = float(_vs) if (_vs is not None and _vs is not pd.NA) else np.nan
+        _vs = piv_sis.loc[_anio, _mes]     if _mes in piv_sis.columns     else np.nan
+        _vsr = piv_sis_rat.loc[_anio, _mes] if _mes in piv_sis_rat.columns else np.nan
+        _fi  = float(_vi)  if _vi  is not None else np.nan
+        _fr  = float(_vr)  if _vr  is not None else np.nan
+        _fp  = float(_vp)  if (_vp  is not None and _vp  is not pd.NA) else np.nan
+        _fs  = float(_vs)  if (_vs  is not None and _vs  is not pd.NA) else np.nan
+        _fsr = float(_vsr) if (_vsr is not None and _vsr is not pd.NA) else np.nan
         if not np.isfinite(_fi):
             continue
         _ctxt = "white" if _fi > _vmax * 0.55 else "black"
-        # BBVA — parte superior: monto + (% share del sistema)
+        # BBVA — parte superior: monto + (% mediana saldo)
         if np.isfinite(_fr) and np.isfinite(_fp):
             _bbva_lbl = f"{_fr:,.0f}\n({_fp:.0f}%)"
         elif np.isfinite(_fr):
@@ -667,9 +671,11 @@ for _i, _anio in enumerate(piv_int.index):
             ax.text(_j, _i - 0.14, _bbva_lbl, ha="center", va="center",
                     fontsize=5.3, color=_ctxt, linespacing=1.2,
                     fontweight="bold" if _ve else "normal")
-        # Sistema — parte inferior: solo monto
+        # Sistema — parte inferior: monto + (% BBVA/Sistema)
         if np.isfinite(_fs):
-            ax.text(_j, _i + 0.30, f"Sis:{_fs:,.0f}", ha="center", va="center",
+            _sis_lbl = (f"Sis:{_fs:,.0f} ({_fsr:.0f}%)"
+                        if np.isfinite(_fsr) else f"Sis:{_fs:,.0f}")
+            ax.text(_j, _i + 0.30, _sis_lbl, ha="center", va="center",
                     fontsize=4.5, color=_ctxt, style="italic")
         if _ve:
             ax.add_patch(plt.Rectangle((_j - 0.5, _i - 0.5), 1, 1,
@@ -698,17 +704,18 @@ print(f"\n  Guardado: {_p1.name}")
 dm_s = dm.sort_values("fecha_plot").reset_index(drop=True)
 dm_s["_saldo_prev_M"] = dm_s["mediana_saldo_M"].shift(1).fillna(dm_s["mediana_saldo_M"])
 
-dm_s["_int_prev"] = (-dm_s["retiro_acum_6d_M"] / (UMBRAL_SALDO * dm_s["_saldo_prev_M"].replace(0, np.nan))).clip(lower=0)
-# % = share BBVA / sistema (igual que heatmap 1)
-_mask_share2 = (dm_s["retiro_acum_6d_M"] < 0) & (dm_s["sis_retiro_6d_M"] < 0)
-dm_s["_pct_prev"] = np.where(
-    _mask_share2,
+dm_s["_int_prev"]  = (-dm_s["retiro_acum_6d_M"] / (UMBRAL_SALDO * dm_s["_saldo_prev_M"].replace(0, np.nan))).clip(lower=0)
+dm_s["_pct_prev"]  = (-dm_s["retiro_acum_6d_M"] / dm_s["_saldo_prev_M"].replace(0, np.nan) * 100).clip(lower=0)
+_mask_ratio2 = (dm_s["retiro_acum_6d_M"] < 0) & (dm_s["sis_retiro_6d_M"] < 0)
+dm_s["_sis_ratio2"] = np.where(
+    _mask_ratio2,
     dm_s["retiro_acum_6d_M"] / dm_s["sis_retiro_6d_M"].replace(0, np.nan) * 100,
     np.nan,
 )
 
-piv_int2 = dm_s.pivot(index="anio", columns="mes", values="_int_prev").sort_index()
-piv_pct2 = dm_s.pivot(index="anio", columns="mes", values="_pct_prev").sort_index()
+piv_int2     = dm_s.pivot(index="anio", columns="mes", values="_int_prev").sort_index()
+piv_pct2     = dm_s.pivot(index="anio", columns="mes", values="_pct_prev").sort_index()
+piv_sis_rat2 = dm_s.pivot(index="anio", columns="mes", values="_sis_ratio2").sort_index()
 
 _vals2 = piv_int2.values.astype(float)
 _vmax2 = float(np.nanmax(_vals2)) if np.any(np.isfinite(_vals2)) else 2.0
@@ -717,7 +724,7 @@ fig2, ax2 = plt.subplots(figsize=(14, max(4, len(piv_int2) * 0.6 + 2)))
 fig2.suptitle(
     f"Estrategia sobreencaje BBVA — Intensidad usando saldo del mes PREVIO\n"
     f"Intensidad = retiro {N_DIAS_HABILES}d / ({UMBRAL_SALDO*100:.0f}% × mediana saldo mes anterior)  ·  "
-    f"> 1 = estrategia activada (borde azul)  ·  Celda: retiro M USD / (%) share BBVA del sistema",
+    f"> 1 = estrategia activada (borde azul)  ·  Celda: BBVA retiro / (% saldo previo)  ·  Sis: monto (% BBVA/Sis)",
     fontweight="bold", fontsize=10,
 )
 im2 = ax2.imshow(_vals2, aspect="auto", cmap=_cmap, vmin=0, vmax=_vmax2)
@@ -733,15 +740,17 @@ for _i, _anio in enumerate(piv_int2.index):
         _ve = piv_est.loc[_anio, _mes]  if _mes in piv_est.columns  else False
         _vr = piv_ret.loc[_anio, _mes]  if _mes in piv_ret.columns  else np.nan
         _vp = piv_pct2.loc[_anio, _mes] if _mes in piv_pct2.columns else np.nan
-        _vs = piv_sis.loc[_anio, _mes]  if _mes in piv_sis.columns  else np.nan
-        _fi = float(_vi) if _vi is not None else np.nan
-        _fr = float(_vr) if _vr is not None else np.nan
-        _fp = float(_vp) if (_vp is not None and _vp is not pd.NA) else np.nan
-        _fs = float(_vs) if (_vs is not None and _vs is not pd.NA) else np.nan
+        _vs  = piv_sis.loc[_anio, _mes]      if _mes in piv_sis.columns      else np.nan
+        _vsr = piv_sis_rat2.loc[_anio, _mes] if _mes in piv_sis_rat2.columns else np.nan
+        _fi  = float(_vi)  if _vi  is not None else np.nan
+        _fr  = float(_vr)  if _vr  is not None else np.nan
+        _fp  = float(_vp)  if (_vp  is not None and _vp  is not pd.NA) else np.nan
+        _fs  = float(_vs)  if (_vs  is not None and _vs  is not pd.NA) else np.nan
+        _fsr = float(_vsr) if (_vsr is not None and _vsr is not pd.NA) else np.nan
         if not np.isfinite(_fi):
             continue
         _ctxt = "white" if _fi > _vmax2 * 0.55 else "black"
-        # BBVA — parte superior: monto + (% share del sistema)
+        # BBVA — parte superior: monto + (% saldo previo)
         if np.isfinite(_fr) and np.isfinite(_fp):
             _bbva_lbl = f"{_fr:,.0f}\n({_fp:.0f}%)"
         elif np.isfinite(_fr):
@@ -752,9 +761,11 @@ for _i, _anio in enumerate(piv_int2.index):
             ax2.text(_j, _i - 0.14, _bbva_lbl, ha="center", va="center",
                      fontsize=5.3, color=_ctxt, linespacing=1.2,
                      fontweight="bold" if _ve else "normal")
-        # Sistema — parte inferior: solo monto
+        # Sistema — parte inferior: monto + (% BBVA/Sistema)
         if np.isfinite(_fs):
-            ax2.text(_j, _i + 0.30, f"Sis:{_fs:,.0f}", ha="center", va="center",
+            _sis_lbl = (f"Sis:{_fs:,.0f} ({_fsr:.0f}%)"
+                        if np.isfinite(_fsr) else f"Sis:{_fs:,.0f}")
+            ax2.text(_j, _i + 0.30, _sis_lbl, ha="center", va="center",
                      fontsize=4.5, color=_ctxt, style="italic")
         if _ve:
             ax2.add_patch(plt.Rectangle((_j - 0.5, _i - 0.5), 1, 1,
@@ -828,10 +839,10 @@ try:
              "mediana_saldo_M", "umbral_M",
              "concentracion", "concentrada",
              "sis_retiro_6d_M", "sis_retiro_mes_M"]]
-         .assign(bbva_share_sis=dm["_pct"].round(1))
+         .assign(bbva_pct_saldo=dm["_pct"].round(1),
+                 bbva_pct_del_sistema=dm["_sis_ratio"].round(1))
          .rename(columns={"_am": "mes_periodo",
-                          "concentracion":   "conc_6d_vs_15d",
-                          "bbva_share_sis":  "bbva_pct_del_sistema"})
+                          "concentracion": "conc_6d_vs_15d"})
          .to_excel(_wr, sheet_name="Por_mes", index=False))
         _res.rename(columns={"meses_datos":  "meses_con_datos",
                              "meses_estrat": "meses_estrategia"}).to_excel(
@@ -857,5 +868,5 @@ print(f"\n  Archivos en: {DIR_OUT}")
 
 # Limpiar columnas temporales
 df.drop(columns=["_am", "_is_bday", "retiro_neto_sis"], inplace=True, errors="ignore")
-dm.drop(columns=["_intensidad", "_pct"], inplace=True, errors="ignore")
+dm.drop(columns=["_intensidad", "_pct", "_sis_ratio"], inplace=True, errors="ignore")
 dm_s.drop(columns=["_saldo_prev_M", "_int_prev", "_pct_prev"], inplace=True, errors="ignore")
