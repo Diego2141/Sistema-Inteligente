@@ -466,156 +466,110 @@ print("\n" + "=" * 65)
 print("  Estrategia sobreencaje BBVA")
 print("=" * 65)
 
-# Umbrales de clasificación
-_UMBRAL_PCT_RETIRO = -0.30   # retiro acumulado 5d > 30% del exigible mensual → estrategia
-_UMBRAL_SCORE_PCT  = 0.70    # top 30% del score combinado → estrategia por score
+# Fracción de la mediana del saldo mensual que define el umbral (adaptable)
+UMBRAL_SALDO = 0.50
 
-# Columnas temporales (se limpian al final)
-df["_am"]            = df["fecha"].dt.to_period("M")
-df["_frac_mes"]      = df["dia_mes"] / df["dias_en_mes"]
-df["_exceso_avance"] = df["Avance"] - df["_frac_mes"]
+df["_am"] = df["fecha"].dt.to_period("M")
 
 
 def _met_estrat(g):
-    g     = g.sort_values("fecha")
-    early = g[g["dia_mes"] <= 10]
-    late  = g.tail(5)         # últimos 5 días hábiles del mes
+    g    = g.sort_values("fecha")
+    late = g.tail(5)   # últimos 5 días hábiles del mes
 
-    exc   = early["_exceso_avance"].mean() if len(early) else np.nan
-    cmx   = early["Avance"].max()          if len(early) else np.nan
-    ret   = late["retiro_neto"].mean()     if len(late)  else np.nan
-    rrit  = late["ritmo_encaje"].mean()    if len(late)  else np.nan
-    dlib  = g["dia_liberacion_90"].iloc[0] if len(g)    else np.nan
-
-    # ── Retiro acumulado en últimos 5 días hábiles ─────────────────────────────
     retiro_acum_5d = late["retiro_neto"].sum() if len(late) else np.nan
+    mediana_saldo  = g["encaje_ovn"].median()
+    umbral         = UMBRAL_SALDO * mediana_saldo
 
-    # Denominador: exigible total del mes (NecAcumMes al cierre)
-    # No se infla por el sobreencaje → escala comparable entre meses
-    exigible_mes = g["NecAcumMes"].iloc[-1] if len(g) else np.nan
-    pct_retiro_5d = (retiro_acum_5d / exigible_mes
-                     if (np.isfinite(retiro_acum_5d) and np.isfinite(exigible_mes)
-                         and exigible_mes != 0)
-                     else np.nan)
+    estrategia = (np.isfinite(retiro_acum_5d) and np.isfinite(umbral)
+                  and retiro_acum_5d < -umbral)
 
     return pd.Series({
-        "exceso_avance_d10":   round(exc,            3) if np.isfinite(exc)            else np.nan,
-        "cobertura_max_d10":   round(cmx,            3) if np.isfinite(cmx)            else np.nan,
-        "retiro_acum_5d_M":    round(retiro_acum_5d / 1e6, 1) if np.isfinite(retiro_acum_5d) else np.nan,
-        "retiro_tardio_M":     round(ret / 1e6,      1) if np.isfinite(ret)            else np.nan,
-        "pct_retiro_5d":       round(pct_retiro_5d,  3) if np.isfinite(pct_retiro_5d)  else np.nan,
-        "ritmo_encaje_tardio": round(rrit,           3) if np.isfinite(rrit)           else np.nan,
-        "dia_liberacion_90":   dlib,
+        "retiro_acum_5d_M": round(retiro_acum_5d / 1e6, 1) if np.isfinite(retiro_acum_5d) else np.nan,
+        "mediana_saldo_M":  round(mediana_saldo  / 1e6, 1) if np.isfinite(mediana_saldo)  else np.nan,
+        "umbral_M":         round(umbral          / 1e6, 1) if np.isfinite(umbral)         else np.nan,
+        "estrategia":       estrategia,
     })
 
 
+print(f"\n  Umbral: retiro 5d hábiles > {UMBRAL_SALDO*100:.0f}% "
+      "de la mediana del saldo mensual (encaje_ovn)")
 print("\n  Calculando indicadores por mes ...")
 dm = df.groupby("_am").apply(_met_estrat).reset_index()
 dm["anio"]       = dm["_am"].dt.year
 dm["mes"]        = dm["_am"].dt.month
 dm["fecha_plot"] = dm["_am"].dt.to_timestamp()
 
-# ── Diagnóstico de indicadores ─────────────────────────────────────────────────
-print("\n── Diagnóstico de indicadores (percentiles) ────────────────────")
-print(f"  {'Indicador':<30} {'n':>4}  {'P10':>7}  {'P25':>7}  "
-      f"{'P50':>7}  {'P75':>7}  {'P90':>7}")
-print(f"  {'-'*30} {'-'*4}  {'-'*7}  {'-'*7}  {'-'*7}  {'-'*7}  {'-'*7}")
-for _col, _lbl, _scale in [
-    ("exceso_avance_d10", "Exceso avance D10",               1),
-    ("retiro_acum_5d_M",  "Retiro acum 5d (M USD)",          1),
-    ("pct_retiro_5d",     "Retiro 5d / exigible mes (%)",  100),
-    ("retiro_tardio_M",   "Retiro tardío media (M USD)",      1),
-    ("dia_liberacion_90", "Día liberación 90%",               1),
-]:
-    _s = dm[_col].dropna()
-    print(f"  {_lbl:<32} {len(_s):>4}  "
-          + "  ".join(f"{_s.quantile(q) * _scale:>7.1f}"
-                      for q in [.10, .25, .50, .75, .90]))
-
-# ── Señal simple: retiro acumulado 5d > 50% del saldo encaje_ovn ──────────────
-dm["estrategia_simple"] = dm["pct_retiro_5d"] < _UMBRAL_PCT_RETIRO
-
-# ── Score compuesto (percentil en historial propio) como señal secundaria ─────
-# mayor exceso temprano → rank ascendente
-# mayor retiro 5d (más negativo pct) → rank descendente (negamos)
-# día de liberación más bajo → rank descendente (negamos)
-dm["_pct_exc"]   = dm["exceso_avance_d10"].rank(pct=True, na_option="keep")
-dm["_pct_ret5d"] = (-dm["pct_retiro_5d"]).rank(pct=True, na_option="keep")
-dm["_pct_lib"]   = (-dm["dia_liberacion_90"]).rank(pct=True, na_option="keep")
-
-dm["score"] = (
-    dm["_pct_exc"].fillna(0.5)   * 0.40 +
-    dm["_pct_ret5d"].fillna(0.5) * 0.40 +
-    dm["_pct_lib"].fillna(0.5)   * 0.20
-)
-
-_umbral_score = dm["score"].quantile(_UMBRAL_SCORE_PCT)
-dm["estrategia_score"] = dm["score"] >= _umbral_score
-
-# Estrategia final: simple (50% saldo) O score (top 30% combinado)
-dm["estrategia"] = dm["estrategia_simple"] | dm["estrategia_score"]
-
-n_simple = dm["estrategia_simple"].sum()
-n_score  = dm["estrategia_score"].sum()
-n_est    = dm["estrategia"].sum()
-print(f"\n  Señal simple  (retiro 5d > 50% saldo)  : {n_simple:>3} meses")
-print(f"  Señal score   (top 30% compuesto)      : {n_score:>3} meses")
-print(f"  Estrategia final (simple OR score)     : {n_est:>3} / {len(dm)} "
+n_est = dm["estrategia"].sum()
+print(f"  Meses con estrategia detectada: {n_est} / {len(dm)} "
       f"({100 * n_est / max(len(dm), 1):.0f}%)")
 
-# ── Gráfico 1: Heatmap año × mes ──────────────────────────────────────────────
+# Diagnóstico: muestra los 10 meses con mayor retiro para verificar el umbral
+print("\n── Top 10 meses por retiro acumulado 5d ────────────────────────")
+print(f"  {'Mes':<10} {'Retiro 5d (M)':>14} {'Mediana saldo (M)':>18} "
+      f"{'Umbral (M)':>11} {'Estrategia':>11}")
+print(f"  {'-'*10} {'-'*14} {'-'*18} {'-'*11} {'-'*11}")
+for _, _r in dm.nsmallest(10, "retiro_acum_5d_M").iterrows():
+    print(f"  {str(_r['_am']):<10} {_r['retiro_acum_5d_M']:>14,.1f} "
+          f"{_r['mediana_saldo_M']:>18,.1f} {_r['umbral_M']:>11,.1f} "
+          f"{'  SÍ' if _r['estrategia'] else '  NO':>11}")
+
+# ── Heatmap año × mes (intensidad = retiro / mediana saldo) ───────────────────
 _MESES_ABR = ["Ene", "Feb", "Mar", "Abr", "May", "Jun",
               "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
 
-piv_sc = dm.pivot(index="anio", columns="mes", values="score").sort_index()
-piv_es = dm.pivot(index="anio", columns="mes", values="estrategia").sort_index()
-piv_dl = dm.pivot(index="anio", columns="mes", values="dia_liberacion_90").sort_index()
+# Intensidad normalizada: retiro / umbral  (> 1 = estrategia activada)
+dm["_intensidad"] = (-dm["retiro_acum_5d_M"] / dm["umbral_M"]).clip(lower=0)
 
-_vals_fin = piv_sc.values.astype(float)
-_vmax     = 1.0   # score es percentil 0–1
-_cmap_est = plt.cm.YlOrRd
+piv_int = dm.pivot(index="anio", columns="mes", values="_intensidad").sort_index()
+piv_est = dm.pivot(index="anio", columns="mes", values="estrategia").sort_index()
+piv_ret = dm.pivot(index="anio", columns="mes", values="retiro_acum_5d_M").sort_index()
 
-fig, ax = plt.subplots(figsize=(14, max(4, len(piv_sc) * 0.6 + 2)))
+_vals = piv_int.values.astype(float)
+_vmax = float(np.nanmax(_vals)) if np.any(np.isfinite(_vals)) else 2.0
+_cmap = plt.cm.YlOrRd
+
+fig, ax = plt.subplots(figsize=(14, max(4, len(piv_int) * 0.6 + 2)))
 fig.suptitle(
-    "Estrategia sobreencaje BBVA — Score (percentil) por año y mes\n"
-    f"Más oscuro = mayor sobreencaje temprano + retiro tardío  ·  "
-    f"Borde azul = estrategia (score ≥ P{_UMBRAL_SCORE_PCT*100:.0f})  ·  "
-    "Número = día liberación 90%",
+    f"Estrategia sobreencaje BBVA — Intensidad del retiro por año y mes\n"
+    f"Intensidad = retiro 5d / ({UMBRAL_SALDO*100:.0f}% × mediana saldo)  ·  "
+    "> 1 = estrategia activada (borde azul)  ·  Número = retiro en M USD",
     fontweight="bold", fontsize=10,
 )
-im = ax.imshow(_vals_fin, aspect="auto", cmap=_cmap_est, vmin=0, vmax=1.0)
+im = ax.imshow(_vals, aspect="auto", cmap=_cmap, vmin=0, vmax=_vmax)
+
 ax.set_xticks(range(12))
 ax.set_xticklabels(_MESES_ABR)
-ax.set_yticks(range(len(piv_sc)))
-ax.set_yticklabels(piv_sc.index.astype(str))
+ax.set_yticks(range(len(piv_int)))
+ax.set_yticklabels(piv_int.index.astype(str))
 
-for _i, _anio in enumerate(piv_sc.index):
+for _i, _anio in enumerate(piv_int.index):
     for _j, _mes in enumerate(range(1, 13)):
-        _vs = piv_sc.loc[_anio, _mes] if _mes in piv_sc.columns else np.nan
-        _ve = piv_es.loc[_anio, _mes] if _mes in piv_es.columns else False
-        _vl = piv_dl.loc[_anio, _mes] if _mes in piv_dl.columns else np.nan
-        _fs = float(_vs) if _vs is not None else np.nan
-        _fl = float(_vl) if _vl is not None else np.nan
-        if not np.isfinite(_fs):
+        _vi = piv_int.loc[_anio, _mes] if _mes in piv_int.columns else np.nan
+        _ve = piv_est.loc[_anio, _mes] if _mes in piv_est.columns else False
+        _vr = piv_ret.loc[_anio, _mes] if _mes in piv_ret.columns else np.nan
+        _fi = float(_vi) if _vi is not None else np.nan
+        _fr = float(_vr) if _vr is not None else np.nan
+        if not np.isfinite(_fi):
             continue
-        _ctxt = "white" if _fs > _vmax * 0.55 else "black"
-        _lbl  = f"d{int(_fl)}" if np.isfinite(_fl) else f"{_fs:.2f}"
+        _ctxt = "white" if _fi > _vmax * 0.55 else "black"
+        _lbl  = f"{_fr:,.0f}" if np.isfinite(_fr) else ""
         ax.text(_j, _i, _lbl, ha="center", va="center",
-                fontsize=7, color=_ctxt,
+                fontsize=6.5, color=_ctxt,
                 fontweight="bold" if _ve else "normal")
         if _ve:
             ax.add_patch(plt.Rectangle((_j - 0.5, _i - 0.5), 1, 1,
                          fill=False, edgecolor="#1565C0", linewidth=2.2))
 
-plt.colorbar(im, ax=ax, label="Score (percentil 0–1)", shrink=0.75)
+plt.colorbar(im, ax=ax, label=f"Retiro / ({UMBRAL_SALDO*100:.0f}% × mediana saldo)",
+             shrink=0.75)
 ax.set_xlabel("Mes")
 ax.set_ylabel("Año")
 from matplotlib.patches import Patch as _Patch
 ax.legend(handles=[
-    _Patch(facecolor=_cmap_est(0.25), label="Sobreencaje leve"),
-    _Patch(facecolor=_cmap_est(0.75), label="Sobreencaje intenso"),
+    _Patch(facecolor=_cmap(0.4), label="Retiro moderado"),
+    _Patch(facecolor=_cmap(0.85), label="Retiro intenso"),
     plt.Rectangle((0, 0), 1, 1, fill=False, edgecolor="#1565C0", lw=2,
-                  label=f"Estrategia confirmada (score ≥ P{_UMBRAL_SCORE_PCT*100:.0f})"),
+                  label=f"Estrategia activada (retiro > {UMBRAL_SALDO*100:.0f}% saldo)"),
 ], loc="lower right", fontsize=7, framealpha=0.9)
 plt.tight_layout()
 _p1 = DIR_OUT / "00_heatmap_estrategia.png"
@@ -623,174 +577,78 @@ fig.savefig(_p1, dpi=150, bbox_inches="tight")
 plt.close(fig)
 print(f"\n  Guardado: {_p1.name}")
 
-# ── Gráfico 2: Perfil promedio de Avance (estrategia vs normal) ────────────────
-_meses_est  = set(dm.loc[dm["estrategia"],  "_am"].astype(str))
-_meses_norm = set(dm.loc[~dm["estrategia"], "_am"].astype(str))
-df["_tipo"] = df["_am"].astype(str).map(
-    lambda m: "Estrategia" if m in _meses_est else
-              ("Normal"    if m in _meses_norm else None)
-)
+# ── Timeline: retiro acumulado 5d vs umbral ────────────────────────────────────
+_dm_c = dm.dropna(subset=["retiro_acum_5d_M"]).copy()
+_cb   = _dm_c["estrategia"].map({True: "#E53935", False: "#90A4AE"})
 
-fig, _axp = plt.subplots(1, 2, figsize=(14, 5))
-fig.suptitle("Perfil promedio mensual — Estrategia vs Normal", fontweight="bold")
-_COLS_EST = {"Estrategia": "#E53935", "Normal": "#1976D2"}
-
-for _ax, _yv, _yl, _tt in [
-    (_axp[0], "Avance",         "Avance (cobertura acumulada)",   "Avance mensual por día del mes"),
-    (_axp[1], "_exceso_avance", "Exceso sobre ritmo lineal (pp)", "Avance − (día/días_mes)"),
-]:
-    for _tipo, _color in _COLS_EST.items():
-        _sub = df[df["_tipo"] == _tipo]
-        if _sub.empty:
-            continue
-        _pf = _sub.groupby("dia_mes")[_yv].mean()
-        _ci = _sub.groupby("dia_mes")[_yv].std()
-        _d  = _pf.index.values
-        _v  = _pf.values
-        _ax.plot(_d, _v, color=_color, linewidth=2, label=_tipo)
-        _ax.fill_between(_d,
-                         _v - _ci.reindex(_d).fillna(0).values,
-                         _v + _ci.reindex(_d).fillna(0).values,
-                         alpha=0.12, color=_color)
-    if _yv == "Avance":
-        _dr = np.arange(1, 32)
-        _ax.plot(_dr, _dr / 30, color="gray", lw=1, ls="--", label="Ritmo lineal")
-        _ax.axhline(0.90, color="green", lw=0.9, ls=":", label="Umbral 90%")
-    else:
-        _ax.axhline(0, color="black", lw=0.8, ls=":")
-        _ax.axhline(dm["exceso_avance_d10"].quantile(0.70), color="orange",
-                    lw=0.9, ls="-.",
-                    label=f"Umbral P70 exceso ({dm['exceso_avance_d10'].quantile(0.70)*100:.1f} pp)")
-        _ax.axvline(10, color="gray", lw=0.7, ls=":", label="Día 10")
-    _ax.set_xlabel("Día del mes calendario")
-    _ax.set_ylabel(_yl)
-    _ax.set_title(_tt)
-    _ax.legend(fontsize=8)
-    _ax.set_xlim(1, 31)
-
+fig, ax = plt.subplots(figsize=(15, 5))
+fig.suptitle("Retiro acumulado últimos 5 días hábiles vs umbral mensual",
+             fontweight="bold")
+ax.bar(_dm_c["fecha_plot"], _dm_c["retiro_acum_5d_M"], width=22,
+       color=_cb, alpha=0.85)
+ax.step(_dm_c["fecha_plot"], -_dm_c["umbral_M"], where="mid",
+        color="#B71C1C", lw=1.5, ls="--",
+        label=f"−Umbral ({UMBRAL_SALDO*100:.0f}% × mediana saldo)")
+ax.axhline(0, color="black", lw=0.6, ls=":")
+ax.set_ylabel("Retiro acumulado 5d (M USD)")
+ax.set_xlabel("Fecha")
+ax.legend(handles=[
+    plt.Rectangle((0,0),1,1, color="#E53935", alpha=0.85, label="Estrategia activa"),
+    plt.Rectangle((0,0),1,1, color="#90A4AE", alpha=0.85, label="Sin estrategia"),
+    plt.Line2D([0],[0], color="#B71C1C", lw=1.5, ls="--",
+               label=f"−Umbral ({UMBRAL_SALDO*100:.0f}% × mediana saldo)"),
+], fontsize=8)
+ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:,.0f}M"))
 plt.tight_layout()
-_p2 = DIR_OUT / "01_perfil_avance.png"
+_p2 = DIR_OUT / "01_retiro_vs_umbral.png"
 fig.savefig(_p2, dpi=150, bbox_inches="tight")
 plt.close(fig)
 print(f"  Guardado: {_p2.name}")
 
-# ── Gráfico 3: Timeline score + día liberación + retiro tardío ─────────────────
-_dm_c = dm.dropna(subset=["score"]).copy()
-fig, _ax3 = plt.subplots(3, 1, figsize=(15, 10), sharex=True)
-fig.suptitle("Estrategia sobreencaje BBVA — Evolución temporal", fontweight="bold")
-_cb = _dm_c["estrategia"].map({True: "#E53935", False: "#90A4AE"})
-
-_ax3[0].bar(_dm_c["fecha_plot"], _dm_c["score"], width=22, color=_cb, alpha=0.85)
-_roll = _dm_c.set_index("fecha_plot")["score"].rolling("365D").mean()
-_ax3[0].plot(_roll.index, _roll.values, color="black", lw=1.8)
-_ax3[0].set_ylabel("Score estrategia")
-_ax3[0].legend(handles=[
-    plt.Rectangle((0,0),1,1, color="#E53935", alpha=0.85, label="Estrategia activa"),
-    plt.Rectangle((0,0),1,1, color="#90A4AE", alpha=0.85, label="Sin estrategia"),
-    plt.Line2D([0],[0], color="black", lw=1.8, label="Media 12m"),
-], fontsize=8)
-_ax3[0].set_title("Score mensual (sobreencaje temprano + retiro tardío)")
-
-_dl_c = _dm_c.dropna(subset=["dia_liberacion_90"])
-_ax3[1].bar(_dl_c["fecha_plot"], _dl_c["dia_liberacion_90"], width=22,
-            color=_dl_c["estrategia"].map({True: "#E53935", False: "#1565C0"}),
-            alpha=0.8)
-_umbral_dia_lib = dm["dia_liberacion_90"].quantile(0.30)
-_ax3[1].axhline(_umbral_dia_lib, color="orange", lw=1.2, ls="--",
-                label=f"P30 = día {_umbral_dia_lib:.0f}")
-_ax3[1].axhline(_dl_c["dia_liberacion_90"].median(), color="gray", lw=0.9, ls="-.",
-                label=f"Mediana = día {_dl_c['dia_liberacion_90'].median():.0f}")
-_ax3[1].set_ylabel("Día del mes")
-_ax3[1].set_title("Día en que Avance ≥ 90%  (rojo = mes con estrategia)")
-_ax3[1].legend(fontsize=8)
-_ax3[1].invert_yaxis()
-
-_c3 = _dm_c["pct_retiro_5d"].apply(
-    lambda v: "#E53935" if (v is not None and np.isfinite(v) and v < _UMBRAL_PCT_RETIRO)
-              else ("#FF8A65" if (v is not None and np.isfinite(v) and v < 0)
-                    else "#1565C0")
-)
-_ax3[2].bar(_dm_c["fecha_plot"], (_dm_c["pct_retiro_5d"] * 100).fillna(0),
-            width=22, color=_c3, alpha=0.85)
-_ax3[2].axhline(0, color="black", lw=0.8, ls=":")
-_ax3[2].axhline(_UMBRAL_PCT_RETIRO * 100, color="#B71C1C", lw=1.4, ls="--",
-                label=f"Umbral estrategia ({_UMBRAL_PCT_RETIRO*100:.0f}%)")
-_ax3[2].set_ylabel("Retiro acum. 5d / exigible mes (%)")
-_ax3[2].set_title("Retiro acumulado últimos 5 días hábiles / exigible total del mes  "
-                  f"(rojo oscuro = supera umbral {_UMBRAL_PCT_RETIRO*100:.0f}%)")
-_ax3[2].legend(fontsize=8)
-_ax3[2].yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:.0f}%"))
-_ax3[2].set_xlabel("Fecha")
-
-plt.tight_layout()
-_p3 = DIR_OUT / "02_serie_tiempo.png"
-fig.savefig(_p3, dpi=150, bbox_inches="tight")
-plt.close(fig)
-print(f"  Guardado: {_p3.name}")
-
-# ── Resumen anual y export Excel ───────────────────────────────────────────────
-_resumen_est = (
+# ── Resumen por año ────────────────────────────────────────────────────────────
+_res = (
     dm.groupby("anio")
-    .agg(
-        meses_con_datos     = ("estrategia", "count"),
-        meses_estrategia    = ("estrategia", "sum"),
-        score_medio         = ("score",             "mean"),
-        score_max           = ("score",             "max"),
-        dia_lib_mediano     = ("dia_liberacion_90", "median"),
-        exceso_avance_medio = ("exceso_avance_d10", "mean"),
-    )
+    .agg(meses_datos=("estrategia", "count"),
+         meses_estrat=("estrategia", "sum"))
     .reset_index()
 )
-_resumen_est["pct_estrategia"] = (
-    _resumen_est["meses_estrategia"] / _resumen_est["meses_con_datos"] * 100
-).round(1)
-_resumen_est["frecuencia"] = _resumen_est["meses_estrategia"].apply(
+_res["clasificacion"] = _res["meses_estrat"].apply(
     lambda n: "MENSUAL"    if n >= 8 else
-              "TRIMESTRAL" if 3 <= n <= 4 else
-              "SEMESTRAL"  if 2 <= n <= 3 else
-              "ESPORÁDICA" if n == 1 else "—"
+              "TRIMESTRAL" if n >= 3 else
+              "NO APLICA"  if n == 0 else
+              "ESPORÁDICA"
 )
 
-_cols_det = ["fecha_plot", "anio", "mes",
-             "estrategia", "estrategia_simple", "estrategia_score", "score",
-             "_pct_exc", "_pct_ret5d", "_pct_lib",
-             "retiro_acum_5d_M", "pct_retiro_5d",
-             "exceso_avance_d10", "cobertura_max_d10", "dia_liberacion_90",
-             "retiro_tardio_M", "ritmo_encaje_tardio"]
-_rename_cols = {
-    "fecha_plot":    "fecha",
-    "_pct_exc":      "pct_exceso_d10",
-    "_pct_ret5d":    "pct_retiro_5d_rank",
-    "_pct_lib":      "pct_dia_lib",
-}
+# ── Export Excel ───────────────────────────────────────────────────────────────
 try:
     _ruta_est = DIR_OUT / "resultados_estrategia.xlsx"
     with pd.ExcelWriter(_ruta_est, engine="openpyxl") as _wr:
-        dm[_cols_det].rename(columns=_rename_cols).to_excel(
-            _wr, sheet_name="Por_mes", index=False)
-        _resumen_est.to_excel(_wr, sheet_name="Resumen_anual", index=False)
-        dm[dm["estrategia"]][_cols_det].rename(columns=_rename_cols).to_excel(
-            _wr, sheet_name="Meses_estrategia", index=False)
+        (dm[["_am", "anio", "mes", "estrategia",
+             "retiro_acum_5d_M", "mediana_saldo_M", "umbral_M"]]
+         .rename(columns={"_am": "mes_periodo"})
+         .to_excel(_wr, sheet_name="Por_mes", index=False))
+        _res.rename(columns={"meses_datos":  "meses_con_datos",
+                             "meses_estrat": "meses_estrategia"}).to_excel(
+            _wr, sheet_name="Resumen_anual", index=False)
     print(f"  Guardado: {_ruta_est.name}")
 except Exception as _e:
     print(f"  AVISO: no se pudo exportar Excel — {_e}")
 
-# ── Resumen consola ────────────────────────────────────────────────────────────
-print("\n" + "=" * 65)
-print("  RESUMEN ANUAL — ESTRATEGIA SOBREENCAJE BBVA")
-print("=" * 65)
-print(f"  {'Año':<6} {'Meses':>8} {'Score':>8} {'Día lib.':>9} {'Frecuencia'}")
-print(f"  {'-'*6} {'-'*8} {'-'*8} {'-'*9} {'-'*15}")
-for _, _r in _resumen_est.sort_values("anio").iterrows():
-    _lm = f"día {int(_r['dia_lib_mediano'])}" if np.isfinite(_r['dia_lib_mediano']) else "  —"
-    print(f"  {int(_r['anio']):<6} "
-          f"{int(_r['meses_estrategia']):>3}/{int(_r['meses_con_datos']):<4} "
-          f"{_r['score_medio']:>7.3f}  {_lm:>9}  {_r['frecuencia']}")
-
+# ── Tabla resumen consola ──────────────────────────────────────────────────────
+print("\n" + "=" * 55)
+print("  ESTRATEGIA SOBREENCAJE BBVA — RESUMEN POR AÑO")
+print(f"  Umbral: retiro 5d > {UMBRAL_SALDO*100:.0f}% de la mediana del saldo mensual")
+print("=" * 55)
+print(f"  {'Año':<6}  {'Meses c/estrat.':>16}  {'Clasificación'}")
+print(f"  {'-'*6}  {'-'*16}  {'-'*14}")
+for _, _r in _res.iterrows():
+    _flag = " ◄" if _r["clasificacion"] in ("MENSUAL", "TRIMESTRAL") else ""
+    print(f"  {int(_r['anio']):<6}  "
+          f"{int(_r['meses_estrat']):>5} / {int(_r['meses_datos']):<9}  "
+          f"{_r['clasificacion']}{_flag}")
+print("=" * 55)
 print(f"\n  Archivos en: {DIR_OUT}")
-print("=" * 65)
 
-# Limpiar columnas temporales del df diario
-df.drop(columns=["_am", "_frac_mes", "_exceso_avance", "_tipo"], inplace=True)
-# Limpiar columnas de percentil intermedias del df mensual
-dm.drop(columns=["_pct_exc", "_pct_ret5d", "_pct_lib"], inplace=True, errors="ignore")
+# Limpiar columnas temporales
+df.drop(columns=["_am"], inplace=True)
+dm.drop(columns=["_intensidad"], inplace=True, errors="ignore")
