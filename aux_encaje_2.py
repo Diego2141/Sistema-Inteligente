@@ -10,7 +10,8 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 
-RUTA = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Raw\bbva_encaje.xlsx")
+RUTA              = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Raw\bbva_encaje.xlsx")
+RUTA_TRANSACCIONES = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Raw\Transacciones_BancaLocal.xlsx")
 
 # ── Carga ──────────────────────────────────────────────────────────────────────
 df = pd.read_excel(RUTA, header=0)
@@ -471,13 +472,32 @@ UMBRAL_SALDO        = 0.50
 # % mínimo del retiro 15d que debe concentrarse en los últimos 5d hábiles
 UMBRAL_CONCENTRACION = 0.90
 
+# ── Retiro neto diario del SISTEMA (toda la banca local) ──────────────────────
+# Porcentaje = retiro sistema últimos 5d / retiro sistema mes completo
+_sis_ok = False
+try:
+    _tx = pd.read_excel(RUTA_TRANSACCIONES)
+    _tx["fecha"] = pd.to_datetime(_tx["Fecha Valor"])
+    _tx["monto"] = pd.to_numeric(_tx["Delivery Principal Usd"], errors="coerce")
+    _flujo_sis = (_tx.groupby("fecha")["monto"]
+                  .sum()
+                  .rename("retiro_neto_sis")
+                  .reset_index())
+    df = df.merge(_flujo_sis, on="fecha", how="left")
+    _sis_ok = True
+    print(f"  Sistema cargado: {len(_flujo_sis):,} días hábiles "
+          f"({_flujo_sis['fecha'].min().date()} → {_flujo_sis['fecha'].max().date()})")
+except Exception as _e:
+    df["retiro_neto_sis"] = np.nan
+    print(f"  AVISO: no se cargó Transacciones_BancaLocal — {_e}")
+
 df["_am"] = df["fecha"].dt.to_period("M")
 
 
 def _met_estrat(g):
-    g    = g.sort_values("fecha")
-    late = g.tail(5)    # últimos 5 días hábiles del mes
-    late15 = g.tail(15) # últimos 15 días hábiles del mes
+    g      = g.sort_values("fecha")
+    late   = g.tail(5)    # últimos 5 días hábiles del mes
+    late15 = g.tail(15)   # últimos 15 días hábiles del mes
 
     retiro_acum_5d  = late["retiro_neto"].sum()  if len(late)   else np.nan
     retiro_acum_15d = late15["retiro_neto"].sum() if len(late15) else np.nan
@@ -487,15 +507,23 @@ def _met_estrat(g):
     estrategia = (np.isfinite(retiro_acum_5d) and np.isfinite(umbral)
                   and retiro_acum_5d < -umbral)
 
-    # Concentración: fracción del retiro 15d que ocurre en los últimos 5d
-    # Solo aplica cuando ambos acumulados son salidas netas (< 0)
+    # Concentración BBVA: fracción del retiro 15d que ocurre en los últimos 5d
     if (np.isfinite(retiro_acum_5d) and np.isfinite(retiro_acum_15d)
             and retiro_acum_15d < 0 and retiro_acum_5d < 0):
         concentracion = retiro_acum_5d / retiro_acum_15d
     else:
         concentracion = np.nan
-
     concentrada = np.isfinite(concentracion) and concentracion >= UMBRAL_CONCENTRACION
+
+    # Sistema: retiro neto acumulado últimos 5d y mes completo
+    sis_5d  = late["retiro_neto_sis"].sum()  if "retiro_neto_sis" in late.columns  else np.nan
+    sis_mes = g["retiro_neto_sis"].sum()     if "retiro_neto_sis" in g.columns     else np.nan
+    # % = fracción del retiro mensual del sistema que cae en últimos 5d hábiles
+    if (np.isfinite(sis_5d) and np.isfinite(sis_mes)
+            and sis_mes < 0 and sis_5d < 0):
+        pct_sis = sis_5d / sis_mes
+    else:
+        pct_sis = np.nan
 
     return pd.Series({
         "retiro_acum_5d_M":  round(retiro_acum_5d  / 1e6, 1) if np.isfinite(retiro_acum_5d)  else np.nan,
@@ -505,6 +533,9 @@ def _met_estrat(g):
         "estrategia":        estrategia,
         "concentracion":     round(concentracion, 4) if np.isfinite(concentracion) else np.nan,
         "concentrada":       concentrada,
+        "sis_retiro_5d_M":   round(sis_5d  / 1e6, 1) if np.isfinite(sis_5d)  else np.nan,
+        "sis_retiro_mes_M":  round(sis_mes / 1e6, 1) if np.isfinite(sis_mes) else np.nan,
+        "sis_pct_conc":      round(pct_sis, 4)        if np.isfinite(pct_sis) else np.nan,
     })
 
 
@@ -551,6 +582,8 @@ piv_ret  = dm.pivot(index="anio", columns="mes", values="retiro_acum_5d_M").sort
 piv_pct  = dm.pivot(index="anio", columns="mes", values="_pct").sort_index()
 piv_conc = dm.pivot(index="anio", columns="mes", values="concentracion").sort_index()
 piv_cond = dm.pivot(index="anio", columns="mes", values="concentrada").sort_index()
+piv_sis  = dm.pivot(index="anio", columns="mes", values="sis_retiro_5d_M").sort_index()
+piv_sisp = dm.pivot(index="anio", columns="mes", values="sis_pct_conc").sort_index()
 
 _vals = piv_int.values.astype(float)
 _vmax = float(np.nanmax(_vals)) if np.any(np.isfinite(_vals)) else 2.0
@@ -578,22 +611,32 @@ for _i, _anio in enumerate(piv_int.index):
         _vp = piv_pct.loc[_anio, _mes]  if _mes in piv_pct.columns  else np.nan
         _vc = piv_conc.loc[_anio, _mes] if _mes in piv_conc.columns else np.nan
         _vk = piv_cond.loc[_anio, _mes] if _mes in piv_cond.columns else False
+        _vs = piv_sis.loc[_anio, _mes]  if _mes in piv_sis.columns  else np.nan
+        _vq = piv_sisp.loc[_anio, _mes] if _mes in piv_sisp.columns else np.nan
         _fi = float(_vi) if _vi is not None else np.nan
         _fr = float(_vr) if _vr is not None else np.nan
         _fp = float(_vp) if _vp is not None else np.nan
         _fc = float(_vc) if (_vc is not None and _vc is not pd.NA) else np.nan
+        _fs = float(_vs) if (_vs is not None and _vs is not pd.NA) else np.nan
+        _fq = float(_vq) if (_vq is not None and _vq is not pd.NA) else np.nan
         if not np.isfinite(_fi):
             continue
         _ctxt = "white" if _fi > _vmax * 0.55 else "black"
         _conc_str = f"\nc:{_fc*100:.0f}%" if np.isfinite(_fc) else ""
+        if np.isfinite(_fs) and np.isfinite(_fq):
+            _sis_str = f"\nSis:{_fs:,.0f} ({_fq*100:.0f}%)"
+        elif np.isfinite(_fs):
+            _sis_str = f"\nSis:{_fs:,.0f}"
+        else:
+            _sis_str = ""
         if np.isfinite(_fr) and np.isfinite(_fp):
-            _lbl = f"{_fr:,.0f}\n({_fp:.0f}%){_conc_str}"
+            _lbl = f"{_fr:,.0f}\n({_fp:.0f}%){_conc_str}{_sis_str}"
         elif np.isfinite(_fr):
-            _lbl = f"{_fr:,.0f}{_conc_str}"
+            _lbl = f"{_fr:,.0f}{_conc_str}{_sis_str}"
         else:
             _lbl = ""
         ax.text(_j, _i, _lbl, ha="center", va="center",
-                fontsize=5.3, color=_ctxt, linespacing=1.25,
+                fontsize=4.8, color=_ctxt, linespacing=1.2,
                 fontweight="bold" if _ve else "normal")
         if _ve:
             ax.add_patch(plt.Rectangle((_j - 0.5, _i - 0.5), 1, 1,
@@ -659,22 +702,32 @@ for _i, _anio in enumerate(piv_int2.index):
         _vp = piv_pct2.loc[_anio, _mes] if _mes in piv_pct2.columns else np.nan
         _vc = piv_conc.loc[_anio, _mes] if _mes in piv_conc.columns else np.nan
         _vk = piv_cond.loc[_anio, _mes] if _mes in piv_cond.columns else False
+        _vs = piv_sis.loc[_anio, _mes]  if _mes in piv_sis.columns  else np.nan
+        _vq = piv_sisp.loc[_anio, _mes] if _mes in piv_sisp.columns else np.nan
         _fi = float(_vi) if _vi is not None else np.nan
         _fr = float(_vr) if _vr is not None else np.nan
         _fp = float(_vp) if _vp is not None else np.nan
         _fc = float(_vc) if (_vc is not None and _vc is not pd.NA) else np.nan
+        _fs = float(_vs) if (_vs is not None and _vs is not pd.NA) else np.nan
+        _fq = float(_vq) if (_vq is not None and _vq is not pd.NA) else np.nan
         if not np.isfinite(_fi):
             continue
         _ctxt = "white" if _fi > _vmax2 * 0.55 else "black"
         _conc_str = f"\nc:{_fc*100:.0f}%" if np.isfinite(_fc) else ""
+        if np.isfinite(_fs) and np.isfinite(_fq):
+            _sis_str = f"\nSis:{_fs:,.0f} ({_fq*100:.0f}%)"
+        elif np.isfinite(_fs):
+            _sis_str = f"\nSis:{_fs:,.0f}"
+        else:
+            _sis_str = ""
         if np.isfinite(_fr) and np.isfinite(_fp):
-            _lbl = f"{_fr:,.0f}\n({_fp:.0f}%){_conc_str}"
+            _lbl = f"{_fr:,.0f}\n({_fp:.0f}%){_conc_str}{_sis_str}"
         elif np.isfinite(_fr):
-            _lbl = f"{_fr:,.0f}{_conc_str}"
+            _lbl = f"{_fr:,.0f}{_conc_str}{_sis_str}"
         else:
             _lbl = ""
         ax2.text(_j, _i, _lbl, ha="center", va="center",
-                 fontsize=5.3, color=_ctxt, linespacing=1.25,
+                 fontsize=4.8, color=_ctxt, linespacing=1.2,
                  fontweight="bold" if _ve else "normal")
         if _ve:
             ax2.add_patch(plt.Rectangle((_j - 0.5, _i - 0.5), 1, 1,
@@ -752,9 +805,11 @@ try:
         (dm[["_am", "anio", "mes", "estrategia",
              "retiro_acum_5d_M", "retiro_acum_15d_M",
              "mediana_saldo_M", "umbral_M",
-             "concentracion", "concentrada"]]
+             "concentracion", "concentrada",
+             "sis_retiro_5d_M", "sis_retiro_mes_M", "sis_pct_conc"]]
          .rename(columns={"_am": "mes_periodo",
-                          "concentracion": "conc_5d_vs_15d"})
+                          "concentracion": "conc_5d_vs_15d",
+                          "sis_pct_conc":  "sis_conc_5d_vs_mes"})
          .to_excel(_wr, sheet_name="Por_mes", index=False))
         _res.rename(columns={"meses_datos":  "meses_con_datos",
                              "meses_estrat": "meses_estrategia"}).to_excel(
@@ -779,6 +834,6 @@ print("=" * 55)
 print(f"\n  Archivos en: {DIR_OUT}")
 
 # Limpiar columnas temporales
-df.drop(columns=["_am"], inplace=True)
+df.drop(columns=["_am", "retiro_neto_sis"], inplace=True, errors="ignore")
 dm.drop(columns=["_intensidad", "_pct"], inplace=True, errors="ignore")
 dm_s.drop(columns=["_saldo_prev_M", "_int_prev", "_pct_prev"], inplace=True, errors="ignore")
