@@ -661,8 +661,9 @@ for _ax, _yv, _yl, _tt in [
         _ax.axhline(0.90, color="green", lw=0.9, ls=":", label="Umbral 90%")
     else:
         _ax.axhline(0, color="black", lw=0.8, ls=":")
-        _ax.axhline(_UMBRAL_EXCESO_D10, color="orange", lw=0.9, ls="-.",
-                    label=f"Umbral sobreencaje ({_UMBRAL_EXCESO_D10*100:.0f} pp)")
+        _ax.axhline(dm["exceso_avance_d10"].quantile(0.70), color="orange",
+                    lw=0.9, ls="-.",
+                    label=f"Umbral P70 exceso ({dm['exceso_avance_d10'].quantile(0.70)*100:.1f} pp)")
         _ax.axvline(10, color="gray", lw=0.7, ls=":", label="Día 10")
     _ax.set_xlabel("Día del mes calendario")
     _ax.set_ylabel(_yl)
