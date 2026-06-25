@@ -9,6 +9,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from pathlib import Path
+from pandas.tseries.holiday import (
+    AbstractHolidayCalendar, Holiday, GoodFriday,
+    USFederalHolidayCalendar,
+)
+from pandas.tseries.offsets import Easter, Day as _Day
 
 RUTA              = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Raw\bbva_encaje.xlsx")
 RUTA_TRANSACCIONES = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Raw\Transacciones_BancaLocal.xlsx")
@@ -491,16 +496,50 @@ except Exception as _e:
     df["retiro_neto_sis"] = np.nan
     print(f"  AVISO: no se cargó Transacciones_BancaLocal — {_e}")
 
+# ── Calendario de días hábiles: excluye feriados Perú + USA ──────────────────
+class _PeruCalendar(AbstractHolidayCalendar):
+    rules = [
+        Holiday("AnioNuevo",      month=1,  day=1),
+        Holiday("JuevesSanto",    month=1,  day=1, offset=[Easter(), _Day(-3)]),
+        GoodFriday,                               # Viernes Santo
+        Holiday("Trabajo",        month=5,  day=1),
+        Holiday("SanPedro",       month=6,  day=29),
+        Holiday("FiestasP1",      month=7,  day=28),
+        Holiday("FiestasP2",      month=7,  day=29),
+        Holiday("SantaRosa",      month=8,  day=30),
+        Holiday("Angamos",        month=10, day=8),
+        Holiday("TodosSantos",    month=11, day=1),
+        Holiday("Inmaculada",     month=12, day=8),
+        Holiday("Navidad",        month=12, day=25),
+    ]
+
+_f_ini = df["fecha"].min()
+_f_fin = df["fecha"].max()
+_hols_peru = set(_PeruCalendar().holidays(_f_ini, _f_fin).normalize())
+_hols_usa  = set(USFederalHolidayCalendar().holidays(_f_ini, _f_fin).normalize())
+_hols_all  = _hols_peru | _hols_usa
+
+df["_is_bday"] = (
+    (df["fecha"].dt.weekday < 5) &          # lunes a viernes
+    (~df["fecha"].isin(_hols_all))          # no feriado Perú ni USA
+)
+n_bday = df["_is_bday"].sum()
+print(f"  Días hábiles (sin feriados Perú/USA): {n_bday} / {len(df)} "
+      f"({100*n_bday/len(df):.1f}%)")
+
 df["_am"] = df["fecha"].dt.to_period("M")
 
 
 def _met_estrat(g):
     g      = g.sort_values("fecha")
-    late   = g.tail(5)    # últimos 5 días hábiles del mes
-    late15 = g.tail(15)   # últimos 15 días hábiles del mes
+    # Solo días hábiles: lunes-viernes, sin feriados Perú ni USA
+    g_bday = g[g["_is_bday"]] if "_is_bday" in g.columns else g
+    late   = g_bday.tail(5)   # últimos 5 días hábiles del mes
+    late15 = g_bday.tail(15)  # últimos 15 días hábiles del mes
 
     retiro_acum_5d  = late["retiro_neto"].sum()  if len(late)   else np.nan
     retiro_acum_15d = late15["retiro_neto"].sum() if len(late15) else np.nan
+    # mediana del saldo usa todos los días (incluye no-hábiles si existen)
     mediana_saldo   = g["encaje_ovn"].median()
     umbral          = UMBRAL_SALDO * mediana_saldo
 
@@ -515,9 +554,9 @@ def _met_estrat(g):
         concentracion = np.nan
     concentrada = np.isfinite(concentracion) and concentracion >= UMBRAL_CONCENTRACION
 
-    # Sistema: retiro neto acumulado últimos 5d y mes completo
-    sis_5d  = late["retiro_neto_sis"].sum()  if "retiro_neto_sis" in late.columns  else np.nan
-    sis_mes = g["retiro_neto_sis"].sum()     if "retiro_neto_sis" in g.columns     else np.nan
+    # Sistema: retiro neto acumulado últimos 5d hábiles y mes completo (días hábiles)
+    sis_5d  = late["retiro_neto_sis"].sum()    if "retiro_neto_sis" in late.columns   else np.nan
+    sis_mes = g_bday["retiro_neto_sis"].sum()  if "retiro_neto_sis" in g_bday.columns else np.nan
     # % = fracción del retiro mensual del sistema que cae en últimos 5d hábiles
     if (np.isfinite(sis_5d) and np.isfinite(sis_mes)
             and sis_mes < 0 and sis_5d < 0):
@@ -834,6 +873,6 @@ print("=" * 55)
 print(f"\n  Archivos en: {DIR_OUT}")
 
 # Limpiar columnas temporales
-df.drop(columns=["_am", "retiro_neto_sis"], inplace=True, errors="ignore")
+df.drop(columns=["_am", "_is_bday", "retiro_neto_sis"], inplace=True, errors="ignore")
 dm.drop(columns=["_intensidad", "_pct"], inplace=True, errors="ignore")
 dm_s.drop(columns=["_saldo_prev_M", "_int_prev", "_pct_prev"], inplace=True, errors="ignore")
