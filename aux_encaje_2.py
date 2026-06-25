@@ -467,7 +467,7 @@ print("  Estrategia sobreencaje BBVA")
 print("=" * 65)
 
 # Umbrales de clasificación
-_UMBRAL_PCT_RETIRO = -0.50   # retiro acumulado 5d > 50% del saldo → estrategia
+_UMBRAL_PCT_RETIRO = -0.30   # retiro acumulado 5d > 30% del exigible mensual → estrategia
 _UMBRAL_SCORE_PCT  = 0.70    # top 30% del score combinado → estrategia por score
 
 # Columnas temporales (se limpian al final)
@@ -485,27 +485,27 @@ def _met_estrat(g):
     cmx   = early["Avance"].max()          if len(early) else np.nan
     ret   = late["retiro_neto"].mean()     if len(late)  else np.nan
     rrit  = late["ritmo_encaje"].mean()    if len(late)  else np.nan
-    caida = g["Avance"].max() - (g["Avance"].iloc[-1] if len(g) else np.nan)
     dlib  = g["dia_liberacion_90"].iloc[0] if len(g)    else np.nan
 
-    # ── Indicador simple: retiro acumulado 5d / saldo encaje_ovn ──────────────
+    # ── Retiro acumulado en últimos 5 días hábiles ─────────────────────────────
     retiro_acum_5d = late["retiro_neto"].sum() if len(late) else np.nan
-    # Saldo de referencia: encaje_ovn al inicio de la última semana hábil
-    _n_late = len(late)
-    _saldo_ref = (g["encaje_ovn"].iloc[-(_n_late + 1)]
-                  if len(g) > _n_late else g["encaje_ovn"].iloc[0])
-    pct_retiro_5d = (retiro_acum_5d / _saldo_ref
-                     if (np.isfinite(retiro_acum_5d) and _saldo_ref != 0)
+
+    # Denominador: exigible total del mes (NecAcumMes al cierre)
+    # No se infla por el sobreencaje → escala comparable entre meses
+    exigible_mes = g["NecAcumMes"].iloc[-1] if len(g) else np.nan
+    pct_retiro_5d = (retiro_acum_5d / exigible_mes
+                     if (np.isfinite(retiro_acum_5d) and np.isfinite(exigible_mes)
+                         and exigible_mes != 0)
                      else np.nan)
 
     return pd.Series({
-        "exceso_avance_d10":   round(exc,          3) if np.isfinite(exc)           else np.nan,
-        "cobertura_max_d10":   round(cmx,          3) if np.isfinite(cmx)           else np.nan,
-        "retiro_tardio_M":     round(ret / 1e6,    1) if np.isfinite(ret)           else np.nan,
-        "ritmo_encaje_tardio": round(rrit,         3) if np.isfinite(rrit)          else np.nan,
-        "caida_avance":        round(caida,        3) if np.isfinite(caida)         else np.nan,
+        "exceso_avance_d10":   round(exc,            3) if np.isfinite(exc)            else np.nan,
+        "cobertura_max_d10":   round(cmx,            3) if np.isfinite(cmx)            else np.nan,
+        "retiro_acum_5d_M":    round(retiro_acum_5d / 1e6, 1) if np.isfinite(retiro_acum_5d) else np.nan,
+        "retiro_tardio_M":     round(ret / 1e6,      1) if np.isfinite(ret)            else np.nan,
+        "pct_retiro_5d":       round(pct_retiro_5d,  3) if np.isfinite(pct_retiro_5d)  else np.nan,
+        "ritmo_encaje_tardio": round(rrit,           3) if np.isfinite(rrit)           else np.nan,
         "dia_liberacion_90":   dlib,
-        "pct_retiro_5d":       round(pct_retiro_5d, 3) if np.isfinite(pct_retiro_5d) else np.nan,
     })
 
 
@@ -520,20 +520,17 @@ print("\n── Diagnóstico de indicadores (percentiles) ───────�
 print(f"  {'Indicador':<30} {'n':>4}  {'P10':>7}  {'P25':>7}  "
       f"{'P50':>7}  {'P75':>7}  {'P90':>7}")
 print(f"  {'-'*30} {'-'*4}  {'-'*7}  {'-'*7}  {'-'*7}  {'-'*7}  {'-'*7}")
-for _col, _lbl in [
-    ("exceso_avance_d10", "Exceso avance D10"),
-    ("pct_retiro_5d",     "Retiro acum 5d / saldo (%)"),
-    ("retiro_tardio_M",   "Retiro tardío media (M USD)"),
-    ("dia_liberacion_90", "Día liberación 90%"),
-    ("caida_avance",      "Caída Avance fin mes"),
+for _col, _lbl, _scale in [
+    ("exceso_avance_d10", "Exceso avance D10",               1),
+    ("retiro_acum_5d_M",  "Retiro acum 5d (M USD)",          1),
+    ("pct_retiro_5d",     "Retiro 5d / exigible mes (%)",  100),
+    ("retiro_tardio_M",   "Retiro tardío media (M USD)",      1),
+    ("dia_liberacion_90", "Día liberación 90%",               1),
 ]:
     _s = dm[_col].dropna()
-    if _col == "pct_retiro_5d":
-        _fmt = lambda v: f"{v*100:>7.1f}"
-    else:
-        _fmt = lambda v: f"{v:>7.2f}"
-    print(f"  {_lbl:<30} {len(_s):>4}  "
-          + "  ".join(_fmt(_s.quantile(q)) for q in [.10, .25, .50, .75, .90]))
+    print(f"  {_lbl:<32} {len(_s):>4}  "
+          + "  ".join(f"{_s.quantile(q) * _scale:>7.1f}"
+                      for q in [.10, .25, .50, .75, .90]))
 
 # ── Señal simple: retiro acumulado 5d > 50% del saldo encaje_ovn ──────────────
 dm["estrategia_simple"] = dm["pct_retiro_5d"] < _UMBRAL_PCT_RETIRO
@@ -718,9 +715,9 @@ _ax3[2].bar(_dm_c["fecha_plot"], (_dm_c["pct_retiro_5d"] * 100).fillna(0),
 _ax3[2].axhline(0, color="black", lw=0.8, ls=":")
 _ax3[2].axhline(_UMBRAL_PCT_RETIRO * 100, color="#B71C1C", lw=1.4, ls="--",
                 label=f"Umbral estrategia ({_UMBRAL_PCT_RETIRO*100:.0f}%)")
-_ax3[2].set_ylabel("Retiro acum. 5d / saldo (%)")
-_ax3[2].set_title("Retiro acumulado últimos 5 días hábiles / saldo encaje_ovn  "
-                  "(rojo oscuro = supera umbral −50%)")
+_ax3[2].set_ylabel("Retiro acum. 5d / exigible mes (%)")
+_ax3[2].set_title("Retiro acumulado últimos 5 días hábiles / exigible total del mes  "
+                  f"(rojo oscuro = supera umbral {_UMBRAL_PCT_RETIRO*100:.0f}%)")
 _ax3[2].legend(fontsize=8)
 _ax3[2].yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:.0f}%"))
 _ax3[2].set_xlabel("Fecha")
@@ -757,9 +754,9 @@ _resumen_est["frecuencia"] = _resumen_est["meses_estrategia"].apply(
 _cols_det = ["fecha_plot", "anio", "mes",
              "estrategia", "estrategia_simple", "estrategia_score", "score",
              "_pct_exc", "_pct_ret5d", "_pct_lib",
-             "pct_retiro_5d",
+             "retiro_acum_5d_M", "pct_retiro_5d",
              "exceso_avance_d10", "cobertura_max_d10", "dia_liberacion_90",
-             "retiro_tardio_M", "ritmo_encaje_tardio", "caida_avance"]
+             "retiro_tardio_M", "ritmo_encaje_tardio"]
 _rename_cols = {
     "fecha_plot":    "fecha",
     "_pct_exc":      "pct_exceso_d10",
