@@ -466,8 +466,9 @@ print("\n" + "=" * 65)
 print("  Estrategia sobreencaje BBVA")
 print("=" * 65)
 
-# Percentil de score para clasificar estrategia (top 30% = estrategia activa)
-_UMBRAL_SCORE_PCT = 0.70
+# Umbrales de clasificación
+_UMBRAL_PCT_RETIRO = -0.50   # retiro acumulado 5d > 50% del saldo → estrategia
+_UMBRAL_SCORE_PCT  = 0.70    # top 30% del score combinado → estrategia por score
 
 # Columnas temporales (se limpian al final)
 df["_am"]            = df["fecha"].dt.to_period("M")
@@ -478,7 +479,7 @@ df["_exceso_avance"] = df["Avance"] - df["_frac_mes"]
 def _met_estrat(g):
     g     = g.sort_values("fecha")
     early = g[g["dia_mes"] <= 10]
-    late  = g[g["dias_restantes"] <= 5]
+    late  = g.tail(5)         # últimos 5 días hábiles del mes
 
     exc   = early["_exceso_avance"].mean() if len(early) else np.nan
     cmx   = early["Avance"].max()          if len(early) else np.nan
@@ -487,13 +488,24 @@ def _met_estrat(g):
     caida = g["Avance"].max() - (g["Avance"].iloc[-1] if len(g) else np.nan)
     dlib  = g["dia_liberacion_90"].iloc[0] if len(g)    else np.nan
 
+    # ── Indicador simple: retiro acumulado 5d / saldo encaje_ovn ──────────────
+    retiro_acum_5d = late["retiro_neto"].sum() if len(late) else np.nan
+    # Saldo de referencia: encaje_ovn al inicio de la última semana hábil
+    _n_late = len(late)
+    _saldo_ref = (g["encaje_ovn"].iloc[-(_n_late + 1)]
+                  if len(g) > _n_late else g["encaje_ovn"].iloc[0])
+    pct_retiro_5d = (retiro_acum_5d / _saldo_ref
+                     if (np.isfinite(retiro_acum_5d) and _saldo_ref != 0)
+                     else np.nan)
+
     return pd.Series({
-        "exceso_avance_d10":   round(exc,    3) if np.isfinite(exc)   else np.nan,
-        "cobertura_max_d10":   round(cmx,    3) if np.isfinite(cmx)   else np.nan,
-        "retiro_tardio_M":     round(ret/1e6, 1) if np.isfinite(ret)  else np.nan,
-        "ritmo_encaje_tardio": round(rrit,   3) if np.isfinite(rrit)  else np.nan,
-        "caida_avance":        round(caida,  3) if np.isfinite(caida) else np.nan,
+        "exceso_avance_d10":   round(exc,          3) if np.isfinite(exc)           else np.nan,
+        "cobertura_max_d10":   round(cmx,          3) if np.isfinite(cmx)           else np.nan,
+        "retiro_tardio_M":     round(ret / 1e6,    1) if np.isfinite(ret)           else np.nan,
+        "ritmo_encaje_tardio": round(rrit,         3) if np.isfinite(rrit)          else np.nan,
+        "caida_avance":        round(caida,        3) if np.isfinite(caida)         else np.nan,
         "dia_liberacion_90":   dlib,
+        "pct_retiro_5d":       round(pct_retiro_5d, 3) if np.isfinite(pct_retiro_5d) else np.nan,
     })
 
 
@@ -505,41 +517,53 @@ dm["fecha_plot"] = dm["_am"].dt.to_timestamp()
 
 # ── Diagnóstico de indicadores ─────────────────────────────────────────────────
 print("\n── Diagnóstico de indicadores (percentiles) ────────────────────")
-print(f"  {'Indicador':<28} {'n':>4}  {'P10':>8}  {'P25':>8}  "
-      f"{'P50':>8}  {'P75':>8}  {'P90':>8}")
-print(f"  {'-'*28} {'-'*4}  {'-'*8}  {'-'*8}  {'-'*8}  {'-'*8}  {'-'*8}")
+print(f"  {'Indicador':<30} {'n':>4}  {'P10':>7}  {'P25':>7}  "
+      f"{'P50':>7}  {'P75':>7}  {'P90':>7}")
+print(f"  {'-'*30} {'-'*4}  {'-'*7}  {'-'*7}  {'-'*7}  {'-'*7}  {'-'*7}")
 for _col, _lbl in [
     ("exceso_avance_d10", "Exceso avance D10"),
-    ("retiro_tardio_M",   "Retiro tardío (M USD)"),
+    ("pct_retiro_5d",     "Retiro acum 5d / saldo (%)"),
+    ("retiro_tardio_M",   "Retiro tardío media (M USD)"),
     ("dia_liberacion_90", "Día liberación 90%"),
     ("caida_avance",      "Caída Avance fin mes"),
 ]:
     _s = dm[_col].dropna()
-    print(f"  {_lbl:<28} {len(_s):>4}  "
-          f"{_s.quantile(.10):>8.2f}  {_s.quantile(.25):>8.2f}  "
-          f"{_s.quantile(.50):>8.2f}  {_s.quantile(.75):>8.2f}  "
-          f"{_s.quantile(.90):>8.2f}")
+    if _col == "pct_retiro_5d":
+        _fmt = lambda v: f"{v*100:>7.1f}"
+    else:
+        _fmt = lambda v: f"{v:>7.2f}"
+    print(f"  {_lbl:<30} {len(_s):>4}  "
+          + "  ".join(_fmt(_s.quantile(q)) for q in [.10, .25, .50, .75, .90]))
 
-# ── Score relativo (percentil en historial propio) ────────────────────────────
-# exceso_avance_d10: mayor = más sobreencaje temprano → rank ascendente
-# retiro_tardio_M:   más negativo = mayor salida → rank descendente (negamos)
-# dia_liberacion_90: menor día = liberó más rápido → rank descendente (negamos)
-dm["_pct_exc"] = dm["exceso_avance_d10"].rank(pct=True, na_option="keep")
-dm["_pct_ret"] = (-dm["retiro_tardio_M"]).rank(pct=True, na_option="keep")
-dm["_pct_lib"] = (-dm["dia_liberacion_90"]).rank(pct=True, na_option="keep")
+# ── Señal simple: retiro acumulado 5d > 50% del saldo encaje_ovn ──────────────
+dm["estrategia_simple"] = dm["pct_retiro_5d"] < _UMBRAL_PCT_RETIRO
+
+# ── Score compuesto (percentil en historial propio) como señal secundaria ─────
+# mayor exceso temprano → rank ascendente
+# mayor retiro 5d (más negativo pct) → rank descendente (negamos)
+# día de liberación más bajo → rank descendente (negamos)
+dm["_pct_exc"]   = dm["exceso_avance_d10"].rank(pct=True, na_option="keep")
+dm["_pct_ret5d"] = (-dm["pct_retiro_5d"]).rank(pct=True, na_option="keep")
+dm["_pct_lib"]   = (-dm["dia_liberacion_90"]).rank(pct=True, na_option="keep")
 
 dm["score"] = (
-    dm["_pct_exc"].fillna(0.5) * 0.50 +
-    dm["_pct_ret"].fillna(0.5) * 0.30 +
-    dm["_pct_lib"].fillna(0.5) * 0.20
+    dm["_pct_exc"].fillna(0.5)   * 0.40 +
+    dm["_pct_ret5d"].fillna(0.5) * 0.40 +
+    dm["_pct_lib"].fillna(0.5)   * 0.20
 )
 
 _umbral_score = dm["score"].quantile(_UMBRAL_SCORE_PCT)
-dm["estrategia"] = dm["score"] >= _umbral_score
+dm["estrategia_score"] = dm["score"] >= _umbral_score
 
-n_est = dm["estrategia"].sum()
-print(f"\n  Score umbral (P{_UMBRAL_SCORE_PCT*100:.0f}): {_umbral_score:.3f}")
-print(f"  Meses con estrategia detectada: {n_est} / {len(dm)} "
+# Estrategia final: simple (50% saldo) O score (top 30% combinado)
+dm["estrategia"] = dm["estrategia_simple"] | dm["estrategia_score"]
+
+n_simple = dm["estrategia_simple"].sum()
+n_score  = dm["estrategia_score"].sum()
+n_est    = dm["estrategia"].sum()
+print(f"\n  Señal simple  (retiro 5d > 50% saldo)  : {n_simple:>3} meses")
+print(f"  Señal score   (top 30% compuesto)      : {n_score:>3} meses")
+print(f"  Estrategia final (simple OR score)     : {n_est:>3} / {len(dm)} "
       f"({100 * n_est / max(len(dm), 1):.0f}%)")
 
 # ── Gráfico 1: Heatmap año × mes ──────────────────────────────────────────────
@@ -681,14 +705,21 @@ _ax3[1].set_title("Día en que Avance ≥ 90%  (rojo = mes con estrategia)")
 _ax3[1].legend(fontsize=8)
 _ax3[1].invert_yaxis()
 
-_c3 = _dm_c["retiro_tardio_M"].apply(
-    lambda v: "#E53935" if (v is not None and np.isfinite(v) and v < 0) else "#1565C0"
+_c3 = _dm_c["pct_retiro_5d"].apply(
+    lambda v: "#E53935" if (v is not None and np.isfinite(v) and v < _UMBRAL_PCT_RETIRO)
+              else ("#FF8A65" if (v is not None and np.isfinite(v) and v < 0)
+                    else "#1565C0")
 )
-_ax3[2].bar(_dm_c["fecha_plot"], _dm_c["retiro_tardio_M"].fillna(0),
-            width=22, color=_c3, alpha=0.8)
+_ax3[2].bar(_dm_c["fecha_plot"], (_dm_c["pct_retiro_5d"] * 100).fillna(0),
+            width=22, color=_c3, alpha=0.85)
 _ax3[2].axhline(0, color="black", lw=0.8, ls=":")
-_ax3[2].set_ylabel("Retiro neto promedio (M USD)")
-_ax3[2].set_title("Retiro neto promedio en últimos 5 días del mes")
+_ax3[2].axhline(_UMBRAL_PCT_RETIRO * 100, color="#B71C1C", lw=1.4, ls="--",
+                label=f"Umbral estrategia ({_UMBRAL_PCT_RETIRO*100:.0f}%)")
+_ax3[2].set_ylabel("Retiro acum. 5d / saldo (%)")
+_ax3[2].set_title("Retiro acumulado últimos 5 días hábiles / saldo encaje_ovn  "
+                  "(rojo oscuro = supera umbral −50%)")
+_ax3[2].legend(fontsize=8)
+_ax3[2].yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:.0f}%"))
 _ax3[2].set_xlabel("Fecha")
 
 plt.tight_layout()
@@ -720,26 +751,26 @@ _resumen_est["frecuencia"] = _resumen_est["meses_estrategia"].apply(
               "ESPORÁDICA" if n == 1 else "—"
 )
 
-_cols_det = ["fecha_plot", "anio", "mes", "estrategia", "score",
-             "_pct_exc", "_pct_ret", "_pct_lib",
+_cols_det = ["fecha_plot", "anio", "mes",
+             "estrategia", "estrategia_simple", "estrategia_score", "score",
+             "_pct_exc", "_pct_ret5d", "_pct_lib",
+             "pct_retiro_5d",
              "exceso_avance_d10", "cobertura_max_d10", "dia_liberacion_90",
              "retiro_tardio_M", "ritmo_encaje_tardio", "caida_avance"]
+_rename_cols = {
+    "fecha_plot":    "fecha",
+    "_pct_exc":      "pct_exceso_d10",
+    "_pct_ret5d":    "pct_retiro_5d_rank",
+    "_pct_lib":      "pct_dia_lib",
+}
 try:
     _ruta_est = DIR_OUT / "resultados_estrategia.xlsx"
     with pd.ExcelWriter(_ruta_est, engine="openpyxl") as _wr:
-        (dm[_cols_det]
-         .rename(columns={"fecha_plot": "fecha",
-                           "_pct_exc": "pct_exceso_d10",
-                           "_pct_ret": "pct_retiro_tardio",
-                           "_pct_lib": "pct_dia_lib"})
-         .to_excel(_wr, sheet_name="Por_mes", index=False))
+        dm[_cols_det].rename(columns=_rename_cols).to_excel(
+            _wr, sheet_name="Por_mes", index=False)
         _resumen_est.to_excel(_wr, sheet_name="Resumen_anual", index=False)
-        (dm[dm["estrategia"]][_cols_det]
-         .rename(columns={"fecha_plot": "fecha",
-                           "_pct_exc": "pct_exceso_d10",
-                           "_pct_ret": "pct_retiro_tardio",
-                           "_pct_lib": "pct_dia_lib"})
-         .to_excel(_wr, sheet_name="Meses_estrategia", index=False))
+        dm[dm["estrategia"]][_cols_det].rename(columns=_rename_cols).to_excel(
+            _wr, sheet_name="Meses_estrategia", index=False)
     print(f"  Guardado: {_ruta_est.name}")
 except Exception as _e:
     print(f"  AVISO: no se pudo exportar Excel — {_e}")
@@ -762,4 +793,4 @@ print("=" * 65)
 # Limpiar columnas temporales del df diario
 df.drop(columns=["_am", "_frac_mes", "_exceso_avance", "_tipo"], inplace=True)
 # Limpiar columnas de percentil intermedias del df mensual
-dm.drop(columns=["_pct_exc", "_pct_ret", "_pct_lib"], inplace=True, errors="ignore")
+dm.drop(columns=["_pct_exc", "_pct_ret5d", "_pct_lib"], inplace=True, errors="ignore")
