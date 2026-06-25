@@ -698,8 +698,9 @@ _dl_c = _dm_c.dropna(subset=["dia_liberacion_90"])
 _ax3[1].bar(_dl_c["fecha_plot"], _dl_c["dia_liberacion_90"], width=22,
             color=_dl_c["estrategia"].map({True: "#E53935", False: "#1565C0"}),
             alpha=0.8)
-_ax3[1].axhline(_UMBRAL_DIA_LIB, color="orange", lw=1.2, ls="--",
-                label=f"Umbral día {_UMBRAL_DIA_LIB}")
+_umbral_dia_lib = dm["dia_liberacion_90"].quantile(0.30)
+_ax3[1].axhline(_umbral_dia_lib, color="orange", lw=1.2, ls="--",
+                label=f"P30 = día {_umbral_dia_lib:.0f}")
 _ax3[1].axhline(_dl_c["dia_liberacion_90"].median(), color="gray", lw=0.9, ls="-.",
                 label=f"Mediana = día {_dl_c['dia_liberacion_90'].median():.0f}")
 _ax3[1].set_ylabel("Día del mes")
