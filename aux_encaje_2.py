@@ -575,6 +575,7 @@ piv_es = dm.pivot(index="anio", columns="mes", values="estrategia").sort_index()
 piv_dl = dm.pivot(index="anio", columns="mes", values="dia_liberacion_90").sort_index()
 
 _vals_fin = piv_sc.values.astype(float)
+_vmax     = 1.0   # score es percentil 0–1
 _cmap_est = plt.cm.YlOrRd
 
 fig, ax = plt.subplots(figsize=(14, max(4, len(piv_sc) * 0.6 + 2)))
