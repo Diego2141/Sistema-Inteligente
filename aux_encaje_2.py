@@ -558,8 +558,10 @@ def _met_estrat(g):
     sis_6d  = late["retiro_neto_sis"].sum()    if "retiro_neto_sis" in late.columns   else np.nan
     sis_mes = g_bday["retiro_neto_sis"].sum()  if "retiro_neto_sis" in g_bday.columns else np.nan
     # % = mismo denominador que BBVA: mediana saldo mensual BBVA
-    if np.isfinite(sis_6d) and np.isfinite(mediana_saldo) and mediana_saldo > 0:
-        pct_sis = -sis_6d / mediana_saldo   # positivo cuando hay retiro neto
+    # Solo aplica cuando el sistema tiene retiro neto (sis_6d < 0)
+    if (np.isfinite(sis_6d) and np.isfinite(mediana_saldo)
+            and mediana_saldo > 0 and sis_6d < 0):
+        pct_sis = -sis_6d / mediana_saldo
     else:
         pct_sis = np.nan
 
@@ -657,21 +659,24 @@ for _i, _anio in enumerate(piv_int.index):
         if not np.isfinite(_fi):
             continue
         _ctxt = "white" if _fi > _vmax * 0.55 else "black"
-        if np.isfinite(_fs) and np.isfinite(_fq):
-            _sis_str = f"\nSis:{_fs:,.0f} ({_fq*100:.0f}%)"
-        elif np.isfinite(_fs):
-            _sis_str = f"\nSis:{_fs:,.0f}"
-        else:
-            _sis_str = ""
+        # BBVA — parte superior de la celda
         if np.isfinite(_fr) and np.isfinite(_fp):
-            _lbl = f"{_fr:,.0f}\n({_fp:.0f}%){_sis_str}"
+            _bbva_lbl = f"{_fr:,.0f}\n({_fp:.0f}%)"
         elif np.isfinite(_fr):
-            _lbl = f"{_fr:,.0f}{_sis_str}"
+            _bbva_lbl = f"{_fr:,.0f}"
         else:
-            _lbl = ""
-        ax.text(_j, _i, _lbl, ha="center", va="center",
-                fontsize=5.0, color=_ctxt, linespacing=1.25,
-                fontweight="bold" if _ve else "normal")
+            _bbva_lbl = ""
+        if _bbva_lbl:
+            ax.text(_j, _i - 0.14, _bbva_lbl, ha="center", va="center",
+                    fontsize=5.3, color=_ctxt, linespacing=1.2,
+                    fontweight="bold" if _ve else "normal")
+        # Sistema — parte inferior de la celda
+        if np.isfinite(_fs):
+            _sis_lbl = (f"Sis:{_fs:,.0f} ({_fq*100:.0f}%)"
+                        if np.isfinite(_fq) else f"Sis:{_fs:,.0f}")
+            ax.text(_j, _i + 0.30, _sis_lbl, ha="center", va="center",
+                    fontsize=4.5, color=_ctxt, linespacing=1.1,
+                    style="italic")
         if _ve:
             ax.add_patch(plt.Rectangle((_j - 0.5, _i - 0.5), 1, 1,
                          fill=False, edgecolor="#1565C0", linewidth=2.2))
@@ -738,21 +743,24 @@ for _i, _anio in enumerate(piv_int2.index):
         if not np.isfinite(_fi):
             continue
         _ctxt = "white" if _fi > _vmax2 * 0.55 else "black"
-        if np.isfinite(_fs) and np.isfinite(_fq):
-            _sis_str = f"\nSis:{_fs:,.0f} ({_fq*100:.0f}%)"
-        elif np.isfinite(_fs):
-            _sis_str = f"\nSis:{_fs:,.0f}"
-        else:
-            _sis_str = ""
+        # BBVA — parte superior de la celda
         if np.isfinite(_fr) and np.isfinite(_fp):
-            _lbl = f"{_fr:,.0f}\n({_fp:.0f}%){_sis_str}"
+            _bbva_lbl = f"{_fr:,.0f}\n({_fp:.0f}%)"
         elif np.isfinite(_fr):
-            _lbl = f"{_fr:,.0f}{_sis_str}"
+            _bbva_lbl = f"{_fr:,.0f}"
         else:
-            _lbl = ""
-        ax2.text(_j, _i, _lbl, ha="center", va="center",
-                 fontsize=5.0, color=_ctxt, linespacing=1.25,
-                 fontweight="bold" if _ve else "normal")
+            _bbva_lbl = ""
+        if _bbva_lbl:
+            ax2.text(_j, _i - 0.14, _bbva_lbl, ha="center", va="center",
+                     fontsize=5.3, color=_ctxt, linespacing=1.2,
+                     fontweight="bold" if _ve else "normal")
+        # Sistema — parte inferior de la celda
+        if np.isfinite(_fs):
+            _sis_lbl = (f"Sis:{_fs:,.0f} ({_fq*100:.0f}%)"
+                        if np.isfinite(_fq) else f"Sis:{_fs:,.0f}")
+            ax2.text(_j, _i + 0.30, _sis_lbl, ha="center", va="center",
+                     fontsize=4.5, color=_ctxt, linespacing=1.1,
+                     style="italic")
         if _ve:
             ax2.add_patch(plt.Rectangle((_j - 0.5, _i - 0.5), 1, 1,
                           fill=False, edgecolor="#1565C0", linewidth=2.2))
