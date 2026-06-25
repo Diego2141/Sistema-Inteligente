@@ -458,3 +458,275 @@ print(f"\nExportado: {ruta_out}")
 print(f"  Hoja 'Datos'             : {len(df):,} filas")
 print(f"  Hoja 'Balance_Mensual'   : {len(balance)} filas")
 print(f"  Hoja 'Liberacion_Mensual': {len(lib_resumen)} filas")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ANÁLISIS ESTRATEGIA SOBREENCAJE BBVA
+# ══════════════════════════════════════════════════════════════════════════════
+print("\n" + "=" * 65)
+print("  Estrategia sobreencaje BBVA")
+print("=" * 65)
+
+_UMBRAL_EXCESO_D10 = 0.20   # exceso de Avance sobre ritmo lineal en días 1-10
+_UMBRAL_DIA_LIB    = 12     # dia_liberacion_90 ≤ día 12 → alcanzó 90% muy rápido
+
+# Columnas temporales (se limpian al final)
+df["_am"]            = df["fecha"].dt.to_period("M")
+df["_frac_mes"]      = df["dia_mes"] / df["dias_en_mes"]
+df["_exceso_avance"] = df["Avance"] - df["_frac_mes"]
+
+
+def _met_estrat(g):
+    g     = g.sort_values("fecha")
+    early = g[g["dia_mes"] <= 10]
+    late  = g[g["dias_restantes"] <= 5]
+
+    exc   = early["_exceso_avance"].mean() if len(early) else np.nan
+    cmx   = early["Avance"].max()          if len(early) else np.nan
+    ret   = late["retiro_neto"].mean()     if len(late)  else np.nan
+    rrit  = late["ritmo_encaje"].mean()    if len(late)  else np.nan
+    caida = g["Avance"].max() - (g["Avance"].iloc[-1] if len(g) else np.nan)
+    dlib  = g["dia_liberacion_90"].iloc[0] if len(g)    else np.nan
+
+    score = (max(exc, 0) if np.isfinite(exc) else 0.0) * 0.6 + \
+            (max(-ret / 1e9, 0) if np.isfinite(ret) else 0.0) * 0.4
+
+    estr = (
+        (np.isfinite(exc) and exc > _UMBRAL_EXCESO_D10
+         and np.isfinite(ret) and ret < 0)
+        or
+        (np.isfinite(dlib) and dlib <= _UMBRAL_DIA_LIB
+         and np.isfinite(ret) and ret < 0)
+    )
+
+    return pd.Series({
+        "exceso_avance_d10":   round(exc,   3) if np.isfinite(exc)   else np.nan,
+        "cobertura_max_d10":   round(cmx,   3) if np.isfinite(cmx)   else np.nan,
+        "retiro_tardio_M":     round(ret/1e6,1) if np.isfinite(ret)  else np.nan,
+        "ritmo_encaje_tardio": round(rrit,  3) if np.isfinite(rrit)  else np.nan,
+        "caida_avance":        round(caida, 3) if np.isfinite(caida) else np.nan,
+        "dia_liberacion_90":   dlib,
+        "score":               round(score, 4),
+        "estrategia":          estr,
+    })
+
+
+print("\n  Calculando indicadores por mes ...")
+dm = df.groupby("_am").apply(_met_estrat).reset_index()
+dm["anio"]       = dm["_am"].dt.year
+dm["mes"]        = dm["_am"].dt.month
+dm["fecha_plot"] = dm["_am"].dt.to_timestamp()
+
+n_est = dm["estrategia"].sum()
+print(f"  Meses con estrategia detectada: {n_est} / {len(dm)} "
+      f"({100 * n_est / max(len(dm), 1):.0f}%)")
+
+# ── Gráfico 1: Heatmap año × mes ──────────────────────────────────────────────
+_MESES_ABR = ["Ene", "Feb", "Mar", "Abr", "May", "Jun",
+              "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
+
+piv_sc = dm.pivot(index="anio", columns="mes", values="score").sort_index()
+piv_es = dm.pivot(index="anio", columns="mes", values="estrategia").sort_index()
+piv_dl = dm.pivot(index="anio", columns="mes", values="dia_liberacion_90").sort_index()
+
+_vals_fin = piv_sc.values.astype(float)
+_vmax     = float(_vals_fin[np.isfinite(_vals_fin)].max()) if np.any(np.isfinite(_vals_fin)) else 1.0
+_cmap_est = plt.cm.YlOrRd
+
+fig, ax = plt.subplots(figsize=(14, max(4, len(piv_sc) * 0.6 + 2)))
+fig.suptitle(
+    "Estrategia sobreencaje BBVA — Score por año y mes\n"
+    "Más oscuro = mayor sobreencaje temprano + retiro tardío  ·  "
+    "Borde azul = estrategia confirmada  ·  Número = día liberación 90%",
+    fontweight="bold", fontsize=10,
+)
+im = ax.imshow(_vals_fin, aspect="auto", cmap=_cmap_est, vmin=0, vmax=_vmax)
+ax.set_xticks(range(12))
+ax.set_xticklabels(_MESES_ABR)
+ax.set_yticks(range(len(piv_sc)))
+ax.set_yticklabels(piv_sc.index.astype(str))
+
+for _i, _anio in enumerate(piv_sc.index):
+    for _j, _mes in enumerate(range(1, 13)):
+        _vs = piv_sc.loc[_anio, _mes] if _mes in piv_sc.columns else np.nan
+        _ve = piv_es.loc[_anio, _mes] if _mes in piv_es.columns else False
+        _vl = piv_dl.loc[_anio, _mes] if _mes in piv_dl.columns else np.nan
+        _fs = float(_vs) if _vs is not None else np.nan
+        _fl = float(_vl) if _vl is not None else np.nan
+        if not np.isfinite(_fs):
+            continue
+        _ctxt = "white" if _fs > _vmax * 0.55 else "black"
+        _lbl  = f"d{int(_fl)}" if np.isfinite(_fl) else f"{_fs:.2f}"
+        ax.text(_j, _i, _lbl, ha="center", va="center",
+                fontsize=7, color=_ctxt,
+                fontweight="bold" if _ve else "normal")
+        if _ve:
+            ax.add_patch(plt.Rectangle((_j - 0.5, _i - 0.5), 1, 1,
+                         fill=False, edgecolor="#1565C0", linewidth=2.2))
+
+plt.colorbar(im, ax=ax, label="Score estrategia", shrink=0.75)
+ax.set_xlabel("Mes")
+ax.set_ylabel("Año")
+from matplotlib.patches import Patch as _Patch
+ax.legend(handles=[
+    _Patch(facecolor=_cmap_est(0.25), label="Sobreencaje leve"),
+    _Patch(facecolor=_cmap_est(0.75), label="Sobreencaje intenso"),
+    plt.Rectangle((0, 0), 1, 1, fill=False, edgecolor="#1565C0", lw=2,
+                  label="Estrategia confirmada"),
+], loc="lower right", fontsize=7, framealpha=0.9)
+plt.tight_layout()
+_p1 = DIR_OUT / "00_heatmap_estrategia.png"
+fig.savefig(_p1, dpi=150, bbox_inches="tight")
+plt.close(fig)
+print(f"\n  Guardado: {_p1.name}")
+
+# ── Gráfico 2: Perfil promedio de Avance (estrategia vs normal) ────────────────
+_meses_est  = set(dm.loc[dm["estrategia"],  "_am"].astype(str))
+_meses_norm = set(dm.loc[~dm["estrategia"], "_am"].astype(str))
+df["_tipo"] = df["_am"].astype(str).map(
+    lambda m: "Estrategia" if m in _meses_est else
+              ("Normal"    if m in _meses_norm else None)
+)
+
+fig, _axp = plt.subplots(1, 2, figsize=(14, 5))
+fig.suptitle("Perfil promedio mensual — Estrategia vs Normal", fontweight="bold")
+_COLS_EST = {"Estrategia": "#E53935", "Normal": "#1976D2"}
+
+for _ax, _yv, _yl, _tt in [
+    (_axp[0], "Avance",         "Avance (cobertura acumulada)",   "Avance mensual por día del mes"),
+    (_axp[1], "_exceso_avance", "Exceso sobre ritmo lineal (pp)", "Avance − (día/días_mes)"),
+]:
+    for _tipo, _color in _COLS_EST.items():
+        _sub = df[df["_tipo"] == _tipo]
+        if _sub.empty:
+            continue
+        _pf = _sub.groupby("dia_mes")[_yv].mean()
+        _ci = _sub.groupby("dia_mes")[_yv].std()
+        _d  = _pf.index.values
+        _v  = _pf.values
+        _ax.plot(_d, _v, color=_color, linewidth=2, label=_tipo)
+        _ax.fill_between(_d,
+                         _v - _ci.reindex(_d).fillna(0).values,
+                         _v + _ci.reindex(_d).fillna(0).values,
+                         alpha=0.12, color=_color)
+    if _yv == "Avance":
+        _dr = np.arange(1, 32)
+        _ax.plot(_dr, _dr / 30, color="gray", lw=1, ls="--", label="Ritmo lineal")
+        _ax.axhline(0.90, color="green", lw=0.9, ls=":", label="Umbral 90%")
+    else:
+        _ax.axhline(0, color="black", lw=0.8, ls=":")
+        _ax.axhline(_UMBRAL_EXCESO_D10, color="orange", lw=0.9, ls="-.",
+                    label=f"Umbral sobreencaje ({_UMBRAL_EXCESO_D10*100:.0f} pp)")
+        _ax.axvline(10, color="gray", lw=0.7, ls=":", label="Día 10")
+    _ax.set_xlabel("Día del mes calendario")
+    _ax.set_ylabel(_yl)
+    _ax.set_title(_tt)
+    _ax.legend(fontsize=8)
+    _ax.set_xlim(1, 31)
+
+plt.tight_layout()
+_p2 = DIR_OUT / "01_perfil_avance.png"
+fig.savefig(_p2, dpi=150, bbox_inches="tight")
+plt.close(fig)
+print(f"  Guardado: {_p2.name}")
+
+# ── Gráfico 3: Timeline score + día liberación + retiro tardío ─────────────────
+_dm_c = dm.dropna(subset=["score"]).copy()
+fig, _ax3 = plt.subplots(3, 1, figsize=(15, 10), sharex=True)
+fig.suptitle("Estrategia sobreencaje BBVA — Evolución temporal", fontweight="bold")
+_cb = _dm_c["estrategia"].map({True: "#E53935", False: "#90A4AE"})
+
+_ax3[0].bar(_dm_c["fecha_plot"], _dm_c["score"], width=22, color=_cb, alpha=0.85)
+_roll = _dm_c.set_index("fecha_plot")["score"].rolling("365D").mean()
+_ax3[0].plot(_roll.index, _roll.values, color="black", lw=1.8)
+_ax3[0].set_ylabel("Score estrategia")
+_ax3[0].legend(handles=[
+    plt.Rectangle((0,0),1,1, color="#E53935", alpha=0.85, label="Estrategia activa"),
+    plt.Rectangle((0,0),1,1, color="#90A4AE", alpha=0.85, label="Sin estrategia"),
+    plt.Line2D([0],[0], color="black", lw=1.8, label="Media 12m"),
+], fontsize=8)
+_ax3[0].set_title("Score mensual (sobreencaje temprano + retiro tardío)")
+
+_dl_c = _dm_c.dropna(subset=["dia_liberacion_90"])
+_ax3[1].bar(_dl_c["fecha_plot"], _dl_c["dia_liberacion_90"], width=22,
+            color=_dl_c["estrategia"].map({True: "#E53935", False: "#1565C0"}),
+            alpha=0.8)
+_ax3[1].axhline(_UMBRAL_DIA_LIB, color="orange", lw=1.2, ls="--",
+                label=f"Umbral día {_UMBRAL_DIA_LIB}")
+_ax3[1].axhline(_dl_c["dia_liberacion_90"].median(), color="gray", lw=0.9, ls="-.",
+                label=f"Mediana = día {_dl_c['dia_liberacion_90'].median():.0f}")
+_ax3[1].set_ylabel("Día del mes")
+_ax3[1].set_title("Día en que Avance ≥ 90%  (rojo = mes con estrategia)")
+_ax3[1].legend(fontsize=8)
+_ax3[1].invert_yaxis()
+
+_c3 = _dm_c["retiro_tardio_M"].apply(
+    lambda v: "#E53935" if (v is not None and np.isfinite(v) and v < 0) else "#1565C0"
+)
+_ax3[2].bar(_dm_c["fecha_plot"], _dm_c["retiro_tardio_M"].fillna(0),
+            width=22, color=_c3, alpha=0.8)
+_ax3[2].axhline(0, color="black", lw=0.8, ls=":")
+_ax3[2].set_ylabel("Retiro neto promedio (M USD)")
+_ax3[2].set_title("Retiro neto promedio en últimos 5 días del mes")
+_ax3[2].set_xlabel("Fecha")
+
+plt.tight_layout()
+_p3 = DIR_OUT / "02_serie_tiempo.png"
+fig.savefig(_p3, dpi=150, bbox_inches="tight")
+plt.close(fig)
+print(f"  Guardado: {_p3.name}")
+
+# ── Resumen anual y export Excel ───────────────────────────────────────────────
+_resumen_est = (
+    dm.groupby("anio")
+    .agg(
+        meses_con_datos     = ("estrategia", "count"),
+        meses_estrategia    = ("estrategia", "sum"),
+        score_medio         = ("score",             "mean"),
+        score_max           = ("score",             "max"),
+        dia_lib_mediano     = ("dia_liberacion_90", "median"),
+        exceso_avance_medio = ("exceso_avance_d10", "mean"),
+    )
+    .reset_index()
+)
+_resumen_est["pct_estrategia"] = (
+    _resumen_est["meses_estrategia"] / _resumen_est["meses_con_datos"] * 100
+).round(1)
+_resumen_est["frecuencia"] = _resumen_est["meses_estrategia"].apply(
+    lambda n: "MENSUAL"    if n >= 8 else
+              "TRIMESTRAL" if 3 <= n <= 4 else
+              "SEMESTRAL"  if 2 <= n <= 3 else
+              "ESPORÁDICA" if n == 1 else "—"
+)
+
+_cols_det = ["fecha_plot", "anio", "mes", "estrategia", "score",
+             "exceso_avance_d10", "cobertura_max_d10", "dia_liberacion_90",
+             "retiro_tardio_M", "ritmo_encaje_tardio", "caida_avance"]
+try:
+    _ruta_est = DIR_OUT / "resultados_estrategia.xlsx"
+    with pd.ExcelWriter(_ruta_est, engine="openpyxl") as _wr:
+        dm[_cols_det].rename(columns={"fecha_plot": "fecha"}).to_excel(
+            _wr, sheet_name="Por_mes", index=False)
+        _resumen_est.to_excel(_wr, sheet_name="Resumen_anual", index=False)
+        dm[dm["estrategia"]][_cols_det].rename(columns={"fecha_plot": "fecha"}).to_excel(
+            _wr, sheet_name="Meses_estrategia", index=False)
+    print(f"  Guardado: {_ruta_est.name}")
+except Exception as _e:
+    print(f"  AVISO: no se pudo exportar Excel — {_e}")
+
+# ── Resumen consola ────────────────────────────────────────────────────────────
+print("\n" + "=" * 65)
+print("  RESUMEN ANUAL — ESTRATEGIA SOBREENCAJE BBVA")
+print("=" * 65)
+print(f"  {'Año':<6} {'Meses':>8} {'Score':>8} {'Día lib.':>9} {'Frecuencia'}")
+print(f"  {'-'*6} {'-'*8} {'-'*8} {'-'*9} {'-'*15}")
+for _, _r in _resumen_est.sort_values("anio").iterrows():
+    _lm = f"día {int(_r['dia_lib_mediano'])}" if np.isfinite(_r['dia_lib_mediano']) else "  —"
+    print(f"  {int(_r['anio']):<6} "
+          f"{int(_r['meses_estrategia']):>3}/{int(_r['meses_con_datos']):<4} "
+          f"{_r['score_medio']:>7.3f}  {_lm:>9}  {_r['frecuencia']}")
+
+print(f"\n  Archivos en: {DIR_OUT}")
+print("=" * 65)
+
+# Limpiar columnas temporales
+df.drop(columns=["_am", "_frac_mes", "_exceso_avance", "_tipo"], inplace=True)
