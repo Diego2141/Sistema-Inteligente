@@ -587,6 +587,75 @@ fig.savefig(_p1, dpi=150, bbox_inches="tight")
 plt.close(fig)
 print(f"\n  Guardado: {_p1.name}")
 
+# ── Heatmap adicional: % retiro sobre mediana saldo del mes PREVIO ─────────────
+# mediana_saldo del mes anterior (shift=1); primer mes usa el propio mes
+dm_s = dm.sort_values("fecha_plot").reset_index(drop=True)
+dm_s["_saldo_prev_M"] = dm_s["mediana_saldo_M"].shift(1).fillna(dm_s["mediana_saldo_M"])
+
+dm_s["_int_prev"]  = (-dm_s["retiro_acum_5d_M"] / (UMBRAL_SALDO * dm_s["_saldo_prev_M"].replace(0, np.nan))).clip(lower=0)
+dm_s["_pct_prev"]  = (-dm_s["retiro_acum_5d_M"] / dm_s["_saldo_prev_M"].replace(0, np.nan) * 100).clip(lower=0)
+
+piv_int2 = dm_s.pivot(index="anio", columns="mes", values="_int_prev").sort_index()
+piv_pct2 = dm_s.pivot(index="anio", columns="mes", values="_pct_prev").sort_index()
+
+_vals2 = piv_int2.values.astype(float)
+_vmax2 = float(np.nanmax(_vals2)) if np.any(np.isfinite(_vals2)) else 2.0
+
+fig2, ax2 = plt.subplots(figsize=(14, max(4, len(piv_int2) * 0.6 + 2)))
+fig2.suptitle(
+    f"Estrategia sobreencaje BBVA — Intensidad usando saldo del mes PREVIO\n"
+    f"Intensidad = retiro 5d / ({UMBRAL_SALDO*100:.0f}% × mediana saldo mes anterior)  ·  "
+    "> 1 = estrategia activada (borde azul)  ·  Celda: retiro M USD / % saldo previo",
+    fontweight="bold", fontsize=10,
+)
+im2 = ax2.imshow(_vals2, aspect="auto", cmap=_cmap, vmin=0, vmax=_vmax2)
+
+ax2.set_xticks(range(12))
+ax2.set_xticklabels(_MESES_ABR)
+ax2.set_yticks(range(len(piv_int2)))
+ax2.set_yticklabels(piv_int2.index.astype(str))
+
+for _i, _anio in enumerate(piv_int2.index):
+    for _j, _mes in enumerate(range(1, 13)):
+        _vi = piv_int2.loc[_anio, _mes] if _mes in piv_int2.columns else np.nan
+        _ve = piv_est.loc[_anio, _mes]  if _mes in piv_est.columns  else False
+        _vr = piv_ret.loc[_anio, _mes]  if _mes in piv_ret.columns  else np.nan
+        _vp = piv_pct2.loc[_anio, _mes] if _mes in piv_pct2.columns else np.nan
+        _fi = float(_vi) if _vi is not None else np.nan
+        _fr = float(_vr) if _vr is not None else np.nan
+        _fp = float(_vp) if _vp is not None else np.nan
+        if not np.isfinite(_fi):
+            continue
+        _ctxt = "white" if _fi > _vmax2 * 0.55 else "black"
+        if np.isfinite(_fr) and np.isfinite(_fp):
+            _lbl = f"{_fr:,.0f}\n({_fp:.0f}%)"
+        elif np.isfinite(_fr):
+            _lbl = f"{_fr:,.0f}"
+        else:
+            _lbl = ""
+        ax2.text(_j, _i, _lbl, ha="center", va="center",
+                 fontsize=5.8, color=_ctxt, linespacing=1.35,
+                 fontweight="bold" if _ve else "normal")
+        if _ve:
+            ax2.add_patch(plt.Rectangle((_j - 0.5, _i - 0.5), 1, 1,
+                          fill=False, edgecolor="#1565C0", linewidth=2.2))
+
+plt.colorbar(im2, ax=ax2, label=f"Retiro / ({UMBRAL_SALDO*100:.0f}% × mediana saldo previo)",
+             shrink=0.75)
+ax2.set_xlabel("Mes")
+ax2.set_ylabel("Año")
+ax2.legend(handles=[
+    _Patch(facecolor=_cmap(0.4), label="Retiro moderado"),
+    _Patch(facecolor=_cmap(0.85), label="Retiro intenso"),
+    plt.Rectangle((0, 0), 1, 1, fill=False, edgecolor="#1565C0", lw=2,
+                  label=f"Estrategia activada (retiro > {UMBRAL_SALDO*100:.0f}% saldo previo)"),
+], loc="lower right", fontsize=7, framealpha=0.9)
+plt.tight_layout()
+_p1b = DIR_OUT / "00b_heatmap_estrategia_saldo_prev.png"
+fig2.savefig(_p1b, dpi=150, bbox_inches="tight")
+plt.close(fig2)
+print(f"  Guardado: {_p1b.name}")
+
 # ── Timeline: retiro acumulado 5d vs umbral ────────────────────────────────────
 _dm_c = dm.dropna(subset=["retiro_acum_5d_M"]).copy()
 _cb   = _dm_c["estrategia"].map({True: "#E53935", False: "#90A4AE"})
