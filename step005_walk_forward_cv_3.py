@@ -1271,3 +1271,365 @@ if _med_list:
     fig_cmp.savefig(_p_cmp, dpi=150, bbox_inches="tight")
     plt.close(fig_cmp)
     print(f"  Guardado: {_p_cmp.name}")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# WALK-FORWARD CV — Detección estrategia sobreencaje BBVA
+# ══════════════════════════════════════════════════════════════════════════════
+import warnings
+warnings.filterwarnings("ignore")
+
+from xgboost import XGBClassifier
+from sklearn.metrics import (
+    roc_auc_score, classification_report,
+    precision_score, recall_score, f1_score, confusion_matrix,
+)
+
+# ── Parámetros walk-forward ────────────────────────────────────────────────────
+INICIO_TRAIN = "2020-01"
+FOLDS = [
+    ("2022-12", "2023-02", "2023-12"),   # Fold 1: train hasta dic-2022, val 2023 (gap 1 mes)
+    ("2023-12", "2024-02", "2024-12"),   # Fold 2: train hasta dic-2023, val 2024 (gap 1 mes)
+]
+TEST_START = "2025-02"   # gap 1 mes tras fin train 2024-12
+
+XGB_PARAMS = dict(
+    n_estimators     = 200,
+    max_depth        = 3,
+    learning_rate    = 0.05,
+    subsample        = 0.8,
+    colsample_bytree = 0.8,
+    random_state     = 42,
+    eval_metric      = "auc",
+    verbosity        = 0,
+)
+
+# ── Restaurar columnas que fueron eliminadas arriba ───────────────────────────
+df["_am"]      = df["fecha"].dt.to_period("M")
+df["_is_bday"] = (df["fecha"].dt.weekday < 5) & (~df["fecha"].isin(_hols_all))
+if _sis_ok:
+    df = df.merge(_flujo_sis, on="fecha", how="left")
+else:
+    df["retiro_neto_sis"] = np.nan
+
+# ── Construcción de features mensuales ────────────────────────────────────────
+print("\n" + "=" * 65)
+print("  Walk-Forward CV — Estrategia sobreencaje BBVA")
+print("=" * 65)
+print("\nConstruyendo features mensuales...")
+
+
+def _build_monthly_wf(df_wf):
+    rows = []
+    for _am, g in df_wf.groupby("_am"):
+        g      = g.sort_values("fecha")
+        g_bday = g[g["_is_bday"]]
+        late6  = g_bday.tail(N_DIAS_HABILES)
+        late15 = g_bday.tail(15)
+
+        ret_6d  = late6["retiro_neto"].sum()  if len(late6)  else np.nan
+        ret_15d = late15["retiro_neto"].sum() if len(late15) else np.nan
+        med_sal = g["encaje_ovn"].median()
+        max_sal = g["encaje_ovn"].max()
+        umbral  = UMBRAL_SALDO * med_sal
+
+        estrategia = (
+            np.isfinite(ret_6d) and np.isfinite(umbral) and ret_6d < -umbral
+        )
+
+        if (np.isfinite(ret_6d) and np.isfinite(ret_15d)
+                and ret_15d < 0 and ret_6d < 0):
+            concentracion = ret_6d / ret_15d
+        else:
+            concentracion = np.nan
+
+        sis_6d = (late6["retiro_neto_sis"].sum()
+                  if "retiro_neto_sis" in late6.columns else np.nan)
+
+        n_bday_m        = int(g_bday.shape[0])
+        encaje_acum_mes = float(g["encaje"].sum())
+        exig_total_est  = float(g["ExigibleTotalMes_est"].iloc[-1])
+        exceso          = encaje_acum_mes - exig_total_est * UMBRAL_90
+        cap_retiro      = exceso / n_bday_m if n_bday_m > 0 else np.nan
+
+        rows.append({
+            "_am":           _am,
+            "anio":          _am.year,
+            "mes_num":       _am.month,
+            "fecha_plot":    _am.to_timestamp(),
+            "estrategia":    int(estrategia),
+            "ret_6d_M":      ret_6d  / 1e6 if np.isfinite(ret_6d)  else np.nan,
+            "ret_15d_M":     ret_15d / 1e6 if np.isfinite(ret_15d) else np.nan,
+            "concentracion": round(concentracion, 4) if np.isfinite(concentracion) else np.nan,
+            "med_sal_M":     med_sal / 1e6 if np.isfinite(med_sal) else np.nan,
+            "max_sal_M":     max_sal / 1e6 if np.isfinite(max_sal) else np.nan,
+            "cap_retiro_M":  cap_retiro / 1e6 if np.isfinite(cap_retiro) else np.nan,
+            "n_bday_mes":    n_bday_m,
+            "sis_ret_6d_M":  sis_6d / 1e6 if np.isfinite(sis_6d) else np.nan,
+        })
+    return pd.DataFrame(rows).sort_values("fecha_plot").reset_index(drop=True)
+
+
+dm_wf = _build_monthly_wf(df)
+
+# ── Lag features (prospectivos: usan M-1 completo) ────────────────────────────
+dm_wf["estrategia_lag1"] = dm_wf["estrategia"].shift(1)
+dm_wf["ret_6d_lag1"]     = dm_wf["ret_6d_M"].shift(1)
+dm_wf["max_sal_prev_M"]  = dm_wf["max_sal_M"].shift(1)
+dm_wf["med_sal_prev_M"]  = dm_wf["med_sal_M"].shift(1)
+
+dm_wf["ret_pct_max_prev"] = (
+    -dm_wf["ret_6d_M"] / dm_wf["max_sal_prev_M"].replace(0, np.nan) * 100
+).clip(lower=0)
+
+_consec_wf, _cnt_wf = [], 0
+for _e in dm_wf["estrategia_lag1"].fillna(0):
+    _cnt_wf = _cnt_wf + 1 if _e == 1 else 0
+    _consec_wf.append(_cnt_wf)
+dm_wf["n_meses_consec"] = _consec_wf
+
+_mask_wf = (dm_wf["ret_6d_M"] < 0) & (dm_wf["sis_ret_6d_M"] < 0)
+dm_wf["bbva_share_sis"] = np.where(
+    _mask_wf,
+    dm_wf["ret_6d_M"] / dm_wf["sis_ret_6d_M"].replace(0, np.nan) * 100,
+    np.nan,
+)
+
+FEATURES_WF = [
+    "ret_6d_M",
+    "ret_15d_M",
+    "concentracion",
+    "cap_retiro_M",
+    "n_bday_mes",
+    "estrategia_lag1",
+    "ret_6d_lag1",
+    "max_sal_prev_M",
+    "ret_pct_max_prev",
+    "n_meses_consec",
+    "sis_ret_6d_M",
+    "bbva_share_sis",
+    "mes_num",
+]
+TARGET_WF = "estrategia"
+
+dm_model = (dm_wf[dm_wf["_am"] >= INICIO_TRAIN]
+            .dropna(subset=["estrategia_lag1", "ret_6d_M", "cap_retiro_M"])
+            .reset_index(drop=True))
+
+n_pos_wf = dm_model[TARGET_WF].sum()
+n_tot_wf = len(dm_model)
+print(f"  Meses disponibles (2020+) : {n_tot_wf}")
+print(f"  Estrategia activada       : {n_pos_wf} / {n_tot_wf} ({n_pos_wf/n_tot_wf*100:.0f}%)")
+
+_scale_pos_wf = (n_tot_wf - n_pos_wf) / max(n_pos_wf, 1)
+XGB_PARAMS["scale_pos_weight"] = round(_scale_pos_wf, 2)
+
+# ── Walk-forward folds ─────────────────────────────────────────────────────────
+print("\n" + "=" * 65)
+print("  Walk-Forward Cross-Validation")
+print("=" * 65)
+
+cv_results_wf = []
+fold_models_wf = []
+
+for fold_n, (train_end, val_start, val_end) in enumerate(FOLDS, 1):
+    mask_tr = (dm_model["_am"] >= INICIO_TRAIN) & (dm_model["_am"] <= train_end)
+    mask_va = (dm_model["_am"] >= val_start)    & (dm_model["_am"] <= val_end)
+
+    X_tr = dm_model.loc[mask_tr, FEATURES_WF].fillna(0)
+    y_tr = dm_model.loc[mask_tr, TARGET_WF]
+    X_va = dm_model.loc[mask_va, FEATURES_WF].fillna(0)
+    y_va = dm_model.loc[mask_va, TARGET_WF]
+
+    model_wf = XGBClassifier(**XGB_PARAMS)
+    model_wf.fit(X_tr, y_tr)
+    fold_models_wf.append(model_wf)
+
+    prob_va = model_wf.predict_proba(X_va)[:, 1]
+    pred_va = (prob_va >= 0.5).astype(int)
+
+    auc_wf  = roc_auc_score(y_va, prob_va) if y_va.nunique() > 1 else np.nan
+    prec_wf = precision_score(y_va, pred_va, zero_division=0)
+    rec_wf  = recall_score(y_va, pred_va, zero_division=0)
+    f1_wf   = f1_score(y_va, pred_va, zero_division=0)
+
+    print(f"\n  Fold {fold_n}: Train {INICIO_TRAIN}→{train_end}  "
+          f"|  Val {val_start}→{val_end}")
+    print(f"    N train : {mask_tr.sum()} meses   N val : {mask_va.sum()} meses")
+    print(f"    AUC={auc_wf:.3f}  Precision={prec_wf:.3f}  Recall={rec_wf:.3f}  F1={f1_wf:.3f}")
+    print(f"    Positivos — real: {int(y_va.sum())}  predichos: {int(pred_va.sum())}")
+    cm_wf = confusion_matrix(y_va, pred_va)
+    print(f"    Confusion matrix:\n"
+          f"      TN={cm_wf[0,0]}  FP={cm_wf[0,1]}\n"
+          f"      FN={cm_wf[1,0]}  TP={cm_wf[1,1]}")
+
+    cv_results_wf.append({
+        "fold": fold_n, "train_end": train_end,
+        "val_start": val_start, "val_end": val_end,
+        "n_train": int(mask_tr.sum()), "n_val": int(mask_va.sum()),
+        "auc": round(auc_wf, 4) if np.isfinite(auc_wf) else np.nan,
+        "precision": round(prec_wf, 4), "recall": round(rec_wf, 4),
+        "f1": round(f1_wf, 4),
+        "tp": int(cm_wf[1,1]), "fp": int(cm_wf[0,1]),
+        "tn": int(cm_wf[0,0]), "fn": int(cm_wf[1,0]),
+    })
+
+# ── Test final ─────────────────────────────────────────────────────────────────
+print(f"\n{'='*65}")
+print(f"  Test final")
+print(f"  Train {INICIO_TRAIN}→2024-12  |  Test {TEST_START}→fin")
+print(f"{'='*65}")
+
+mask_tr_f = (dm_model["_am"] >= INICIO_TRAIN) & (dm_model["_am"] <= "2024-12")
+mask_te   =  dm_model["_am"] >= TEST_START
+
+X_tr_f = dm_model.loc[mask_tr_f, FEATURES_WF].fillna(0)
+y_tr_f = dm_model.loc[mask_tr_f, TARGET_WF]
+X_te   = dm_model.loc[mask_te,   FEATURES_WF].fillna(0)
+y_te   = dm_model.loc[mask_te,   TARGET_WF]
+
+model_final_wf = XGBClassifier(**XGB_PARAMS)
+model_final_wf.fit(X_tr_f, y_tr_f)
+
+prob_te = model_final_wf.predict_proba(X_te)[:, 1]
+pred_te = (prob_te >= 0.5).astype(int)
+
+auc_te  = roc_auc_score(y_te, prob_te) if y_te.nunique() > 1 else np.nan
+prec_te = precision_score(y_te, pred_te, zero_division=0)
+rec_te  = recall_score(y_te, pred_te, zero_division=0)
+f1_te   = f1_score(y_te, pred_te, zero_division=0)
+cm_te   = confusion_matrix(y_te, pred_te)
+
+print(f"  N train: {mask_tr_f.sum()} meses   N test: {mask_te.sum()} meses")
+print(f"  AUC={auc_te:.3f}  Precision={prec_te:.3f}  "
+      f"Recall={rec_te:.3f}  F1={f1_te:.3f}")
+print(f"  Positivos — real: {int(y_te.sum())}  predichos: {int(pred_te.sum())}")
+print(f"  Confusion matrix:\n"
+      f"    TN={cm_te[0,0]}  FP={cm_te[0,1]}\n"
+      f"    FN={cm_te[1,0]}  TP={cm_te[1,1]}")
+print(f"\n  Reporte completo:")
+print(classification_report(y_te, pred_te,
+                             target_names=["Sin estrategia", "Estrategia"]))
+
+cv_results_wf.append({
+    "fold": "TEST", "train_end": "2024-12",
+    "val_start": TEST_START, "val_end": "fin",
+    "n_train": int(mask_tr_f.sum()), "n_val": int(mask_te.sum()),
+    "auc": round(auc_te, 4) if np.isfinite(auc_te) else np.nan,
+    "precision": round(prec_te, 4), "recall": round(rec_te, 4),
+    "f1": round(f1_te, 4),
+    "tp": int(cm_te[1,1]), "fp": int(cm_te[0,1]),
+    "tn": int(cm_te[0,0]), "fn": int(cm_te[1,0]),
+})
+
+# ── Feature importance ─────────────────────────────────────────────────────────
+fi_wf = (pd.DataFrame({
+    "feature":    FEATURES_WF,
+    "importance": model_final_wf.feature_importances_,
+}).sort_values("importance", ascending=False).reset_index(drop=True))
+
+print(f"\n{'='*65}")
+print("  Feature Importance — modelo final (gain)")
+print(f"{'='*65}")
+for _, _row in fi_wf.iterrows():
+    _bar = "█" * int(_row["importance"] * 60)
+    print(f"  {_row['feature']:<22}  {_row['importance']:.4f}  {_bar}")
+
+# ── Gráficos CV ────────────────────────────────────────────────────────────────
+
+# 1 — Feature importance
+fig_fi, ax_fi = plt.subplots(figsize=(9, 5))
+ax_fi.barh(fi_wf["feature"][::-1], fi_wf["importance"][::-1],
+           color="#1565C0", alpha=0.82)
+ax_fi.set_xlabel("Importance (gain)", fontsize=10)
+ax_fi.set_title("Feature Importance — XGBoost modelo final\n"
+                f"Train {INICIO_TRAIN}→2024-12  |  Test {TEST_START}→fin",
+                fontweight="bold", fontsize=11)
+plt.tight_layout()
+fig_fi.savefig(DIR_OUT / "06_feature_importance.png", dpi=130, bbox_inches="tight")
+plt.close(fig_fi)
+
+# 2 — Probabilidad predicha vs real (test)
+_fechas_te_wf = dm_model.loc[mask_te, "fecha_plot"].values
+fig_pred, ax_pred = plt.subplots(figsize=(13, 4))
+ax_pred.bar(_fechas_te_wf, y_te.values,
+            color="#90A4AE", alpha=0.55, width=25, label="Real (0/1)")
+ax_pred.plot(_fechas_te_wf, prob_te,
+             color="#E53935", lw=2, marker="o", ms=5, label="Prob. predicha")
+ax_pred.axhline(0.5, color="black", lw=1, ls="--", label="Umbral 0.5")
+ax_pred.set_ylabel("Probabilidad / Activación")
+ax_pred.set_title("Test — Probabilidad predicha vs estrategia real\n"
+                  f"Período {TEST_START} → fin",
+                  fontweight="bold")
+ax_pred.legend(fontsize=9)
+ax_pred.set_ylim(-0.05, 1.15)
+plt.tight_layout()
+fig_pred.savefig(DIR_OUT / "06_predicciones_test.png", dpi=130, bbox_inches="tight")
+plt.close(fig_pred)
+
+# 3 — Métricas por fold
+_df_cv_wf = pd.DataFrame([r for r in cv_results_wf if r["fold"] != "TEST"])
+if not _df_cv_wf.empty:
+    fig_met, axes_met = plt.subplots(1, 3, figsize=(12, 4))
+    fig_met.suptitle("Walk-Forward CV — Métricas por fold", fontweight="bold")
+    for ax_met, metric in zip(axes_met, ["auc", "precision", "recall"]):
+        ax_met.bar(_df_cv_wf["fold"].astype(str), _df_cv_wf[metric],
+                   color="#1565C0", alpha=0.8)
+        ax_met.set_ylim(0, 1.05)
+        ax_met.set_title(metric.upper())
+        ax_met.set_xlabel("Fold")
+        for i, v in enumerate(_df_cv_wf[metric]):
+            if np.isfinite(v):
+                ax_met.text(i, v + 0.02, f"{v:.2f}", ha="center", fontsize=9)
+    plt.tight_layout()
+    fig_met.savefig(DIR_OUT / "06_metricas_cv.png", dpi=130, bbox_inches="tight")
+    plt.close(fig_met)
+
+print(f"\n  Gráficos guardados:")
+print(f"    · 06_feature_importance.png")
+print(f"    · 06_predicciones_test.png")
+print(f"    · 06_metricas_cv.png")
+
+# ── Export Excel ───────────────────────────────────────────────────────────────
+_ruta_xl_wf = DIR_OUT / "06_walk_forward_results.xlsx"
+with pd.ExcelWriter(_ruta_xl_wf, engine="openpyxl") as _wr_wf:
+
+    pd.DataFrame(cv_results_wf).to_excel(_wr_wf, sheet_name="CV_Resultados", index=False)
+    fi_wf.to_excel(_wr_wf, sheet_name="Feature_Importance", index=False)
+
+    _pred_df_wf = dm_model.loc[mask_te, ["_am", "fecha_plot", TARGET_WF] + FEATURES_WF].copy()
+    _pred_df_wf["prob_estrategia"] = prob_te
+    _pred_df_wf["pred_estrategia"] = pred_te
+    _pred_df_wf["correcto"]        = (_pred_df_wf[TARGET_WF] == _pred_df_wf["pred_estrategia"]).astype(int)
+    _pred_df_wf.to_excel(_wr_wf, sheet_name="Predicciones_Test", index=False)
+
+    dm_model[["_am", "fecha_plot", TARGET_WF] + FEATURES_WF].to_excel(
+        _wr_wf, sheet_name="Dataset_Completo", index=False)
+
+    _feat_desc_wf = pd.DataFrame({
+        "feature": FEATURES_WF,
+        "descripcion": [
+            "Retiro acumulado últimos 6 días hábiles del mes (M USD)",
+            "Retiro acumulado últimos 15 días hábiles del mes (M USD)",
+            "Concentración: retiro_6d / retiro_15d (solo cuando ambos < 0)",
+            "Capacidad retiro diaria: (EncajeAcum - Exigible×0.9) / n_bday (M USD)",
+            "Total días hábiles en el mes",
+            "Estrategia activada en mes anterior (0/1)",
+            "Retiro 6d del mes anterior (M USD)",
+            "Máximo saldo encaje OVN del mes anterior (M USD)",
+            "Retiro / máximo saldo mes previo × 100 (%)",
+            "Meses consecutivos con estrategia activada hasta mes anterior",
+            "Retiro neto sistema últimos 6 días hábiles (M USD)",
+            "BBVA / Sistema en retiro 6d (%)",
+            "Mes del año (1-12)",
+        ],
+        "prospectivo": ["✅"] * len(FEATURES_WF),
+    })
+    _feat_desc_wf.to_excel(_wr_wf, sheet_name="Features_Descripcion", index=False)
+
+print(f"\n  Exportado: {_ruta_xl_wf.name}")
+print(f"  Hojas: CV_Resultados | Feature_Importance | Predicciones_Test "
+      f"| Dataset_Completo | Features_Descripcion")
+
+print(f"\n{'='*65}")
+print(f"  Archivos en: {DIR_OUT}")
+print(f"{'='*65}")
