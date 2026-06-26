@@ -1017,6 +1017,21 @@ print("\n" + "=" * 65)
 print("  Estrategia sobreencaje — Otros bancos")
 print("=" * 65)
 
+# Medianas de componentes BBVA (reutiliza df ya cargado)
+_med_list = []
+_med_bbva = (
+    df.groupby(df["fecha"].dt.to_period("M"))
+    .agg(
+        med_overnight=("overnight", "median"),
+        med_cta_cte=("cta_cte",    "median"),
+        med_caja=("caja",          "median"),
+    )
+    .reset_index()
+)
+_med_bbva["fecha_plot"] = _med_bbva["fecha"].dt.to_timestamp()
+_med_bbva["banco"]      = "BBVA"
+_med_list.append(_med_bbva)
+
 for _banco in _BANCOS:
     print(f"\n  Procesando {_banco} ...")
     try:
@@ -1034,10 +1049,84 @@ for _banco in _BANCOS:
         _n_est = _dm_b["estrategia"].sum()
         print(f"    Estrategia detectada: {_n_est} / {len(_dm_b)} meses")
 
-        _dir_b = RUTA.parent.parent.parent / "2. Output" / f"encaje_{_banco.lower()}"
-        _dir_b.mkdir(parents=True, exist_ok=True)
+        # Todos los heatmaps van a la misma carpeta que BBVA
+        _heatmap_saldo_prev_banco(_dm_b, _banco, DIR_OUT)
 
-        _heatmap_saldo_prev_banco(_dm_b, _banco, _dir_b)
+        # Acumular medianas de componentes para gráfico de evolución
+        _med_b = (
+            _db.groupby("_am")
+            .agg(
+                med_overnight=("overnight", "median"),
+                med_cta_cte=("cta_cte",    "median"),
+                med_caja=("caja",          "median"),
+            )
+            .reset_index()
+        )
+        _med_b["fecha_plot"] = _med_b["_am"].dt.to_timestamp()
+        _med_b["banco"]      = _banco
+        _med_list.append(_med_b)
 
     except Exception as _exc:
         print(f"  AVISO [{_banco}]: {_exc}")
+
+# ── Gráfico: evolución mediana saldo mensual — los 5 bancos ──────────────────
+if _med_list:
+    _med_all = pd.concat(_med_list, ignore_index=True)
+    for _col in ["med_overnight", "med_cta_cte", "med_caja"]:
+        _med_all[_col] = _med_all[_col] / 1e6
+    _med_all["med_total"] = (
+        _med_all["med_overnight"] + _med_all["med_cta_cte"] + _med_all["med_caja"]
+    )
+
+    _bancos_orden  = ["BBVA"] + [b for b in _BANCOS if b in _med_all["banco"].unique()]
+    _colores_comp  = {
+        "med_cta_cte":   "#1565C0",
+        "med_caja":      "#43A047",
+        "med_overnight": "#F57C00",
+    }
+    _labels_comp = {
+        "med_cta_cte":   "Cta Cte BCR",
+        "med_caja":      "Caja",
+        "med_overnight": "Overnight BCR",
+    }
+
+    _n_bancos = len(_bancos_orden)
+    fig_ev, axes_ev = plt.subplots(
+        _n_bancos, 1,
+        figsize=(15, 3.2 * _n_bancos),
+        sharex=False,
+    )
+    if _n_bancos == 1:
+        axes_ev = [axes_ev]
+
+    fig_ev.suptitle(
+        "Evolución mediana saldo mensual por banco y componente\n"
+        "(Cta Cte BCR + Caja + Overnight BCR)",
+        fontweight="bold", fontsize=12,
+    )
+
+    for _ax_b, _bnk in zip(axes_ev, _bancos_orden):
+        _d = _med_all[_med_all["banco"] == _bnk].sort_values("fecha_plot")
+        if _d.empty:
+            _ax_b.set_visible(False)
+            continue
+        _bottom = np.zeros(len(_d))
+        for _comp in ["med_cta_cte", "med_caja", "med_overnight"]:
+            _vals_c = _d[_comp].fillna(0).values
+            _ax_b.fill_between(
+                _d["fecha_plot"], _bottom, _bottom + _vals_c,
+                alpha=0.75, color=_colores_comp[_comp], label=_labels_comp[_comp],
+            )
+            _bottom += _vals_c
+        _ax_b.plot(_d["fecha_plot"], _d["med_total"],
+                   color="black", lw=1.2, ls="--", label="Total encaje OVN")
+        _ax_b.set_ylabel("M USD", fontsize=9)
+        _ax_b.set_title(_bnk, fontsize=10, fontweight="bold", loc="left")
+        _ax_b.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:,.0f}M"))
+        _ax_b.legend(fontsize=7, loc="upper left", ncol=4, framealpha=0.8)
+
+    plt.tight_layout()
+    _p_ev = DIR_OUT / "02_evolucion_saldo_mensual.png"
+    fig_ev.savefig(_p_ev, dpi=150, bbox_inches="tight")
+    plt.close(fig_ev)
+    print(f"\n  Guardado: {_p_ev.name}")
