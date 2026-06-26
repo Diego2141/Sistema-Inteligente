@@ -1131,7 +1131,7 @@ if _med_list:
     plt.close(fig_ev)
     print(f"\n  Guardado: {_p_ev.name}")
 
-    # ── Gráfico comparativo: total encaje OVN de los 5 bancos en un mismo panel ──
+    # ── Gráfico comparativo: líneas + apilada en dos subplots ────────────────────
     _colores_banco = {
         "BBVA": "#1565C0",
         "BCP":  "#E53935",
@@ -1140,13 +1140,17 @@ if _med_list:
         "CITI": "#8E24AA",
     }
 
-    fig_cmp, ax_cmp = plt.subplots(figsize=(15, 6))
+    fig_cmp, (ax_cmp, ax_stk) = plt.subplots(
+        2, 1, figsize=(15, 11), sharex=True,
+        gridspec_kw={"hspace": 0.08},
+    )
     fig_cmp.suptitle(
         "Comparación saldo total encaje OVN — 5 entidades\n"
         "(mediana mensual  ·  Cta Cte BCR + Caja + Overnight BCR)",
         fontweight="bold", fontsize=12,
     )
 
+    # Panel superior — líneas individuales
     for _bnk in _bancos_orden:
         _d = _med_all[_med_all["banco"] == _bnk].sort_values("fecha_plot")
         if _d.empty:
@@ -1156,7 +1160,6 @@ if _med_list:
             color=_colores_banco.get(_bnk, "gray"),
             lw=1.8, label=_bnk,
         )
-        # etiqueta al final de la línea
         _last = _d.iloc[-1]
         ax_cmp.annotate(
             f"{_bnk}  {_last['med_total']:,.0f}M",
@@ -1165,14 +1168,49 @@ if _med_list:
             fontsize=8, color=_colores_banco.get(_bnk, "gray"),
             va="center",
         )
-
     ax_cmp.axhline(0, color="black", lw=0.5, ls=":")
     ax_cmp.set_ylabel("M USD", fontsize=10)
-    ax_cmp.set_xlabel("Fecha", fontsize=10)
     ax_cmp.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:,.0f}M"))
     ax_cmp.legend(fontsize=9, loc="upper left")
-    plt.tight_layout()
 
+    # Panel inferior — apilada (participación en el total)
+    # Alinear todas las series a un índice común de fechas
+    _pivot_stk = (
+        _med_all[["fecha_plot", "banco", "med_total"]]
+        .pivot(index="fecha_plot", columns="banco", values="med_total")
+        .sort_index()
+        .reindex(columns=_bancos_orden)
+        .fillna(0)
+    )
+    _bottom_stk = np.zeros(len(_pivot_stk))
+    for _bnk in _bancos_orden:
+        if _bnk not in _pivot_stk.columns:
+            continue
+        _vals_stk = _pivot_stk[_bnk].values
+        ax_stk.fill_between(
+            _pivot_stk.index, _bottom_stk, _bottom_stk + _vals_stk,
+            alpha=0.80, color=_colores_banco.get(_bnk, "gray"), label=_bnk,
+        )
+        # etiqueta de participación en el último punto
+        _tot_last  = _pivot_stk.iloc[-1].sum()
+        _bnk_last  = _pivot_stk[_bnk].iloc[-1]
+        _pct_last  = _bnk_last / _tot_last * 100 if _tot_last > 0 else 0
+        _y_mid     = _bottom_stk[-1] + _bnk_last / 2
+        ax_stk.annotate(
+            f"{_bnk} {_pct_last:.0f}%",
+            xy=(_pivot_stk.index[-1], _y_mid),
+            xytext=(6, 0), textcoords="offset points",
+            fontsize=8, color=_colores_banco.get(_bnk, "gray"),
+            va="center",
+        )
+        _bottom_stk += _vals_stk
+
+    ax_stk.set_ylabel("M USD (total sistema)", fontsize=10)
+    ax_stk.set_xlabel("Fecha", fontsize=10)
+    ax_stk.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:,.0f}M"))
+    ax_stk.legend(fontsize=9, loc="upper left")
+
+    plt.tight_layout()
     _p_cmp = DIR_OUT / "03_comparacion_saldo_bancos.png"
     fig_cmp.savefig(_p_cmp, dpi=150, bbox_inches="tight")
     plt.close(fig_cmp)
