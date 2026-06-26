@@ -1130,3 +1130,50 @@ if _med_list:
     fig_ev.savefig(_p_ev, dpi=150, bbox_inches="tight")
     plt.close(fig_ev)
     print(f"\n  Guardado: {_p_ev.name}")
+
+    # ── Gráfico comparativo: total encaje OVN de los 5 bancos en un mismo panel ──
+    _colores_banco = {
+        "BBVA": "#1565C0",
+        "BCP":  "#E53935",
+        "IBK":  "#F57C00",
+        "SCO":  "#43A047",
+        "CITI": "#8E24AA",
+    }
+
+    fig_cmp, ax_cmp = plt.subplots(figsize=(15, 6))
+    fig_cmp.suptitle(
+        "Comparación saldo total encaje OVN — 5 entidades\n"
+        "(mediana mensual  ·  Cta Cte BCR + Caja + Overnight BCR)",
+        fontweight="bold", fontsize=12,
+    )
+
+    for _bnk in _bancos_orden:
+        _d = _med_all[_med_all["banco"] == _bnk].sort_values("fecha_plot")
+        if _d.empty:
+            continue
+        ax_cmp.plot(
+            _d["fecha_plot"], _d["med_total"],
+            color=_colores_banco.get(_bnk, "gray"),
+            lw=1.8, label=_bnk,
+        )
+        # etiqueta al final de la línea
+        _last = _d.iloc[-1]
+        ax_cmp.annotate(
+            f"{_bnk}  {_last['med_total']:,.0f}M",
+            xy=(_last["fecha_plot"], _last["med_total"]),
+            xytext=(6, 0), textcoords="offset points",
+            fontsize=8, color=_colores_banco.get(_bnk, "gray"),
+            va="center",
+        )
+
+    ax_cmp.axhline(0, color="black", lw=0.5, ls=":")
+    ax_cmp.set_ylabel("M USD", fontsize=10)
+    ax_cmp.set_xlabel("Fecha", fontsize=10)
+    ax_cmp.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:,.0f}M"))
+    ax_cmp.legend(fontsize=9, loc="upper left")
+    plt.tight_layout()
+
+    _p_cmp = DIR_OUT / "03_comparacion_saldo_bancos.png"
+    fig_cmp.savefig(_p_cmp, dpi=150, bbox_inches="tight")
+    plt.close(fig_cmp)
+    print(f"  Guardado: {_p_cmp.name}")
