@@ -870,3 +870,174 @@ print(f"\n  Archivos en: {DIR_OUT}")
 df.drop(columns=["_am", "_is_bday", "retiro_neto_sis"], inplace=True, errors="ignore")
 dm.drop(columns=["_intensidad", "_pct", "_sis_ratio"], inplace=True, errors="ignore")
 dm_s.drop(columns=["_saldo_prev_M", "_int_prev", "_pct_prev"], inplace=True, errors="ignore")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ANÁLISIS ESTRATEGIA SOBREENCAJE — OTROS BANCOS (BCP, IBK, SCO, CITI)
+# ══════════════════════════════════════════════════════════════════════════════
+RUTA_BANCOS = Path(
+    r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Raw\bancos_encaje.xlsx"
+)
+
+_BANCOS = ["BCP", "IBK", "SCO", "CITI"]
+
+
+def _procesar_banco_df(df_raw):
+    """Estandariza columnas, calcula derivadas y marca días hábiles."""
+    db = df_raw.iloc[:, :9].copy()
+    db.columns = [
+        "fecha", "entidad", "codigo",
+        "overnight", "cta_cte", "caja",
+        "tose", "exigible", "retiro_neto",
+    ]
+    db["fecha"]      = pd.to_datetime(db["fecha"])
+    db               = db.sort_values("fecha").reset_index(drop=True)
+    db["encaje"]     = db["cta_cte"] + db["caja"]
+    db["encaje_ovn"] = db["encaje"] + db["overnight"]
+
+    # Días hábiles: reutiliza _hols_all del scope principal
+    db["_is_bday"] = (
+        (db["fecha"].dt.weekday < 5) &
+        (~db["fecha"].isin(_hols_all))
+    )
+
+    # Retiro neto del sistema (ya calculado en scope principal)
+    if _sis_ok:
+        db = db.merge(_flujo_sis, on="fecha", how="left")
+    else:
+        db["retiro_neto_sis"] = np.nan
+
+    db["_am"] = db["fecha"].dt.to_period("M")
+    return db
+
+
+def _heatmap_saldo_prev_banco(dm_b, nombre, dir_out_b):
+    """Genera el heatmap de intensidad usando saldo del mes previo para un banco."""
+    dm_b = dm_b.sort_values("fecha_plot").reset_index(drop=True)
+    dm_b["_saldo_prev_M"] = dm_b["mediana_saldo_M"].shift(1).fillna(dm_b["mediana_saldo_M"])
+
+    dm_b["_int_prev"] = (
+        -dm_b["retiro_acum_6d_M"] /
+        (UMBRAL_SALDO * dm_b["_saldo_prev_M"].replace(0, np.nan))
+    ).clip(lower=0)
+    dm_b["_pct_prev"] = (
+        -dm_b["retiro_acum_6d_M"] /
+        dm_b["_saldo_prev_M"].replace(0, np.nan) * 100
+    ).clip(lower=0)
+
+    _mask = (dm_b["retiro_acum_6d_M"] < 0) & (dm_b["sis_retiro_6d_M"] < 0)
+    dm_b["_sis_ratio"] = np.where(
+        _mask,
+        dm_b["retiro_acum_6d_M"] / dm_b["sis_retiro_6d_M"].replace(0, np.nan) * 100,
+        np.nan,
+    )
+
+    piv_int  = dm_b.pivot(index="anio", columns="mes", values="_int_prev").sort_index()
+    piv_est  = dm_b.pivot(index="anio", columns="mes", values="estrategia").sort_index()
+    piv_ret  = dm_b.pivot(index="anio", columns="mes", values="retiro_acum_6d_M").sort_index()
+    piv_pct  = dm_b.pivot(index="anio", columns="mes", values="_pct_prev").sort_index()
+    piv_sis  = dm_b.pivot(index="anio", columns="mes", values="sis_retiro_6d_M").sort_index()
+    piv_sisr = dm_b.pivot(index="anio", columns="mes", values="_sis_ratio").sort_index()
+
+    _vals = piv_int.values.astype(float)
+    _vmax = float(np.nanmax(_vals)) if np.any(np.isfinite(_vals)) else 2.0
+    _cmap = plt.cm.YlOrRd
+
+    fig, ax = plt.subplots(figsize=(14, max(4, len(piv_int) * 0.6 + 2)))
+    fig.suptitle(
+        f"Estrategia sobreencaje {nombre} — Intensidad usando saldo del mes PREVIO\n"
+        f"Intensidad = retiro {N_DIAS_HABILES}d / ({UMBRAL_SALDO*100:.0f}% × mediana saldo mes anterior)  ·  "
+        f"> 1 = estrategia activada (borde azul)  ·  Celda: {nombre} retiro / (% saldo previo)  ·  Sis: monto (% {nombre}/Sis)",
+        fontweight="bold", fontsize=10,
+    )
+    im = ax.imshow(_vals, aspect="auto", cmap=_cmap, vmin=0, vmax=_vmax)
+
+    ax.set_xticks(range(12))
+    ax.set_xticklabels(_MESES_ABR)
+    ax.set_yticks(range(len(piv_int)))
+    ax.set_yticklabels(piv_int.index.astype(str))
+
+    for _i, _anio in enumerate(piv_int.index):
+        for _j, _mes in enumerate(range(1, 13)):
+            _vi  = piv_int.loc[_anio, _mes]  if _mes in piv_int.columns  else np.nan
+            _ve  = piv_est.loc[_anio, _mes]  if _mes in piv_est.columns  else False
+            _vr  = piv_ret.loc[_anio, _mes]  if _mes in piv_ret.columns  else np.nan
+            _vp  = piv_pct.loc[_anio, _mes]  if _mes in piv_pct.columns  else np.nan
+            _vs  = piv_sis.loc[_anio, _mes]  if _mes in piv_sis.columns  else np.nan
+            _vsr = piv_sisr.loc[_anio, _mes] if _mes in piv_sisr.columns else np.nan
+            _fi  = float(_vi)  if _vi  is not None else np.nan
+            _fr  = float(_vr)  if _vr  is not None else np.nan
+            _fp  = float(_vp)  if (_vp  is not None and _vp  is not pd.NA) else np.nan
+            _fs  = float(_vs)  if (_vs  is not None and _vs  is not pd.NA) else np.nan
+            _fsr = float(_vsr) if (_vsr is not None and _vsr is not pd.NA) else np.nan
+            if not np.isfinite(_fi):
+                continue
+            _ctxt = "white" if _fi > _vmax * 0.55 else "black"
+            if np.isfinite(_fr) and np.isfinite(_fp):
+                _bbva_lbl = f"{_fr:,.0f}\n({_fp:.0f}%)"
+            elif np.isfinite(_fr):
+                _bbva_lbl = f"{_fr:,.0f}"
+            else:
+                _bbva_lbl = ""
+            if _bbva_lbl:
+                ax.text(_j, _i - 0.14, _bbva_lbl, ha="center", va="center",
+                        fontsize=5.3, color=_ctxt, linespacing=1.2,
+                        fontweight="bold" if _ve else "normal")
+            if np.isfinite(_fs):
+                _sis_lbl = (f"Sis:{_fs:,.0f} ({_fsr:.0f}%)"
+                            if np.isfinite(_fsr) else f"Sis:{_fs:,.0f}")
+                ax.text(_j, _i + 0.30, _sis_lbl, ha="center", va="center",
+                        fontsize=4.5, color=_ctxt, style="italic")
+            if _ve:
+                ax.add_patch(plt.Rectangle((_j - 0.5, _i - 0.5), 1, 1,
+                             fill=False, edgecolor="#1565C0", linewidth=2.2))
+
+    plt.colorbar(im, ax=ax, label=f"Retiro / ({UMBRAL_SALDO*100:.0f}% × mediana saldo previo)",
+                 shrink=0.75)
+    ax.set_xlabel("Mes")
+    ax.set_ylabel("Año")
+    ax.legend(handles=[
+        _Patch(facecolor=_cmap(0.4), label="Retiro moderado"),
+        _Patch(facecolor=_cmap(0.85), label="Retiro intenso"),
+        plt.Rectangle((0, 0), 1, 1, fill=False, edgecolor="#1565C0", lw=2,
+                      label=f"Estrategia activada (retiro > {UMBRAL_SALDO*100:.0f}% saldo previo)"),
+    ], loc="lower right", fontsize=7, framealpha=0.9)
+    plt.tight_layout()
+
+    nombre_lower = nombre.lower()
+    _p = dir_out_b / f"00b_heatmap_{nombre_lower}_saldo_prev.png"
+    fig.savefig(_p, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  [{nombre}] Guardado: {_p.name}")
+
+    dm_b.drop(columns=["_saldo_prev_M", "_int_prev", "_pct_prev", "_sis_ratio"],
+              inplace=True, errors="ignore")
+
+
+print("\n" + "=" * 65)
+print("  Estrategia sobreencaje — Otros bancos")
+print("=" * 65)
+
+for _banco in _BANCOS:
+    print(f"\n  Procesando {_banco} ...")
+    try:
+        _df_raw = pd.read_excel(RUTA_BANCOS, sheet_name=_banco, header=0)
+        _db     = _procesar_banco_df(_df_raw)
+
+        print(f"    Período : {_db['fecha'].min().date()} → {_db['fecha'].max().date()}")
+        print(f"    Filas   : {len(_db):,}")
+
+        _dm_b = _db.groupby("_am").apply(_met_estrat).reset_index()
+        _dm_b["anio"]       = _dm_b["_am"].dt.year
+        _dm_b["mes"]        = _dm_b["_am"].dt.month
+        _dm_b["fecha_plot"] = _dm_b["_am"].dt.to_timestamp()
+
+        _n_est = _dm_b["estrategia"].sum()
+        print(f"    Estrategia detectada: {_n_est} / {len(_dm_b)} meses")
+
+        _dir_b = RUTA.parent.parent.parent / "2. Output" / f"encaje_{_banco.lower()}"
+        _dir_b.mkdir(parents=True, exist_ok=True)
+
+        _heatmap_saldo_prev_banco(_dm_b, _banco, _dir_b)
+
+    except Exception as _exc:
+        print(f"  AVISO [{_banco}]: {_exc}")
