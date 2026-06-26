@@ -1069,7 +1069,7 @@ for _banco in _BANCOS:
     except Exception as _exc:
         print(f"  AVISO [{_banco}]: {_exc}")
 
-# ── Gráfico: evolución mediana saldo mensual — los 5 bancos ──────────────────
+# ── Gráfico: evolución mediana saldo mensual — 5 bancos + sistema ────────────
 if _med_list:
     _med_all = pd.concat(_med_list, ignore_index=True)
     for _col in ["med_overnight", "med_cta_cte", "med_caja"]:
@@ -1078,8 +1078,18 @@ if _med_list:
         _med_all["med_overnight"] + _med_all["med_cta_cte"] + _med_all["med_caja"]
     )
 
-    _bancos_orden  = ["BBVA"] + [b for b in _BANCOS if b in _med_all["banco"].unique()]
-    _colores_comp  = {
+    _bancos_5 = ["BBVA"] + [b for b in _BANCOS if b in _med_all["banco"].unique()]
+
+    _colores_banco = {
+        "BBVA":    "#1565C0",
+        "BCP":     "#E53935",
+        "IBK":     "#F57C00",
+        "SCO":     "#43A047",
+        "CITI":    "#8E24AA",
+        "SISTEMA": "#424242",
+        "Otros":   "#BDBDBD",
+    }
+    _colores_comp = {
         "med_cta_cte":   "#1565C0",
         "med_caja":      "#43A047",
         "med_overnight": "#F57C00",
@@ -1090,22 +1100,50 @@ if _med_list:
         "med_overnight": "Overnight BCR",
     }
 
-    _n_bancos = len(_bancos_orden)
-    fig_ev, axes_ev = plt.subplots(
-        _n_bancos, 1,
-        figsize=(15, 3.2 * _n_bancos),
-        sharex=False,
-    )
-    if _n_bancos == 1:
+    # Cargar hoja SISTEMA (6 columnas: sin entidad/codigo/retiro_neto)
+    _med_sis_df = None
+    try:
+        _db_sis = pd.read_excel(RUTA_BANCOS, sheet_name="SISTEMA", header=0)
+        _db_sis = _db_sis.iloc[:, :6].copy()
+        _db_sis.columns = ["fecha", "overnight", "cta_cte", "caja", "tose", "exigible"]
+        _db_sis["fecha"] = pd.to_datetime(_db_sis["fecha"])
+        _db_sis["_am"]   = _db_sis["fecha"].dt.to_period("M")
+        _med_sis = (
+            _db_sis.groupby("_am")
+            .agg(
+                med_overnight=("overnight", "median"),
+                med_cta_cte=("cta_cte",    "median"),
+                med_caja=("caja",          "median"),
+            )
+            .reset_index()
+        )
+        _med_sis["fecha_plot"] = _med_sis["_am"].dt.to_timestamp()
+        _med_sis["banco"]      = "SISTEMA"
+        for _col in ["med_overnight", "med_cta_cte", "med_caja"]:
+            _med_sis[_col] = _med_sis[_col] / 1e6
+        _med_sis["med_total"] = (
+            _med_sis["med_overnight"] + _med_sis["med_cta_cte"] + _med_sis["med_caja"]
+        )
+        _med_all    = pd.concat([_med_all, _med_sis], ignore_index=True)
+        _med_sis_df = _med_sis
+        print(f"  [SISTEMA] Cargado: {len(_med_sis)} meses")
+    except Exception as _exc_sis:
+        print(f"  AVISO [SISTEMA]: {_exc_sis}")
+
+    _bancos_todos = _bancos_5 + (["SISTEMA"] if _med_sis_df is not None else [])
+
+    # ── 02: Evolución por entidad — subplots individuales (incluye SISTEMA) ──────
+    _n_sub = len(_bancos_todos)
+    fig_ev, axes_ev = plt.subplots(_n_sub, 1, figsize=(15, 3.2 * _n_sub), sharex=False)
+    if _n_sub == 1:
         axes_ev = [axes_ev]
 
     fig_ev.suptitle(
-        "Evolución mediana saldo mensual por banco y componente\n"
+        "Evolución mediana saldo mensual por entidad y componente\n"
         "(Cta Cte BCR + Caja + Overnight BCR)",
         fontweight="bold", fontsize=12,
     )
-
-    for _ax_b, _bnk in zip(axes_ev, _bancos_orden):
+    for _ax_b, _bnk in zip(axes_ev, _bancos_todos):
         _d = _med_all[_med_all["banco"] == _bnk].sort_values("fecha_plot")
         if _d.empty:
             _ax_b.set_visible(False)
@@ -1113,10 +1151,9 @@ if _med_list:
         _bottom = np.zeros(len(_d))
         for _comp in ["med_cta_cte", "med_caja", "med_overnight"]:
             _vals_c = _d[_comp].fillna(0).values
-            _ax_b.fill_between(
-                _d["fecha_plot"], _bottom, _bottom + _vals_c,
-                alpha=0.75, color=_colores_comp[_comp], label=_labels_comp[_comp],
-            )
+            _ax_b.fill_between(_d["fecha_plot"], _bottom, _bottom + _vals_c,
+                               alpha=0.75, color=_colores_comp[_comp],
+                               label=_labels_comp[_comp])
             _bottom += _vals_c
         _ax_b.plot(_d["fecha_plot"], _d["med_total"],
                    color="black", lw=1.2, ls="--", label="Total encaje OVN")
@@ -1131,59 +1168,69 @@ if _med_list:
     plt.close(fig_ev)
     print(f"\n  Guardado: {_p_ev.name}")
 
-    # ── Gráfico comparativo: líneas + apilada en dos subplots ────────────────────
-    _colores_banco = {
-        "BBVA": "#1565C0",
-        "BCP":  "#E53935",
-        "IBK":  "#F57C00",
-        "SCO":  "#43A047",
-        "CITI": "#8E24AA",
-    }
-
+    # ── 03: Comparativo líneas + apilada (5 bancos + Otros = Sistema - 5) ────────
     fig_cmp, (ax_cmp, ax_stk) = plt.subplots(
         2, 1, figsize=(15, 11), sharex=True,
         gridspec_kw={"hspace": 0.08},
     )
     fig_cmp.suptitle(
-        "Comparación saldo total encaje OVN — 5 entidades\n"
+        "Comparación saldo total encaje OVN — 5 entidades + sistema\n"
         "(mediana mensual  ·  Cta Cte BCR + Caja + Overnight BCR)",
         fontweight="bold", fontsize=12,
     )
 
-    # Panel superior — líneas individuales
-    for _bnk in _bancos_orden:
+    # Panel superior — líneas individuales; SISTEMA en punteado negro
+    for _bnk in _bancos_todos:
         _d = _med_all[_med_all["banco"] == _bnk].sort_values("fecha_plot")
         if _d.empty:
             continue
+        _is_sis = _bnk == "SISTEMA"
         ax_cmp.plot(
             _d["fecha_plot"], _d["med_total"],
             color=_colores_banco.get(_bnk, "gray"),
-            lw=1.8, label=_bnk,
+            lw=2.2 if _is_sis else 1.8,
+            ls="--" if _is_sis else "-",
+            label=_bnk,
         )
         _last = _d.iloc[-1]
         ax_cmp.annotate(
             f"{_bnk}  {_last['med_total']:,.0f}M",
             xy=(_last["fecha_plot"], _last["med_total"]),
             xytext=(6, 0), textcoords="offset points",
-            fontsize=8, color=_colores_banco.get(_bnk, "gray"),
-            va="center",
+            fontsize=8, color=_colores_banco.get(_bnk, "gray"), va="center",
         )
     ax_cmp.axhline(0, color="black", lw=0.5, ls=":")
     ax_cmp.set_ylabel("M USD", fontsize=10)
     ax_cmp.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:,.0f}M"))
     ax_cmp.legend(fontsize=9, loc="upper left")
 
-    # Panel inferior — apilada (participación en el total)
-    # Alinear todas las series a un índice común de fechas
+    # Panel inferior — apilada: 5 bancos + "Otros bancos" = Sistema − Σ 5
     _pivot_stk = (
-        _med_all[["fecha_plot", "banco", "med_total"]]
+        _med_all[_med_all["banco"].isin(_bancos_5)][["fecha_plot", "banco", "med_total"]]
         .pivot(index="fecha_plot", columns="banco", values="med_total")
         .sort_index()
-        .reindex(columns=_bancos_orden)
+        .reindex(columns=_bancos_5)
         .fillna(0)
     )
+
+    # "Otros" alineado al mismo índice que el pivot
+    if _med_sis_df is not None:
+        _sis_aln = (
+            _med_sis_df.set_index("fecha_plot")["med_total"]
+            .reindex(_pivot_stk.index)
+            .ffill()
+        )
+        _otros_vals = (_sis_aln - _pivot_stk.sum(axis=1)).clip(lower=0).values
+    else:
+        _otros_vals = None
+
+    # Calcular denominador total para % (Σ 5 bancos + Otros)
+    _total_last = _pivot_stk.iloc[-1].sum()
+    if _otros_vals is not None:
+        _total_last += _otros_vals[-1]
+
     _bottom_stk = np.zeros(len(_pivot_stk))
-    for _bnk in _bancos_orden:
+    for _bnk in _bancos_5:
         if _bnk not in _pivot_stk.columns:
             continue
         _vals_stk = _pivot_stk[_bnk].values
@@ -1191,19 +1238,28 @@ if _med_list:
             _pivot_stk.index, _bottom_stk, _bottom_stk + _vals_stk,
             alpha=0.80, color=_colores_banco.get(_bnk, "gray"), label=_bnk,
         )
-        # etiqueta de participación en el último punto
-        _tot_last  = _pivot_stk.iloc[-1].sum()
-        _bnk_last  = _pivot_stk[_bnk].iloc[-1]
-        _pct_last  = _bnk_last / _tot_last * 100 if _tot_last > 0 else 0
-        _y_mid     = _bottom_stk[-1] + _bnk_last / 2
+        _bnk_last = _pivot_stk[_bnk].iloc[-1]
+        _pct_last = _bnk_last / _total_last * 100 if _total_last > 0 else 0
         ax_stk.annotate(
             f"{_bnk} {_pct_last:.0f}%",
-            xy=(_pivot_stk.index[-1], _y_mid),
+            xy=(_pivot_stk.index[-1], _bottom_stk[-1] + _bnk_last / 2),
             xytext=(6, 0), textcoords="offset points",
-            fontsize=8, color=_colores_banco.get(_bnk, "gray"),
-            va="center",
+            fontsize=8, color=_colores_banco.get(_bnk, "gray"), va="center",
         )
         _bottom_stk += _vals_stk
+
+    if _otros_vals is not None and _otros_vals.sum() > 0:
+        ax_stk.fill_between(
+            _pivot_stk.index, _bottom_stk, _bottom_stk + _otros_vals,
+            alpha=0.70, color=_colores_banco["Otros"], label="Otros bancos",
+        )
+        _pct_otros = _otros_vals[-1] / _total_last * 100 if _total_last > 0 else 0
+        ax_stk.annotate(
+            f"Otros {_pct_otros:.0f}%",
+            xy=(_pivot_stk.index[-1], _bottom_stk[-1] + _otros_vals[-1] / 2),
+            xytext=(6, 0), textcoords="offset points",
+            fontsize=8, color="#616161", va="center",
+        )
 
     ax_stk.set_ylabel("M USD (total sistema)", fontsize=10)
     ax_stk.set_xlabel("Fecha", fontsize=10)
