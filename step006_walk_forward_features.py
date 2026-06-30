@@ -207,11 +207,12 @@ def _build_monthly(df):
 
 dm = _build_monthly(df)
 
-# ── Lag features (todos prospecivos: usan mes M-1 completo) ──────────────────
+# ── Lag features (todos prospectivos: usan mes M-1 completo) ─────────────────
 dm["estrategia_lag1"]    = dm["estrategia"].shift(1)
 dm["ret_6d_lag1"]        = dm["ret_6d_M"].shift(1)
 dm["max_sal_prev_M"]     = dm["max_sal_M"].shift(1)
 dm["med_sal_prev_M"]     = dm["med_sal_M"].shift(1)
+dm["cap_retiro_prev_M"]  = dm["cap_retiro_M"].shift(1)   # M-1: evita leakage
 
 # retiro / máximo saldo mes previo (más conservador que mediana)
 dm["ret_pct_max_prev"] = (
@@ -235,24 +236,23 @@ dm["bbva_share_sis"] = np.where(
 
 # ── Dataset final ─────────────────────────────────────────────────────────────
 FEATURES = [
-    "ret_6d_M",          # 1. retiro acumulado últimos 6d hábiles
-    "ret_15d_M",         # 2. retiro acumulado últimos 15d hábiles
-    "concentracion",     # 3. concentración 6d vs 15d
-    "cap_retiro_M",      # 4. capacidad retiro diaria (exceso / n_bday) ★
-    "n_bday_mes",        # 5. total días hábiles en el mes
-    "estrategia_lag1",   # 6. estrategia mes anterior
-    "ret_6d_lag1",       # 7. retiro 6d mes anterior
-    "max_sal_prev_M",    # 8. máximo saldo mes previo
-    "ret_pct_max_prev",  # 9. retiro / máximo saldo previo
-    "n_meses_consec",    # 10. meses consecutivos con estrategia
-    "sis_ret_6d_M",      # 11. retiro sistema últimos 6d
-    "bbva_share_sis",    # 12. BBVA / Sistema retiro 6d
-    "mes_num",           # 13. mes del año (estacionalidad)
+    "ret_6d_lag1",        # 1. retiro 6d del mes anterior
+    "ret_15d_M",          # 2. retiro acumulado últimos 15d hábiles (mes anterior via lag si se quiere)
+    "concentracion",      # 3. concentración 6d vs 15d
+    "cap_retiro_prev_M",  # 4. capacidad retiro diaria mes previo (M-1) ★
+    "n_bday_mes",         # 5. total días hábiles en el mes
+    "estrategia_lag1",    # 6. estrategia mes anterior
+    "max_sal_prev_M",     # 7. máximo saldo mes previo
+    "ret_pct_max_prev",   # 8. retiro / máximo saldo previo
+    "n_meses_consec",     # 9. meses consecutivos con estrategia
+    "sis_ret_6d_M",       # 10. retiro sistema últimos 6d (mes anterior via lag si se quiere)
+    "bbva_share_sis",     # 11. BBVA / Sistema retiro 6d
+    "mes_num",            # 12. mes del año (estacionalidad)
 ]
 TARGET = "estrategia"
 
 dm_model = (dm[dm["_am"] >= INICIO_TRAIN]
-            .dropna(subset=["estrategia_lag1", "ret_6d_M", "cap_retiro_M"])
+            .dropna(subset=["estrategia_lag1", "ret_6d_lag1", "cap_retiro_prev_M"])
             .reset_index(drop=True))
 
 n_pos = dm_model[TARGET].sum()
@@ -470,14 +470,13 @@ with pd.ExcelWriter(_ruta_xl, engine="openpyxl") as _wr:
     _feat_desc = pd.DataFrame({
         "feature": FEATURES,
         "descripcion": [
-            "Retiro acumulado últimos 6 días hábiles del mes (M USD)",
+            "Retiro 6d del mes anterior M-1 (M USD) — lag prospectivo",
             "Retiro acumulado últimos 15 días hábiles del mes (M USD)",
             "Concentración: retiro_6d / retiro_15d (solo cuando ambos < 0)",
-            "Capacidad retiro diaria: (EncajeAcum - Exigible×0.9) / n_bday (M USD)",
+            "Capacidad retiro diaria mes previo M-1: (EncajeAcum - Exigible×0.9) / n_bday (M USD)",
             "Total días hábiles en el mes",
-            "Estrategia activada en mes anterior (0/1)",
-            "Retiro 6d del mes anterior (M USD)",
-            "Máximo saldo encaje OVN del mes anterior (M USD)",
+            "Estrategia activada en mes anterior M-1 (0/1)",
+            "Máximo saldo encaje OVN del mes anterior M-1 (M USD)",
             "Retiro / máximo saldo mes previo × 100 (%)",
             "Meses consecutivos con estrategia activada hasta mes anterior",
             "Retiro neto sistema últimos 6 días hábiles (M USD)",
