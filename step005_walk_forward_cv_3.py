@@ -109,7 +109,7 @@ TRAIN_INICIO_CUTOFF   = "2020-01-01"
 # ── Tamaños de ventana ────────────────────────────────────────────────────────
 # EXPANDING=True : VENTANA_TRAIN_AÑOS es el mínimo inicial; crece PASO_AÑOS/fold
 # EXPANDING=False: VENTANA_TRAIN_AÑOS es el tamaño fijo (igual a v2)
-VENTANA_TRAIN_AÑOS  = 5      # años de TRAIN iniciales / fijos
+VENTANA_TRAIN_AÑOS  = 3      # años de TRAIN iniciales / fijos (mínimo desde 2020)
 VENTANA_VAL_AÑOS    = 0.5    # años de VAL (solo Optuna) — 6 meses, igual que step004
 VENTANA_TEST_AÑOS   = 1      # años de TEST (solo métricas OOS)
 PASO_AÑOS           = 1      # desplazamiento / crecimiento entre folds
