@@ -731,7 +731,7 @@ def _objective_optuna(trial, X_tr, y_tr, X_va, y_va, std_y):
         obj=make_quantile_objective(0.50, s, std_y),
         custom_metric=make_pinball_metric(0.50),
         evals=[(dval, "val")],
-        callbacks=[xgb.callback.EarlyStopping(rounds=50, metric_name="pinball",
+        callbacks=[xgb.callback.EarlyStopping(rounds=50, metric_name="val-pinball",
                                                save_best=False, maximize=False)],
         verbose_eval=False,
     )
@@ -877,7 +877,7 @@ def _objetivo_optuna_xgb_qt_tau(trial, tau, X_tr, y_tr, X_va, y_va, std_y):
         obj=make_quantile_objective(tau, s, std_y),
         custom_metric=make_pinball_metric(tau),
         evals=[(dval, "val")],
-        callbacks=[xgb.callback.EarlyStopping(rounds=50, metric_name="pinball",
+        callbacks=[xgb.callback.EarlyStopping(rounds=50, metric_name="val-pinball",
                                                save_best=False, maximize=False)],
         verbose_eval=False,
     )
@@ -917,7 +917,7 @@ def _worker_optuna_tau(args):
             obj=make_quantile_objective(tau, s, std_y),
             custom_metric=make_pinball_metric(tau),
             evals=[(dval, "val")],
-            callbacks=[xgb.callback.EarlyStopping(rounds=50, metric_name="pinball",
+            callbacks=[xgb.callback.EarlyStopping(rounds=50, metric_name="val-pinball",
                                                    save_best=False, maximize=False)],
             verbose_eval=False,
         )
