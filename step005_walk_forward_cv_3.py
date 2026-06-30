@@ -708,6 +708,35 @@ def make_pinball_metric(tau):
     return metric
 
 
+class _PinballEarlyStopping(xgb.callback.TrainingCallback):
+    """
+    Early stopping sobre la métrica 'pinball' del eval set de validación.
+    Reemplaza xgb.callback.EarlyStopping porque ese callback busca el nombre
+    en un dict plano ("val-pinball") mientras que XGBoost con custom_metric
+    almacena en estructura anidada: evals_log["val"]["pinball"].
+    """
+    def __init__(self, rounds: int = 50):
+        super().__init__()
+        self.rounds  = rounds
+        self._best   = float("inf")
+        self._since  = 0
+
+    def after_iteration(self, model, epoch, evals_log):
+        score = None
+        for metrics in evals_log.values():
+            if "pinball" in metrics:
+                score = metrics["pinball"][-1]
+                break
+        if score is None:
+            return False
+        if score < self._best - 1e-9:
+            self._best  = score
+            self._since = 0
+        else:
+            self._since += 1
+        return self._since >= self.rounds
+
+
 def _objective_optuna(trial, X_tr, y_tr, X_va, y_va, std_y):
     s = (std_y * S_FACTOR_FIJO if S_FIJO
          else trial.suggest_float("s", std_y * S_MIN_FACTOR, std_y * S_MAX_FACTOR, log=True))
@@ -731,8 +760,7 @@ def _objective_optuna(trial, X_tr, y_tr, X_va, y_va, std_y):
         obj=make_quantile_objective(0.50, s, std_y),
         custom_metric=make_pinball_metric(0.50),
         evals=[(dval, "val")],
-        callbacks=[xgb.callback.EarlyStopping(rounds=50, metric_name="val-pinball",
-                                               save_best=False, maximize=False)],
+        callbacks=[_PinballEarlyStopping(rounds=50)],
         verbose_eval=False,
     )
     return pinball_loss(y_va.values, model.predict(dval), 0.50)
@@ -877,8 +905,7 @@ def _objetivo_optuna_xgb_qt_tau(trial, tau, X_tr, y_tr, X_va, y_va, std_y):
         obj=make_quantile_objective(tau, s, std_y),
         custom_metric=make_pinball_metric(tau),
         evals=[(dval, "val")],
-        callbacks=[xgb.callback.EarlyStopping(rounds=50, metric_name="val-pinball",
-                                               save_best=False, maximize=False)],
+        callbacks=[_PinballEarlyStopping(rounds=50)],
         verbose_eval=False,
     )
     return pinball_loss(y_va.values, model.predict(dval), tau)
@@ -917,8 +944,7 @@ def _worker_optuna_tau(args):
             obj=make_quantile_objective(tau, s, std_y),
             custom_metric=make_pinball_metric(tau),
             evals=[(dval, "val")],
-            callbacks=[xgb.callback.EarlyStopping(rounds=50, metric_name="val-pinball",
-                                                   save_best=False, maximize=False)],
+            callbacks=[_PinballEarlyStopping(rounds=50)],
             verbose_eval=False,
         )
         return pinball_loss(y_va_np, model.predict(dval), tau)
