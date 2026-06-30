@@ -100,6 +100,12 @@ DIR_OUTPUT   = BASE_SISTEMA / "2. Output" / "step005_wfcv_v3"
 # False → ROLLING  : ventana fija que desliza (idéntico a v2)
 EXPANDING = True
 
+# ── Recorte de inicio del train ───────────────────────────────────────────────
+# True  → el train nunca empieza antes de TRAIN_INICIO_CUTOFF (nueva estrategia 2020)
+# False → el train empieza desde el primer dato disponible
+RECORTAR_INICIO_TRAIN = True
+TRAIN_INICIO_CUTOFF   = "2020-01-01"
+
 # ── Tamaños de ventana ────────────────────────────────────────────────────────
 # EXPANDING=True : VENTANA_TRAIN_AÑOS es el mínimo inicial; crece PASO_AÑOS/fold
 # EXPANDING=False: VENTANA_TRAIN_AÑOS es el tamaño fijo (igual a v2)
@@ -573,15 +579,18 @@ def generar_folds(
     folds   = []
     f_min   = fechas_disponibles.min()
     f_max   = fechas_disponibles.max()
+    # Aplica recorte de inicio si está activado
+    _origin = (max(f_min, pd.Timestamp(TRAIN_INICIO_CUTOFF))
+               if RECORTAR_INICIO_TRAIN else f_min)
     fold_idx = 0
 
     while True:
         if expanding:
-            train_start = f_min
-            train_end   = f_min + pd.DateOffset(
+            train_start = _origin
+            train_end   = _origin + pd.DateOffset(
                 months=int(round((ventana_train_años + fold_idx * paso_años) * 12)))
         else:
-            train_start = f_min + pd.DateOffset(
+            train_start = _origin + pd.DateOffset(
                 months=int(round(fold_idx * paso_años * 12)))
             train_end   = train_start + pd.DateOffset(
                 months=int(round(ventana_train_años * 12)))
