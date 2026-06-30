@@ -25,7 +25,7 @@ import pandas as pd
 # Versión del pipeline
 ###############################################################################
 
-VERSION = "v4"   # "v3" → sin normalización de target  |  "v4" → con normalización
+VERSION = "v3"   # "v3" → sin normalización de target  |  "v4" → con normalización
 
 if VERSION == "v5":
     import step005_walk_forward_cv_5 as s5
@@ -45,14 +45,14 @@ logger = logging.getLogger(__name__)
 # Configuración del grid
 ###############################################################################
 
-MODELOS_CV   = ["xgb", "xgb_qt"]
+MODELOS_CV   = ["xgb_qt"]
 VENTANAS_VAL = [0.5, 1.0]
-EXPANDINGS   = [True, False]
+EXPANDINGS   = [True]
 
 # ── Trials Optuna ─────────────────────────────────────────────────────────────
 # True  → respeta TRIALS_POR_TAU de step005 (adaptativo por cuantil)
 # False → sobreescribe con N_TRIALS_FORZADO flat para todos los cuantiles
-USAR_ADAPTIVE_TRIALS = False
+USAR_ADAPTIVE_TRIALS = True
 
 N_TRIALS_FORZADO = 60   # usado solo cuando USAR_ADAPTIVE_TRIALS = False
 

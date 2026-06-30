@@ -204,7 +204,7 @@ assert MODELO_CV in ("xgb", "lgbm", "xgb_qt"), \
 # True  → s fijo en S_FACTOR_FIJO × std_y (recomendado por el paper 2406.02293)
 #          Optuna no busca s; libera trials para otros hiperparámetros
 # False → Optuna busca s en [S_MIN_FACTOR, S_MAX_FACTOR] × std_y
-S_FIJO         = True
+S_FIJO         = False
 S_FACTOR_FIJO  = 0.05   # equivale a s=0.05 en datos estandarizados (centro del rango paper)
 
 # ── Calibración post-hoc (shift aditivo estimado en VAL) ─────────────────────
@@ -227,7 +227,7 @@ CALIBRACION_MAX_SHIFT_FACTOR = 0.5   # e.g. 0.5 → shift ≤ ±0.5×std_y
 # grandes. El paper usa 0.5 sobre targets estandarizados (std_y≈1); para datos
 # sin estandarizar el equivalente es 0.5 × std_y por fold.
 # None → desactivado (comportamiento anterior)
-MAX_DELTA_STEP_FACTOR = 0.5   # multiplica std_y de cada fold
+MAX_DELTA_STEP_FACTOR = None   # multiplica std_y de cada fold
 
 # ── Fan chart TEST: número de snapshots por fold ──────────────────────────────
 FANCHART_N_SNAPSHOTS = 4   # 1 cada ~3 meses para TEST de 1 año
