@@ -223,11 +223,6 @@ CALIBRACION_PERCENTIL = 25    # percentil del residuo VAL usado como shift
 CALIBRACION_MAX_SHIFT_FACTOR = 0.5   # e.g. 0.5 → shift ≤ ±0.5×std_y
 
 
-# Limita el salto máximo de cada árbol para evitar overshooting con gradientes
-# grandes. El paper usa 0.5 sobre targets estandarizados (std_y≈1); para datos
-# sin estandarizar el equivalente es 0.5 × std_y por fold.
-# None → desactivado (comportamiento anterior)
-MAX_DELTA_STEP_FACTOR = None   # multiplica std_y de cada fold
 
 # ── Fan chart TEST: número de snapshots por fold ──────────────────────────────
 FANCHART_N_SNAPSHOTS = 4   # 1 cada ~3 meses para TEST de 1 año
@@ -728,8 +723,6 @@ def _objective_optuna(trial, X_tr, y_tr, X_va, y_va, std_y):
         "nthread"         : _XGB_NTHREAD,
         "seed"            : 42,
     }
-    if MAX_DELTA_STEP_FACTOR is not None:
-        params["max_delta_step"] = MAX_DELTA_STEP_FACTOR * std_y
     n_est  = trial.suggest_int("n_estimators", 100, 1000)
     dtrain = xgb.DMatrix(X_tr, label=y_tr)
     dval   = xgb.DMatrix(X_va, label=y_va)
@@ -768,8 +761,6 @@ def entrenar_quantiles(X_tr, y_tr, best_params, quantiles, std_y):
     n_est  = best_params["n_estimators"]
     params = {k: v for k, v in best_params.items() if k not in ("s", "n_estimators")}
     params.update({"tree_method": "hist", "seed": 42, "nthread": _XGB_NTHREAD})
-    if MAX_DELTA_STEP_FACTOR is not None:
-        params["max_delta_step"] = MAX_DELTA_STEP_FACTOR * std_y
 
     def _train_tau(tau):
         dtrain = xgb.DMatrix(X_tr, label=y_tr)
@@ -878,8 +869,6 @@ def _objetivo_optuna_xgb_qt_tau(trial, tau, X_tr, y_tr, X_va, y_va, std_y):
         "nthread"         : _XGB_NTHREAD,   # limita threads por trial en paralelo
         "seed"            : 42,
     }
-    if MAX_DELTA_STEP_FACTOR is not None:
-        params["max_delta_step"] = MAX_DELTA_STEP_FACTOR * std_y
     n_est  = trial.suggest_int("n_estimators", 100, 1000)
     dtrain = xgb.DMatrix(X_tr, label=y_tr)
     dval   = xgb.DMatrix(X_va, label=y_va)
@@ -916,8 +905,6 @@ def _worker_optuna_tau(args):
     n_est = bp["n_estimators"]
     params = {k: v for k, v in bp.items() if k not in ("s", "n_estimators")}
     params.update({"tree_method": "hist", "seed": 42, "nthread": _XGB_NTHREAD})
-    if MAX_DELTA_STEP_FACTOR is not None:
-        params["max_delta_step"] = MAX_DELTA_STEP_FACTOR * std_y
     dtrain = xgb.DMatrix(X_tr, label=y_tr)
     model  = xgb.train(
         params, dtrain, num_boost_round=n_est,
