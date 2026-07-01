@@ -1530,8 +1530,8 @@ def build_ccovn_features(df_ccovn, peru_bday, flujo_sistema=None):
     # Desviación del saldo del sistema respecto a su media histórica para ese
     # mismo puesto (rango) dentro del mes hábil:
     #   rango = 1 si es el 1er día hábil del mes, 2 si es el 2do, etc.
-    #   media_por_rango = promedio de saldo_sistema para todas las observaciones
-    #                     con el mismo rango, a lo largo de la historia completa.
+    #   media_por_rango = media expandida (solo datos hasta t-1) del saldo para
+    #                     cada rango, evitando leakage de información futura.
     #   ccovn_vs_dia_mes = saldo_sistema - media_por_rango
     # Elimina el patrón estacional intramonth (ingresos inicio / retiros fin).
     # XGBoost ya tiene dia_habil_del_mes como feature; esta variable aporta
@@ -1541,7 +1541,10 @@ def build_ccovn_features(df_ccovn, peru_bday, flujo_sistema=None):
         .groupby(df_bd.index.to_period("M"))
         .transform(lambda x: np.arange(1, len(x) + 1))
     )
-    media_por_rango  = sis.groupby(rango_dia).transform("mean")
+    media_por_rango = (
+        sis.groupby(rango_dia)
+           .transform(lambda x: x.expanding().mean().shift(1))
+    )
     resultado["ccovn_vs_dia_mes_lag1"] = (sis - media_por_rango).shift(1)
 
     # ── residuo_ccovn_lag1 ───────────────────────────────────────────────────
