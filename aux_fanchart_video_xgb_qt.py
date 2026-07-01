@@ -50,7 +50,7 @@ CORTE_TEST = pd.Timestamp("2023-01-03")
 # False → carga modelos desde DIR_MODELOS (comportamiento anterior)
 USAR_MODELOS_CV = True
 _CV_MODO        = "expanding"   # "expanding" o "rolling"
-_CV_VENTANAS    = "511"         # f"{TRAIN}{VAL}{TEST}" en años
+_CV_VENTANAS    = "30.51"       # f"{TRAIN}{VAL}{TEST}" en años → xgb_qt_expanding_30.51
 DIR_MODELOS_CV  = (BASE_SISTEMA / "2. Output" / "step005_wfcv_v3" /
                    f"xgb_qt_{_CV_MODO}_{_CV_VENTANAS}" / "modelos")
 
