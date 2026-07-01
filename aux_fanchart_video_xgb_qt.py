@@ -327,10 +327,11 @@ def cargar_datos(banco: str, cols_feat: list[str], meta: dict = None):
     cols_num     = [c for c in df.columns if c not in cols_excluir]
     medianas     = df_train[cols_num].median()
 
+    h_max = int(df_test["h"].max()) if not df_test.empty else 75
     fechas_validas = np.sort(
-        df_test[(df_test["h"] == 90) & df_test["target"].notna()]["fecha_t"].unique()
+        df_test[(df_test["h"] == h_max) & df_test["target"].notna()]["fecha_t"].unique()
     )
-    print(f"TEST  : {CORTE_TEST.date()} → {df_test['fecha_t'].max().date()}")
+    print(f"TEST  : {CORTE_TEST.date()} → {df_test['fecha_t'].max().date()}  (h_max={h_max})")
     print(f"Fechas válidas: {pd.Timestamp(fechas_validas[0]).date()} → "
           f"{pd.Timestamp(fechas_validas[-1]).date()} ({len(fechas_validas)} fechas)")
 
