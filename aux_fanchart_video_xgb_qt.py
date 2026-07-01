@@ -43,7 +43,7 @@ DIR_OUTPUT   = BASE_SISTEMA / "2. Output" / "aux_fanchart_horizontes_xgb_qt"
 DIR_OUTPUT.mkdir(parents=True, exist_ok=True)
 
 BANCO      = "SISTEMA"
-CORTE_TEST = pd.Timestamp("2023-01-03")
+CORTE_TEST = pd.Timestamp("2024-01-26")   # inicio TEST fold 1 → solo fechas genuinamente OOS
 
 # ── Configuración CV ──────────────────────────────────────────────────────────
 # True  → carga modelos y GARCH desde step005_wfcv_v3 (consistente con entrenamiento)
