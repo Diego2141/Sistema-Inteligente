@@ -682,6 +682,35 @@ def make_pinball_metric(tau):
     return metric
 
 
+class _PinballEarlyStopping(xgb.callback.TrainingCallback):
+    """
+    Early stopping sobre la métrica 'pinball' del eval set de validación.
+    Reemplaza xgb.callback.EarlyStopping porque ese callback busca el nombre
+    en un dict plano ("val-pinball") mientras que XGBoost con custom_metric
+    almacena en estructura anidada: evals_log["val"]["pinball"].
+    """
+    def __init__(self, rounds: int = 50):
+        super().__init__()
+        self.rounds  = rounds
+        self._best   = float("inf")
+        self._since  = 0
+
+    def after_iteration(self, model, epoch, evals_log):
+        score = None
+        for metrics in evals_log.values():
+            if "pinball" in metrics:
+                score = metrics["pinball"][-1]
+                break
+        if score is None:
+            return False
+        if score < self._best - 1e-9:
+            self._best  = score
+            self._since = 0
+        else:
+            self._since += 1
+        return self._since >= self.rounds
+
+
 def _objective_optuna(trial, X_tr, y_tr, X_va, y_va, std_y):
     s = (std_y * S_FACTOR_FIJO if S_FIJO
          else trial.suggest_float("s", std_y * S_MIN_FACTOR, std_y * S_MAX_FACTOR, log=True))
@@ -708,8 +737,7 @@ def _objective_optuna(trial, X_tr, y_tr, X_va, y_va, std_y):
         obj=make_quantile_objective(0.50, s, std_y),
         custom_metric=make_pinball_metric(0.50),
         evals=[(dval, "val")],
-        callbacks=[xgb.callback.EarlyStopping(rounds=50, metric_name="pinball",
-                                               save_best=False, maximize=False)],
+        callbacks=[_PinballEarlyStopping(rounds=50)],
         verbose_eval=False,
     )
     return pinball_loss(y_va.values, model.predict(dval), 0.50)
@@ -860,8 +888,7 @@ def _objetivo_optuna_xgb_qt_tau(trial, tau, X_tr, y_tr, X_va, y_va, std_y):
         obj=make_quantile_objective(tau, s, std_y),
         custom_metric=make_pinball_metric(tau),
         evals=[(dval, "val")],
-        callbacks=[xgb.callback.EarlyStopping(rounds=50, metric_name="pinball",
-                                               save_best=False, maximize=False)],
+        callbacks=[_PinballEarlyStopping(rounds=50)],
         verbose_eval=False,
     )
     return pinball_loss(y_va.values, model.predict(dval), tau)
@@ -870,18 +897,50 @@ def _objetivo_optuna_xgb_qt_tau(trial, tau, X_tr, y_tr, X_va, y_va, std_y):
 def _worker_optuna_tau(args):
     """
     Función de módulo (picklable) para ProcessPoolExecutor.
-    Cada proceso hijo corre Optuna + entrenamiento final para un cuantil.
+    Recibe numpy arrays (no DataFrames) para minimizar el tamaño del pickle.
+    Crea DMatrix UNA VEZ por proceso y la reutiliza en todos los trials de Optuna.
     """
-    tau, X_tr, y_tr, X_va, y_va, std_y, n_trials, fold_num = args
+    tau, X_tr_np, y_tr_np, X_va_np, y_va_np, col_names, std_y, n_trials, fold_num = args
+
+    # DMatrix creado una vez — se reutiliza en cada trial (no se recrea N×)
+    dtrain = xgb.DMatrix(X_tr_np, label=y_tr_np, feature_names=col_names)
+    dval   = xgb.DMatrix(X_va_np, label=y_va_np, feature_names=col_names)
+
+    def _obj(trial):
+        s = (std_y * S_FACTOR_FIJO if S_FIJO
+             else trial.suggest_float("s", std_y * S_MIN_FACTOR, std_y * S_MAX_FACTOR, log=True))
+        params = {
+            "learning_rate"   : trial.suggest_float("learning_rate",   0.01,  0.3,  log=True),
+            "max_depth"       : trial.suggest_int(  "max_depth",         3,     6),
+            "min_child_weight": trial.suggest_int(  "min_child_weight", 10,   200),
+            "colsample_bytree": trial.suggest_float("colsample_bytree",  0.4,  1.0),
+            "subsample"       : trial.suggest_float("subsample",         0.5,  1.0),
+            "reg_alpha"       : 0.0 if FIX_REG_ALPHA else trial.suggest_float("reg_alpha", 0.01, 1.0, log=True),
+            "reg_lambda"      : trial.suggest_float("reg_lambda", 0.1, 5.0) if FIX_REG_LAMBDA else trial.suggest_float("reg_lambda", 0.01, 1.0, log=True),
+            "tree_method"     : "hist",
+            "nthread"         : _XGB_NTHREAD,
+            "seed"            : 42,
+        }
+        if MAX_DELTA_STEP_FACTOR is not None:
+            params["max_delta_step"] = MAX_DELTA_STEP_FACTOR * std_y
+        n_est = trial.suggest_int("n_estimators", 100, 1000)
+        model = xgb.train(
+            params, dtrain, num_boost_round=n_est,
+            obj=make_quantile_objective(tau, s, std_y),
+            custom_metric=make_pinball_metric(tau),
+            evals=[(dval, "val")],
+            callbacks=[_PinballEarlyStopping(rounds=50)],
+            verbose_eval=False,
+        )
+        return pinball_loss(y_va_np, model.predict(dval), tau)
+
     study = optuna.create_study(
         direction="minimize",
         sampler=optuna.samplers.TPESampler(seed=42 + fold_num + int(tau * 100)),
     )
-    study.optimize(
-        lambda t: _objetivo_optuna_xgb_qt_tau(t, tau, X_tr, y_tr, X_va, y_va, std_y),
-        n_trials=n_trials, show_progress_bar=False,
-    )
-    bp    = study.best_params
+    study.optimize(_obj, n_trials=n_trials, show_progress_bar=False)
+
+    bp = study.best_params
     if S_FIJO:
         bp["s"] = std_y * S_FACTOR_FIJO
     s     = bp["s"]
@@ -889,10 +948,8 @@ def _worker_optuna_tau(args):
     params = {k: v for k, v in bp.items() if k not in ("s", "n_estimators")}
     params.update({"tree_method": "hist", "seed": 42, "nthread": _XGB_NTHREAD})
     if MAX_DELTA_STEP_FACTOR is not None:
-        # Con NORMALIZAR_TARGET=True, std_y_m=1.0 → max_delta_step=0.5 exacto del paper
         params["max_delta_step"] = MAX_DELTA_STEP_FACTOR * std_y
-    dtrain = xgb.DMatrix(X_tr, label=y_tr)
-    model  = xgb.train(
+    model = xgb.train(
         params, dtrain, num_boost_round=n_est,
         obj=make_quantile_objective(tau, s, std_y),
         verbose_eval=False,
@@ -906,9 +963,17 @@ def _entrenar_fold_xgb_qt(X_tr, y_tr, X_va, y_va, std_y, n_trials, fold_num):
     Los estudios corren en paralelo con ProcessPoolExecutor (un proceso por
     cuantil, GIL independiente) → paralelismo real en múltiples núcleos.
     Cada XGBoost usa _XGB_NTHREAD threads → sin over-subscription de CPU.
+    Se pasan numpy arrays al worker para reducir overhead de pickle.
     """
+    col_names = list(X_tr.columns)
+    X_tr_np   = X_tr.values
+    y_tr_np   = y_tr.values
+    X_va_np   = X_va.values
+    y_va_np   = y_va.values
+
     worker_args = [
-        (tau, X_tr, y_tr, X_va, y_va, std_y, get_n_trials(tau), fold_num)
+        (tau, X_tr_np, y_tr_np, X_va_np, y_va_np, col_names,
+         std_y, get_n_trials(tau), fold_num)
         for tau in QUANTILES
     ]
 
@@ -931,7 +996,7 @@ def _entrenar_fold_xgb_qt(X_tr, y_tr, X_va, y_va, std_y, n_trials, fold_num):
                         "tree_method": "hist",
                         "nthread": _XGB_NTHREAD,
                         "seed": 42})
-    dtrain_mean = xgb.DMatrix(X_tr, label=y_tr)
+    dtrain_mean = xgb.DMatrix(X_tr_np, label=y_tr_np, feature_names=col_names)
     modelos["mean"] = xgb.train(params_mean, dtrain_mean,
                                 num_boost_round=bp_mean["n_estimators"],
                                 verbose_eval=False)
