@@ -69,12 +69,7 @@ except ImportError:
     lgb = None
     _LGBM_OK = False
 
-try:
-    import shap
-    _SHAP_OK = True
-except ImportError:
-    shap = None
-    _SHAP_OK = False
+_SHAP_OK = True  # XGBoost nativo pred_contribs=True siempre disponible
 
 warnings.filterwarnings("ignore", category=UserWarning)
 optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -2125,11 +2120,10 @@ def _diag_block_perm_promedio(modelos, X_val, y_val, cols_feat, fold_num):
 
 
 def _diag_shap_promedio(modelos, X_val, cols_feat, fold_num):
-    if not _SHAP_OK:
-        return pd.Series(np.nan, index=cols_feat)
     X = X_val.reset_index(drop=True)[cols_feat]
     if len(X) > DIAG_SHAP_MAX_SAMPLES:
         X = X.sample(DIAG_SHAP_MAX_SAMPLES, random_state=42 + fold_num)
+    dmat = xgb.DMatrix(X.values, feature_names=cols_feat)
     acum = pd.Series(0.0, index=cols_feat)
     n = 0
     for tau in QUANTILES:
@@ -2137,14 +2131,14 @@ def _diag_shap_promedio(modelos, X_val, cols_feat, fold_num):
         if model is None:
             continue
         try:
-            explainer = shap.TreeExplainer(model)
-            sv = explainer.shap_values(X)
+            # pred_contribs=True devuelve SHAP values nativos de XGBoost
+            # shape: (n_samples, n_features + 1); última col = bias → se descarta
+            sv = model.predict(dmat, pred_contribs=True)[:, :-1]
             s = pd.Series(np.abs(sv).mean(axis=0), index=cols_feat)
             acum = acum.add(s.fillna(0.0), fill_value=0.0)
             n += 1
         except Exception as e:
-            import traceback
-            logger.warning(f"      [diag] SHAP τ={tau} falló: {e}\n{traceback.format_exc()}")
+            logger.warning(f"      [diag] SHAP τ={tau} falló: {e}")
     if n == 0:
         return pd.Series(np.nan, index=cols_feat)
     return acum / n
