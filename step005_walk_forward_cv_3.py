@@ -2143,7 +2143,8 @@ def _diag_shap_promedio(modelos, X_val, cols_feat, fold_num):
             acum = acum.add(s.fillna(0.0), fill_value=0.0)
             n += 1
         except Exception as e:
-            logger.warning(f"      [diag] SHAP τ={tau} falló: {e}")
+            import traceback
+            logger.warning(f"      [diag] SHAP τ={tau} falló: {e}\n{traceback.format_exc()}")
     if n == 0:
         return pd.Series(np.nan, index=cols_feat)
     return acum / n
