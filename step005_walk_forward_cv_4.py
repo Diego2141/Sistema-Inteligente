@@ -862,38 +862,6 @@ def predecir_lgbm(modelos, X):
 
 # ── XGBoost QT ────────────────────────────────────────────────────────────────
 
-def _objetivo_optuna_xgb_qt_tau(trial, tau, X_tr, y_tr, X_va, y_va, std_y):
-    s = (std_y * S_FACTOR_FIJO if S_FIJO
-         else trial.suggest_float("s", std_y * S_MIN_FACTOR, std_y * S_MAX_FACTOR, log=True))
-    params = {
-        "learning_rate"   : trial.suggest_float("learning_rate",   0.01,  0.3,  log=True),
-        "max_depth"       : trial.suggest_int(  "max_depth",         3,     6),
-        "min_child_weight": trial.suggest_int(  "min_child_weight", 10,   200),
-        "colsample_bytree": trial.suggest_float("colsample_bytree",  0.4,  1.0),
-        "subsample"       : trial.suggest_float("subsample",         0.5,  1.0),
-        "reg_alpha"       : 0.0 if FIX_REG_ALPHA else trial.suggest_float("reg_alpha", 0.01, 1.0, log=True),
-        "reg_lambda"      : trial.suggest_float("reg_lambda", 0.1, 5.0) if FIX_REG_LAMBDA else trial.suggest_float("reg_lambda", 0.01, 1.0, log=True),
-        "tree_method"     : "hist",
-        "nthread"         : _XGB_NTHREAD,   # limita threads por trial en paralelo
-        "seed"            : 42,
-    }
-    if MAX_DELTA_STEP_FACTOR is not None:
-        # Con NORMALIZAR_TARGET=True, std_y_m=1.0 → max_delta_step=0.5 exacto del paper
-        params["max_delta_step"] = MAX_DELTA_STEP_FACTOR * std_y
-    n_est  = trial.suggest_int("n_estimators", 100, 1000)
-    dtrain = xgb.DMatrix(X_tr, label=y_tr)
-    dval   = xgb.DMatrix(X_va, label=y_va)
-    model  = xgb.train(
-        params, dtrain, num_boost_round=n_est,
-        obj=make_quantile_objective(tau, s, std_y),
-        custom_metric=make_pinball_metric(tau),
-        evals=[(dval, "val")],
-        callbacks=[_PinballEarlyStopping(rounds=50)],
-        verbose_eval=False,
-    )
-    return pinball_loss(y_va.values, model.predict(dval), tau)
-
-
 def _worker_optuna_tau(args):
     """
     Función de módulo (picklable) para ProcessPoolExecutor.
