@@ -1282,8 +1282,19 @@ print("=" * 65)
 # ── Nuevos features (valores del día t, sin lag) ──────────────────────────────
 # avance_mes ya existe como "Avance" en df
 df["avance_mes"]      = df["Avance"]
-df["exceso_abs"]      = df["EncajeAcumMes"] - df["ExigibleTotalMes_est"] * UMBRAL_90
 df["ratio_ovn_total"] = df["overnight"] / df["encaje_ovn"].replace(0, np.nan)
+
+# Mínimo de encaje diario que el banco debe mantener los días restantes para
+# seguir cumpliendo el umbral del 90% al cierre del mes.
+# dias_restantes = dias que faltan (sin contar hoy), mínimo 1 para evitar /0.
+_encaje_min_por_dia = (
+    (df["ExigibleTotalMes_est"] * UMBRAL_90 - df["EncajeAcumMes"])
+    .clip(lower=0)
+    / df["dias_restantes"].clip(lower=1)
+)
+# exceso_abs: cuánto puede retirar el banco HOY de su posición sin romper el 90%.
+# Está acotado por encaje_hoy (no puede superar la posición real del banco).
+df["exceso_abs"] = df["encaje"] - _encaje_min_por_dia
 
 # ── Versiones lag1 (información disponible en t-1 para el modelo) ─────────────
 df["avance_mes_lag1"]      = df["avance_mes"].shift(1)
@@ -1374,9 +1385,10 @@ _formulas_doc = [
      "Avance = EncajeAcumMes / ExigibleTotalMes_est. "
      "0→1: fracción del requerimiento mensual estimado ya cubierta. >1 = cumplió."),
     ("exceso_abs",
-     f"={_C['EncajeAcumMes']}3-{_C['ExigibleTotalMes_est']}3*0.9",
-     "Exceso absoluto sobre umbral 90%: EncajeAcumMes - ExigibleTotalMes_est×0.90. "
-     "Positivo = banco puede retirar este monto sin romper el 90%."),
+     f"={_C['encaje']}3-MAX(0,({_C['ExigibleTotalMes_est']}3*0.9-{_C['EncajeAcumMes']}3)/MAX(1,{_C['dias_en_mes']}3-{_C['dia_mes']}3))",
+     "Cuánto puede retirar el banco HOY sin romper el 90% al cierre del mes. "
+     "= encaje - max(0, brecha_90% / dias_restantes). "
+     "Acotado por la posición real: no puede superar encaje_ovn."),
     ("ratio_ovn_total",
      f"={_C['overnight']}3/{_C['encaje_ovn']}3",
      "overnight / encaje_ovn. Alto = banco aún no inició retiro (fondos en overnight). "
