@@ -177,6 +177,7 @@ PARAMS = {
     # Rutas archivos manuales
     "ruta_datos_bancarios": r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Raw\Transacciones_BancaLocal.xlsx",
     "ruta_encaje": r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Raw\EncajeD.xlsx",
+    "ruta_bbva_encaje_features": r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\2. Output\encaje_bbva\bbva_encaje_features_modelo.xlsx",
     "banco_encaje": "BBVA",   # banco al que aplican los datos de encaje
     "ruta_ccovn":  r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Raw\Saldos_CCOVN.xlsx",
     "bbva_keyword": "bbva",   # subcadena (case-insensitive) que identifica la columna BBVA en Saldos_CCOVN
@@ -1448,45 +1449,56 @@ def build_encaje_features(df_encaje, peru_bday):
         retiro_acum_mes.abs() / resultado["techo_10h"].replace(0, np.nan)
     ).clip(0, None)
 
-    # ── 6. Features de avance/exceso mensual (encaje vs requerimiento acumulado) ─
-    # Días calendario del mes y día actual (para calcular días restantes).
-    dias_mes = pd.Series(
-        df.index.to_series().dt.daysinmonth.values, index=df.index
-    )
-    dia_mes = pd.Series(df.index.day, index=df.index)
-    dias_restantes = (dias_mes - dia_mes).clip(lower=1)
-
-    # avance_mes: fracción del requerimiento mensual ya cubierta.
-    # encaje_acum/exigible_total son las series del bloque 2 (ya calculadas arriba).
-    avance_mes = (encaje_acum / exigible_total.replace(0, np.nan)).clip(lower=0)
-    resultado["avance_mes_lag1"] = avance_mes.shift(1)
-
-    # exceso_abs: capacidad de retiro total (encaje + overnight) sin incumplir
-    # el 100% del exigible al cierre del mes.
-    #   encaje_min_por_dia = MAX(0, brecha_100% / dias_restantes)
-    #   exceso_abs = MAX(0, encaje - encaje_min_por_dia) + overnight
-    encaje_min_por_dia = (
-        (exigible_total - encaje_acum).clip(lower=0) / dias_restantes
-    )
-    exceso_abs = (encaje - encaje_min_por_dia).clip(lower=0) + overnight
-    resultado["exceso_abs_lag1"] = exceso_abs.shift(1)
-
-    # encaje_ovn_lag1: posición total en BCRP (overnight + cta_cte + caja) en t-1.
-    # cc_on ya contiene encaje + overnight (calculado en bloque 3).
-    resultado["encaje_ovn_lag1"] = cc_on.shift(1)
-
-    # ratio_ovn_total_lag1: overnight / encaje_ovn en t-1.
-    # Alto → banco aún no inició retiro (fondos estacionados en overnight).
-    ratio_ovn = overnight / cc_on.replace(0, np.nan)
-    resultado["ratio_ovn_total_lag1"] = ratio_ovn.shift(1)
-
     n_validos = resultado["faltante_lag1"].notna().sum()
     logger.info(
         f"  build_encaje_features: {n_validos:,} filas con faltante_lag1 válido | "
-        f"techo_10h disponible: {resultado['techo_10h'].notna().sum():,} filas | "
-        f"avance_mes_lag1 válido: {resultado['avance_mes_lag1'].notna().sum():,} filas"
+        f"techo_10h disponible: {resultado['techo_10h'].notna().sum():,} filas"
     )
     return resultado
+
+
+# 5c-bis. Features de encaje BBVA desde Excel generado por aux_encaje_2.py
+def load_bbva_encaje_features(params, business_day_index):
+    """
+    Lee bbva_encaje_features_modelo.xlsx (generado por aux_encaje_2.py) y
+    adapta las 4 features lag1 al calendario hábil de step001.
+
+    El Excel tiene días calendario. El lag1 ya está aplicado sobre ese índice:
+      avance_mes_lag1[t]      = avance_mes del día calendario t-1
+      exceso_abs_lag1[t]      = exceso_abs del día calendario t-1
+      encaje_ovn_lag1[t]      = encaje_ovn del día calendario t-1
+      ratio_ovn_total_lag1[t] = ratio_ovn_total del día calendario t-1
+
+    Para lunes: ffill hereda el valor del domingo = valor del viernes (sin
+    transacciones en fin de semana), lo que es correcto para el modelo.
+    No se aplica un segundo shift(1) — el lag ya está en el Excel.
+    """
+    _COLS = ["avance_mes_lag1", "exceso_abs_lag1",
+             "encaje_ovn_lag1", "ratio_ovn_total_lag1"]
+
+    ruta = params.get("ruta_bbva_encaje_features", "")
+    if not ruta or not Path(ruta).exists():
+        logger.info("  bbva_encaje_features: archivo no encontrado — features de avance/exceso omitidas.")
+        return pd.DataFrame()
+
+    try:
+        df = pd.read_excel(ruta, sheet_name="Datos", usecols=["fecha"] + _COLS)
+        df["fecha"] = pd.to_datetime(df["fecha"])
+        df = df.set_index("fecha").sort_index()
+
+        # Adaptar de días calendario → días hábiles del modelo con ffill.
+        df = df.reindex(business_day_index, method="ffill")
+
+        n_val = df["avance_mes_lag1"].notna().sum()
+        logger.info(
+            f"  bbva_encaje_features: {n_val:,} filas válidas de {len(df):,} "
+            f"(período {df.index.min().date()} → {df.index.max().date()})"
+        )
+        return df
+
+    except Exception as e:
+        logger.warning(f"  bbva_encaje_features: error al cargar — {e}")
+        return pd.DataFrame()
 
 
 # 5d. Features CC+OVN en BCR (Saldos_CCOVN.xlsx, rezago 1 día)
@@ -1810,9 +1822,10 @@ def build_feature_matrix(
     h_min,
     h_max,
     hmm_features=None,     # pd.Series(hmm_estado, index=fecha_t) pre-computada
-    encaje_features=None,  # pd.DataFrame(index=fecha_t) con features de encaje (BBVA)
-    banco_encaje="BBVA",   # banco al que aplican esas features
-    ccovn_features=None,   # pd.DataFrame(index=fecha_t) con saldos CC+OVN para todos los bancos
+    encaje_features=None,        # pd.DataFrame(index=fecha_t) con features de encaje (BBVA)
+    banco_encaje="BBVA",         # banco al que aplican esas features
+    bbva_encaje_feat=None,       # pd.DataFrame(index=fecha_t) avance/exceso desde aux_encaje_2
+    ccovn_features=None,         # pd.DataFrame(index=fecha_t) con saldos CC+OVN para todos los bancos
 ):
     """
     Construye el dataset de entrenamiento para un banco de forma vectorizada.
@@ -1929,6 +1942,17 @@ def build_feature_matrix(
             for col in encaje_features.columns:
                 df[col] = np.nan
 
+    # ── 8b. Features de avance/exceso encaje (aux_encaje_2, solo BBVA) ─────────
+    # Calculadas sobre días calendario en aux_encaje_2.py → lag1 ya aplicado.
+    # Para bancos distintos al banco_encaje → columnas quedan en NaN.
+    if bbva_encaje_feat is not None and not bbva_encaje_feat.empty:
+        if banco == banco_encaje:
+            df = df.merge(bbva_encaje_feat, left_on="fecha_t", right_index=True, how="left")
+            logger.info(f"  {banco}: bbva_encaje_feat incorporadas ({len(bbva_encaje_feat.columns)} cols)")
+        else:
+            for col in bbva_encaje_feat.columns:
+                df[col] = np.nan
+
     # ── 9. Features CC+OVN en BCR (Saldos_CCOVN.xlsx, todos los bancos) ──────
     # ccovn_features está indexado por fecha y contiene valores del día t-1.
     # ccovn_sistema_lag1 aplica a todos los bancos.
@@ -2034,6 +2058,15 @@ def build_full_matrix(
     df_encaje = load_encaje_data(params)
     encaje_feat = build_encaje_features(df_encaje, peru_bday)
 
+    # Features de avance/exceso encaje desde bbva_encaje_features_modelo.xlsx
+    # (generado por aux_encaje_2.py con días calendario — más preciso que EncajeD.xlsx)
+    _bday_idx = pd.bdate_range(
+        start=params["fecha_inicio_historico"],
+        end=params["fecha_fin_historico"],
+        freq=peru_bday,
+    )
+    bbva_encaje_feat = load_bbva_encaje_features(params, _bday_idx)
+
     # Pre-calcular features CC+OVN (todos los bancos; sistémico + BBVA).
     # flujo_neto_sistema = D_SISTEMA - R_SISTEMA, necesario para residuo_ccovn_lag1.
     df_ccovn   = load_ccovn_data(params)
@@ -2082,6 +2115,7 @@ def build_full_matrix(
             hmm_features=hmm_sistema,       # mismo régimen sistémico para todos los bancos
             encaje_features=encaje_feat,    # features de encaje (solo aplican a banco_encaje)
             banco_encaje=banco_encaje,
+            bbva_encaje_feat=bbva_encaje_feat,  # avance/exceso desde aux_encaje_2 (días calendario)
             ccovn_features=ccovn_feat,      # saldos CC+OVN en BCR (aplican a todos los bancos)
         )
         if df_banco_mat.empty:
@@ -2287,12 +2321,12 @@ def build_data_dictionary(params):
     add("exceso_lag1",         f"EncajeD / {_benc}", "Encaje(t-1) − Exigible(t-1): exceso acumulado disponible (M USD).", 1, "t")
     add("faltante_lag1",       f"EncajeD / {_benc}", "Exigible_total_mes − encaje_acum(t-1): saldo aún pendiente de acumular en el mes (M USD).", 1, "t")
     add("techo_10h",           f"EncajeD / {_benc}", "CC+ON al día hábil 10 antes del cierre del mes, rezagado 1 día. Techo operativo de retiros.", 1, "t")
-    add("techo_restante_lag1", f"EncajeD / {_benc}", "techo_10h − retiro_acumulado_mes(t-1): presupuesto de retiro aún disponible (M USD).", 1, "t")
-    add("proporcion_usada",    f"EncajeD / {_benc}", "retiro_acum_mes(t-1) / techo_10h: fracción del techo ya utilizada (0-1+).", 1, "t")
-    add("avance_mes_lag1",     f"EncajeD / {_benc}", "encaje_acum(t-1) / exigible_total_mes_est: fracción del req. mensual cubierta al día anterior (0→1, >1 = holgura).", 1, "t")
-    add("exceso_abs_lag1",     f"EncajeD / {_benc}", "MAX(0, encaje(t-1) − encaje_min_por_dia) + overnight(t-1): capacidad de retiro total sin incumplir el 100% al cierre (M USD).", 1, "t")
-    add("encaje_ovn_lag1",     f"EncajeD / {_benc}", "overnight + cta_cte + caja en t-1 (M USD): posición total BCRP, techo físico máximo de retiro.", 1, "t")
-    add("ratio_ovn_total_lag1",f"EncajeD / {_benc}", "overnight(t-1) / encaje_ovn(t-1): fracción de la posición BCRP en overnight. Alto = banco aún no inició retiro.", 1, "t")
+    add("techo_restante_lag1",   f"EncajeD / {_benc}", "techo_10h − retiro_acumulado_mes(t-1): presupuesto de retiro aún disponible (M USD).", 1, "t")
+    add("proporcion_usada",      f"EncajeD / {_benc}", "retiro_acum_mes(t-1) / techo_10h: fracción del techo ya utilizada (0-1+).", 1, "t")
+    add("avance_mes_lag1",       f"aux_encaje_2 / {_benc}", "EncajeAcumMes(t-1) / ExigibleTotalMes_est(t-1): fracción del req. mensual cubierta. Días calendario → ffill a días hábiles.", 1, "t")
+    add("exceso_abs_lag1",       f"aux_encaje_2 / {_benc}", "MAX(0, encaje(t-1)−encaje_min_por_dia)+overnight(t-1): capacidad de retiro real sin incumplir 100% al cierre (M USD). Días calendario.", 1, "t")
+    add("encaje_ovn_lag1",       f"aux_encaje_2 / {_benc}", "overnight+cta_cte+caja en t-1 (M USD): posición total BCRP. Techo físico máximo de retiro posible.", 1, "t")
+    add("ratio_ovn_total_lag1",  f"aux_encaje_2 / {_benc}", "overnight(t-1)/encaje_ovn(t-1): alto = banco aún no inició retiro (fondos en overnight sin mover).", 1, "t")
 
     # ── Features CC+OVN en BCR (Saldos_CCOVN.xlsx, rezago 1 día) ─────────────
     add("ccovn_sistema_lag1",     "Saldos_CCOVN",
