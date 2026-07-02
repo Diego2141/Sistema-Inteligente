@@ -1945,21 +1945,28 @@ def build_feature_matrix(
                        "encaje_ovn_lag1", "ratio_ovn_total_lag1"]
     if bbva_encaje_feat is not None and not bbva_encaje_feat.empty:
         if banco == banco_encaje:
-            _fecha_t_norm = pd.to_datetime(df["fecha_t"]).dt.normalize()
-            _left = pd.DataFrame({"fecha_t": _fecha_t_norm,
-                                  "_idx_orig": np.arange(len(df))})
-            _right = bbva_encaje_feat.rename(columns={"fecha": "fecha_t"}) \
-                if "fecha" in bbva_encaje_feat.columns \
-                else bbva_encaje_feat.reset_index().rename(columns={"index": "fecha_t"})
-            _right["fecha_t"] = pd.to_datetime(_right["fecha_t"]).dt.normalize()
-            _merged = pd.merge_asof(
-                _left.sort_values("fecha_t"),
-                _right[["fecha_t"] + _bbva_feat_cols].sort_values("fecha_t"),
+            # Construir lookup: fecha_t_única → valor del Excel más reciente ≤ fecha_t.
+            # merge_asof sobre fechas únicas evita ambigüedades con múltiples h por fecha.
+            _ft_norm = pd.to_datetime(df["fecha_t"]).dt.normalize()
+            _dates_unicas = pd.DataFrame(
+                {"fecha_t": _ft_norm.unique()}
+            ).sort_values("fecha_t")
+
+            _feat_r = bbva_encaje_feat[["fecha"] + _bbva_feat_cols].copy()
+            _feat_r["fecha"] = pd.to_datetime(_feat_r["fecha"]).dt.normalize()
+            _feat_r = _feat_r.rename(columns={"fecha": "fecha_t"}) \
+                              .sort_values("fecha_t")
+
+            _lookup = pd.merge_asof(
+                _dates_unicas,
+                _feat_r,
                 on="fecha_t",
                 direction="backward",
-            ).set_index("_idx_orig").reindex(np.arange(len(df)))
+            ).set_index("fecha_t")
+
             for col in _bbva_feat_cols:
-                df[col] = _merged[col].values
+                df[col] = _ft_norm.map(_lookup[col]).values
+
             n_ok = df["avance_mes_lag1"].notna().sum()
             logger.info(f"  {banco}: bbva_encaje_feat incorporadas — "
                         f"{n_ok:,}/{len(df):,} filas con valores")
