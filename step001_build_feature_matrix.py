@@ -1448,10 +1448,43 @@ def build_encaje_features(df_encaje, peru_bday):
         retiro_acum_mes.abs() / resultado["techo_10h"].replace(0, np.nan)
     ).clip(0, None)
 
+    # ── 6. Features de avance/exceso mensual (encaje vs requerimiento acumulado) ─
+    # Días calendario del mes y día actual (para calcular días restantes).
+    dias_mes = pd.Series(
+        df.index.to_series().dt.daysinmonth.values, index=df.index
+    )
+    dia_mes = pd.Series(df.index.day, index=df.index)
+    dias_restantes = (dias_mes - dia_mes).clip(lower=1)
+
+    # avance_mes: fracción del requerimiento mensual ya cubierta.
+    # encaje_acum/exigible_total son las series del bloque 2 (ya calculadas arriba).
+    avance_mes = (encaje_acum / exigible_total.replace(0, np.nan)).clip(lower=0)
+    resultado["avance_mes_lag1"] = avance_mes.shift(1)
+
+    # exceso_abs: capacidad de retiro total (encaje + overnight) sin incumplir
+    # el 100% del exigible al cierre del mes.
+    #   encaje_min_por_dia = MAX(0, brecha_100% / dias_restantes)
+    #   exceso_abs = MAX(0, encaje - encaje_min_por_dia) + overnight
+    encaje_min_por_dia = (
+        (exigible_total - encaje_acum).clip(lower=0) / dias_restantes
+    )
+    exceso_abs = (encaje - encaje_min_por_dia).clip(lower=0) + overnight
+    resultado["exceso_abs_lag1"] = exceso_abs.shift(1)
+
+    # encaje_ovn_lag1: posición total en BCRP (overnight + cta_cte + caja) en t-1.
+    # cc_on ya contiene encaje + overnight (calculado en bloque 3).
+    resultado["encaje_ovn_lag1"] = cc_on.shift(1)
+
+    # ratio_ovn_total_lag1: overnight / encaje_ovn en t-1.
+    # Alto → banco aún no inició retiro (fondos estacionados en overnight).
+    ratio_ovn = overnight / cc_on.replace(0, np.nan)
+    resultado["ratio_ovn_total_lag1"] = ratio_ovn.shift(1)
+
     n_validos = resultado["faltante_lag1"].notna().sum()
     logger.info(
         f"  build_encaje_features: {n_validos:,} filas con faltante_lag1 válido | "
-        f"techo_10h disponible: {resultado['techo_10h'].notna().sum():,} filas"
+        f"techo_10h disponible: {resultado['techo_10h'].notna().sum():,} filas | "
+        f"avance_mes_lag1 válido: {resultado['avance_mes_lag1'].notna().sum():,} filas"
     )
     return resultado
 
@@ -2256,6 +2289,10 @@ def build_data_dictionary(params):
     add("techo_10h",           f"EncajeD / {_benc}", "CC+ON al día hábil 10 antes del cierre del mes, rezagado 1 día. Techo operativo de retiros.", 1, "t")
     add("techo_restante_lag1", f"EncajeD / {_benc}", "techo_10h − retiro_acumulado_mes(t-1): presupuesto de retiro aún disponible (M USD).", 1, "t")
     add("proporcion_usada",    f"EncajeD / {_benc}", "retiro_acum_mes(t-1) / techo_10h: fracción del techo ya utilizada (0-1+).", 1, "t")
+    add("avance_mes_lag1",     f"EncajeD / {_benc}", "encaje_acum(t-1) / exigible_total_mes_est: fracción del req. mensual cubierta al día anterior (0→1, >1 = holgura).", 1, "t")
+    add("exceso_abs_lag1",     f"EncajeD / {_benc}", "MAX(0, encaje(t-1) − encaje_min_por_dia) + overnight(t-1): capacidad de retiro total sin incumplir el 100% al cierre (M USD).", 1, "t")
+    add("encaje_ovn_lag1",     f"EncajeD / {_benc}", "overnight + cta_cte + caja en t-1 (M USD): posición total BCRP, techo físico máximo de retiro.", 1, "t")
+    add("ratio_ovn_total_lag1",f"EncajeD / {_benc}", "overnight(t-1) / encaje_ovn(t-1): fracción de la posición BCRP en overnight. Alto = banco aún no inició retiro.", 1, "t")
 
     # ── Features CC+OVN en BCR (Saldos_CCOVN.xlsx, rezago 1 día) ─────────────
     add("ccovn_sistema_lag1",     "Saldos_CCOVN",
