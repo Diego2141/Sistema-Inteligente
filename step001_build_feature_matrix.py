@@ -1458,20 +1458,16 @@ def build_encaje_features(df_encaje, peru_bday):
 
 
 # 5c-bis. Features de encaje BBVA desde Excel generado por aux_encaje_2.py
-def load_bbva_encaje_features(params, business_day_index):
+def load_bbva_encaje_features(params):
     """
-    Lee bbva_encaje_features_modelo.xlsx (generado por aux_encaje_2.py) y
-    adapta las 4 features lag1 al calendario hábil de step001.
+    Lee bbva_encaje_features_modelo.xlsx (generado por aux_encaje_2.py).
+    Retorna un DataFrame indexado en días CALENDARIO con las 4 features
+    lag1 ya calculadas correctamente sobre ese índice.
 
-    El Excel tiene días calendario. El lag1 ya está aplicado sobre ese índice:
-      avance_mes_lag1[t]      = avance_mes del día calendario t-1
-      exceso_abs_lag1[t]      = exceso_abs del día calendario t-1
-      encaje_ovn_lag1[t]      = encaje_ovn del día calendario t-1
-      ratio_ovn_total_lag1[t] = ratio_ovn_total del día calendario t-1
-
-    Para lunes: ffill hereda el valor del domingo = valor del viernes (sin
-    transacciones en fin de semana), lo que es correcto para el modelo.
-    No se aplica un segundo shift(1) — el lag ya está en el Excel.
+    La adaptación al calendario hábil de step001 se hace con merge_asof
+    en build_feature_matrix (busca la fecha calendario más reciente ≤ fecha_t).
+    Así se evita el problema de construir un índice hábil pre-computado que
+    no coincide exactamente con los fecha_t del dataset real.
     """
     _COLS = ["avance_mes_lag1", "exceso_abs_lag1",
              "encaje_ovn_lag1", "ratio_ovn_total_lag1"]
@@ -1483,16 +1479,14 @@ def load_bbva_encaje_features(params, business_day_index):
 
     try:
         df = pd.read_excel(ruta, sheet_name="Datos", usecols=["fecha"] + _COLS)
-        df["fecha"] = pd.to_datetime(df["fecha"])
-        df = df.set_index("fecha").sort_index()
-
-        # Adaptar de días calendario → días hábiles del modelo con ffill.
-        df = df.reindex(business_day_index, method="ffill")
+        df["fecha"] = pd.to_datetime(df["fecha"]).dt.normalize()
+        df = df.sort_values("fecha").reset_index(drop=True)
 
         n_val = df["avance_mes_lag1"].notna().sum()
         logger.info(
-            f"  bbva_encaje_features: {n_val:,} filas válidas de {len(df):,} "
-            f"(período {df.index.min().date()} → {df.index.max().date()})"
+            f"  bbva_encaje_features: {len(df):,} filas calendario cargadas "
+            f"({df['fecha'].min().date()} → {df['fecha'].max().date()}) | "
+            f"avance_mes_lag1 válido: {n_val:,}"
         )
         return df
 
@@ -1943,14 +1937,34 @@ def build_feature_matrix(
                 df[col] = np.nan
 
     # ── 8b. Features de avance/exceso encaje (aux_encaje_2, solo BBVA) ─────────
-    # Calculadas sobre días calendario en aux_encaje_2.py → lag1 ya aplicado.
-    # Para bancos distintos al banco_encaje → columnas quedan en NaN.
+    # bbva_encaje_feat está indexado en días calendario; lag1 ya aplicado.
+    # merge_asof busca la fecha calendario más reciente ≤ fecha_t de cada fila,
+    # lo que equivale al ffill sobre el calendario hábil sin necesidad de
+    # construir un índice hábil pre-computado.
+    _bbva_feat_cols = ["avance_mes_lag1", "exceso_abs_lag1",
+                       "encaje_ovn_lag1", "ratio_ovn_total_lag1"]
     if bbva_encaje_feat is not None and not bbva_encaje_feat.empty:
         if banco == banco_encaje:
-            df = df.merge(bbva_encaje_feat, left_on="fecha_t", right_index=True, how="left")
-            logger.info(f"  {banco}: bbva_encaje_feat incorporadas ({len(bbva_encaje_feat.columns)} cols)")
+            _fecha_t_norm = pd.to_datetime(df["fecha_t"]).dt.normalize()
+            _left = pd.DataFrame({"fecha_t": _fecha_t_norm,
+                                  "_idx_orig": np.arange(len(df))})
+            _right = bbva_encaje_feat.rename(columns={"fecha": "fecha_t"}) \
+                if "fecha" in bbva_encaje_feat.columns \
+                else bbva_encaje_feat.reset_index().rename(columns={"index": "fecha_t"})
+            _right["fecha_t"] = pd.to_datetime(_right["fecha_t"]).dt.normalize()
+            _merged = pd.merge_asof(
+                _left.sort_values("fecha_t"),
+                _right[["fecha_t"] + _bbva_feat_cols].sort_values("fecha_t"),
+                on="fecha_t",
+                direction="backward",
+            ).set_index("_idx_orig").reindex(np.arange(len(df)))
+            for col in _bbva_feat_cols:
+                df[col] = _merged[col].values
+            n_ok = df["avance_mes_lag1"].notna().sum()
+            logger.info(f"  {banco}: bbva_encaje_feat incorporadas — "
+                        f"{n_ok:,}/{len(df):,} filas con valores")
         else:
-            for col in bbva_encaje_feat.columns:
+            for col in _bbva_feat_cols:
                 df[col] = np.nan
 
     # ── 9. Features CC+OVN en BCR (Saldos_CCOVN.xlsx, todos los bancos) ──────
@@ -2060,12 +2074,7 @@ def build_full_matrix(
 
     # Features de avance/exceso encaje desde bbva_encaje_features_modelo.xlsx
     # (generado por aux_encaje_2.py con días calendario — más preciso que EncajeD.xlsx)
-    _bday_idx = pd.bdate_range(
-        start=params["fecha_inicio_historico"],
-        end=params["fecha_fin_historico"],
-        freq=peru_bday,
-    )
-    bbva_encaje_feat = load_bbva_encaje_features(params, _bday_idx)
+    bbva_encaje_feat = load_bbva_encaje_features(params)
 
     # Pre-calcular features CC+OVN (todos los bancos; sistémico + BBVA).
     # flujo_neto_sistema = D_SISTEMA - R_SISTEMA, necesario para residuo_ccovn_lag1.
