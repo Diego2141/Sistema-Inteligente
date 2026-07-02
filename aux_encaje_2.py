@@ -1288,12 +1288,13 @@ df["ratio_ovn_total"] = df["overnight"] / df["encaje_ovn"].replace(0, np.nan)
 # seguir cumpliendo el umbral del 90% al cierre del mes.
 # dias_restantes = dias que faltan (sin contar hoy), mínimo 1 para evitar /0.
 _encaje_min_por_dia = (
-    (df["ExigibleTotalMes_est"] * UMBRAL_90 - df["EncajeAcumMes"])
+    (df["ExigibleTotalMes_est"] - df["EncajeAcumMes"])
     .clip(lower=0)
     / df["dias_restantes"].clip(lower=1)
 )
-# exceso_abs: capacidad de retiro total del banco hoy sin romper el 90%.
-#   = exceso de encaje computable sobre el mínimo necesario
+# exceso_abs: capacidad de retiro total del banco hoy sin incumplir el 100%
+# del exigible al cierre del mes.
+#   = exceso de encaje computable sobre el mínimo necesario (req. 100%)
 #   + overnight completo (no computa encaje → retirable libremente)
 _exceso_encaje = (df["encaje"] - _encaje_min_por_dia).clip(lower=0)
 df["exceso_abs"] = _exceso_encaje + df["overnight"]
@@ -1387,11 +1388,11 @@ _formulas_doc = [
      "Avance = EncajeAcumMes / ExigibleTotalMes_est. "
      "0→1: fracción del requerimiento mensual estimado ya cubierta. >1 = cumplió."),
     ("exceso_abs",
-     f"=MAX(0,{_C['encaje']}3-MAX(0,({_C['ExigibleTotalMes_est']}3*0.9-{_C['EncajeAcumMes']}3)/MAX(1,{_C['dias_en_mes']}3-{_C['dia_mes']}3)))+{_C['overnight']}3",
-     "Capacidad de retiro total del banco hoy sin romper el 90% al cierre. "
+     f"=MAX(0,{_C['encaje']}3-MAX(0,({_C['ExigibleTotalMes_est']}3-{_C['EncajeAcumMes']}3)/MAX(1,{_C['dias_en_mes']}3-{_C['dia_mes']}3)))+{_C['overnight']}3",
+     "Capacidad de retiro total del banco hoy sin incumplir el 100% del exigible al cierre. "
      "= MAX(0, encaje - encaje_min_por_dia) + overnight. "
-     "El overnight se suma íntegro porque no computa encaje y es libremente retirable. "
-     "encaje_min_por_dia = MAX(0, brecha_90% / dias_restantes)."),
+     "encaje_min_por_dia = MAX(0, (ExigibleTotalMes_est - EncajeAcumMes) / dias_restantes). "
+     "El overnight se suma íntegro: no computa encaje y es libremente retirable."),
     ("ratio_ovn_total",
      f"={_C['overnight']}3/{_C['encaje_ovn']}3",
      "overnight / encaje_ovn. Alto = banco aún no inició retiro (fondos en overnight). "
