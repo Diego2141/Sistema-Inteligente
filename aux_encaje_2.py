@@ -1271,3 +1271,150 @@ if _med_list:
     fig_cmp.savefig(_p_cmp, dpi=150, bbox_inches="tight")
     plt.close(fig_cmp)
     print(f"  Guardado: {_p_cmp.name}")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FEATURES PARA MODELO — EXPORT CON FÓRMULAS EXCEL
+# ══════════════════════════════════════════════════════════════════════════════
+print("\n" + "=" * 65)
+print("  Features para modelo — export con fórmulas Excel")
+print("=" * 65)
+
+# ── Nuevos features (valores del día t, sin lag) ──────────────────────────────
+# avance_mes ya existe como "Avance" en df
+df["avance_mes"]      = df["Avance"]
+df["exceso_abs"]      = df["EncajeAcumMes"] - df["ExigibleTotalMes_est"] * UMBRAL_90
+df["ratio_ovn_total"] = df["overnight"] / df["encaje_ovn"].replace(0, np.nan)
+
+# ── Versiones lag1 (información disponible en t-1 para el modelo) ─────────────
+df["avance_mes_lag1"]      = df["avance_mes"].shift(1)
+df["exceso_abs_lag1"]      = df["exceso_abs"].shift(1)
+df["encaje_ovn_lag1"]      = df["encaje_ovn"].shift(1)
+df["ratio_ovn_total_lag1"] = df["ratio_ovn_total"].shift(1)
+
+# ── Construcción del DataFrame de export ──────────────────────────────────────
+_COLS_EXPORT = [
+    # Series base (origen)
+    "fecha", "overnight", "cta_cte", "caja", "tose", "exigible", "retiro_neto",
+    # Derivadas intermedias
+    "encaje", "encaje_ovn", "var_encaje_ovn",
+    "dia_mes", "dias_en_mes",
+    "NecAcumMes", "EncajeAcumMes", "ExigibleTotalMes_est",
+    # Features sin lag (valor en t — para verificación)
+    "avance_mes", "exceso_abs", "ratio_ovn_total",
+    # Features con lag1 (para modelo — valor conocido en t-1)
+    "avance_mes_lag1", "exceso_abs_lag1", "encaje_ovn_lag1", "ratio_ovn_total_lag1",
+]
+df_fe = df[[c for c in _COLS_EXPORT if c in df.columns]].copy()
+
+# ── Letras de columna Excel ───────────────────────────────────────────────────
+def _col_letter(n):
+    s, n = "", n + 1
+    while n:
+        n, r = divmod(n - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+_cols_fe = [c for c in _COLS_EXPORT if c in df.columns]
+_cl = {col: _col_letter(i) for i, col in enumerate(_cols_fe)}
+
+# ── Tabla de fórmulas Excel (fórmula válida en fila 3 = segunda fila de datos) ─
+#    Fila 1 = encabezado, Fila 2 = primera fila de datos, Fila 3 = fila general
+_C = _cl   # alias corto
+_formulas_doc = [
+    # (columna,  fórmula Excel fila 3,  descripción)
+    ("fecha",
+     "— origen",
+     "Fecha del dato"),
+    ("overnight",
+     "— origen",
+     "Depósito overnight en BCRP. No computa encaje pero es parte de la posición BCRP."),
+    ("cta_cte",
+     "— origen",
+     "Cuenta corriente en BCRP. Sí computa encaje. Instrumento principal de cumplimiento."),
+    ("caja",
+     "— origen",
+     "Efectivo en bóveda. Sí computa encaje."),
+    ("tose",
+     "— origen",
+     "Tasa de obligaciones sujetas a encaje. Define el nivel de exigencia del mes."),
+    ("exigible",
+     "— origen",
+     "Requerimiento diario de encaje = depósitos × TOSE / días_calendario_mes."),
+    ("retiro_neto",
+     "— origen",
+     "Retiro neto del banco desde BCRP ese día. Negativo = salida de fondos."),
+    ("encaje",
+     f"={_C['cta_cte']}3+{_C['caja']}3",
+     "Encaje computable = cta_cte + caja."),
+    ("encaje_ovn",
+     f"={_C['overnight']}3+{_C['cta_cte']}3+{_C['caja']}3",
+     "Posición total en BCRP = overnight + cta_cte + caja. Techo máximo de retiro posible."),
+    ("var_encaje_ovn",
+     f"={_C['encaje_ovn']}3-{_C['encaje_ovn']}2",
+     "Variación diaria de la posición total BCRP. Negativo = el banco retiró fondos."),
+    ("dia_mes",
+     f"=DIA({_C['fecha']}3)",
+     "Día calendario del mes (1–31). Denominador del promedio diario del exigible."),
+    ("dias_en_mes",
+     f"=DIA(FIN.MES({_C['fecha']}3,0))",
+     "Total días calendario del mes. Multiplicador de la proyección mensual."),
+    ("NecAcumMes",
+     f"=SI(MES({_C['fecha']}3)=MES({_C['fecha']}2),{_C['NecAcumMes']}2+{_C['exigible']}3,{_C['exigible']}3)",
+     "Σ exigible acumulado desde el 1ro del mes (reset en cambio de mes)."),
+    ("EncajeAcumMes",
+     f"=SI(MES({_C['fecha']}3)=MES({_C['fecha']}2),{_C['EncajeAcumMes']}2+{_C['encaje']}3,{_C['encaje']}3)",
+     "Σ encaje acumulado desde el 1ro del mes (reset en cambio de mes)."),
+    ("ExigibleTotalMes_est",
+     f"=({_C['NecAcumMes']}3/{_C['dia_mes']}3)*{_C['dias_en_mes']}3",
+     "Proyección del total mensual: (NecAcumMes / día_calendario) × días_en_mes. "
+     "NOTA: válido si el dato tiene filas para días calendario. "
+     "Si solo hay días hábiles, reemplazar dia_mes por CONTAR.SI del mes hasta esa fila."),
+    ("avance_mes",
+     f"={_C['EncajeAcumMes']}3/{_C['ExigibleTotalMes_est']}3",
+     "Avance = EncajeAcumMes / ExigibleTotalMes_est. "
+     "0→1: fracción del requerimiento mensual estimado ya cubierta. >1 = cumplió."),
+    ("exceso_abs",
+     f"={_C['EncajeAcumMes']}3-{_C['ExigibleTotalMes_est']}3*0.9",
+     "Exceso absoluto sobre umbral 90%: EncajeAcumMes - ExigibleTotalMes_est×0.90. "
+     "Positivo = banco puede retirar este monto sin romper el 90%."),
+    ("ratio_ovn_total",
+     f"={_C['overnight']}3/{_C['encaje_ovn']}3",
+     "overnight / encaje_ovn. Alto = banco aún no inició retiro (fondos en overnight). "
+     "Si cae respecto al día anterior, el retiro ya comenzó."),
+    ("avance_mes_lag1",
+     f"={_C['avance_mes']}2",
+     "avance_mes del día anterior. Feature principal del modelo."),
+    ("exceso_abs_lag1",
+     f"={_C['exceso_abs']}2",
+     "exceso_abs del día anterior. Monto retiable conocido en t-1."),
+    ("encaje_ovn_lag1",
+     f"={_C['encaje_ovn']}2",
+     "Posición total BCRP del día anterior. Techo del retiro posible."),
+    ("ratio_ovn_total_lag1",
+     f"={_C['ratio_ovn_total']}2",
+     "ratio_ovn_total del día anterior. Indica si el retiro ya inició."),
+]
+
+df_formulas = pd.DataFrame(
+    _formulas_doc,
+    columns=["columna", "formula_excel_fila3", "descripcion"]
+)
+
+# ── Export ─────────────────────────────────────────────────────────────────────
+ruta_fe = DIR_OUT / "bbva_encaje_features_modelo.xlsx"
+with pd.ExcelWriter(ruta_fe, engine="openpyxl") as _wr:
+    df_fe.to_excel(_wr, sheet_name="Datos", index=False)
+    df_formulas.to_excel(_wr, sheet_name="Formulas", index=False)
+
+print(f"\n  Exportado: {ruta_fe.name}")
+print(f"  Hoja 'Datos'    : {len(df_fe):,} filas × {len(df_fe.columns)} columnas")
+print(f"  Hoja 'Formulas' : {len(df_formulas)} columnas documentadas")
+print(f"\n  Columnas exportadas:")
+for _g, _cols in [
+    ("Base (origen)",          ["fecha","overnight","cta_cte","caja","tose","exigible","retiro_neto"]),
+    ("Intermedias",            ["encaje","encaje_ovn","var_encaje_ovn","dia_mes","dias_en_mes","NecAcumMes","EncajeAcumMes","ExigibleTotalMes_est"]),
+    ("Features sin lag (t)",   ["avance_mes","exceso_abs","ratio_ovn_total"]),
+    ("Features lag1 (modelo)", ["avance_mes_lag1","exceso_abs_lag1","encaje_ovn_lag1","ratio_ovn_total_lag1"]),
+]:
+    print(f"    {_g}: {', '.join(_cols)}")
+
