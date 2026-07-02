@@ -1434,3 +1434,128 @@ for _g, _cols in [
 ]:
     print(f"    {_g}: {', '.join(_cols)}")
 
+# ══════════════════════════════════════════════════════════════════════════════
+# TEST DE PODER PREDICTIVO — correlación con retiro_neto en h=1..75 días hábiles
+# ══════════════════════════════════════════════════════════════════════════════
+print("\n" + "=" * 65)
+print("  Test poder predictivo — features encaje vs retiro_neto(t+h)")
+print("=" * 65)
+
+# Filtrar a días hábiles (retiro_neto solo es significativo en estos días)
+_is_bday_fe = (
+    (df["fecha"].dt.weekday < 5) &
+    (~df["fecha"].isin(_hols_all))
+)
+_db = df[_is_bday_fe][
+    ["fecha", "retiro_neto",
+     "avance_mes_lag1", "exceso_abs_lag1",
+     "encaje_ovn_lag1", "ratio_ovn_total_lag1"]
+].copy().reset_index(drop=True)
+
+_FEAT_TEST  = ["avance_mes_lag1", "exceso_abs_lag1",
+               "encaje_ovn_lag1", "ratio_ovn_total_lag1"]
+_LABELS     = ["avance_mes", "exceso_abs", "encaje_ovn", "ratio_ovn"]
+_HORIZONTES = [1, 2, 3, 5, 10, 15, 22, 30, 45, 60, 75]
+
+# ── Correlaciones Pearson y Spearman por horizonte ───────────────────────────
+_corr_p = pd.DataFrame(np.nan, index=_FEAT_TEST, columns=_HORIZONTES)
+_corr_s = pd.DataFrame(np.nan, index=_FEAT_TEST, columns=_HORIZONTES)
+
+for _h in _HORIZONTES:
+    _ret_h = _db["retiro_neto"].shift(-_h)   # retiro_neto h días hábiles adelante
+    for _f in _FEAT_TEST:
+        _mask = _db[_f].notna() & _ret_h.notna()
+        if _mask.sum() > 50:
+            _corr_p.loc[_f, _h] = _db.loc[_mask, _f].corr(_ret_h[_mask])
+            _corr_s.loc[_f, _h] = _db.loc[_mask, _f].corr(
+                _ret_h[_mask], method="spearman"
+            )
+
+print(f"\n  Pearson r  (feature_lag1 vs retiro_neto a h días hábiles):")
+print(f"  {'Feature':<22}", end="")
+for _h in _HORIZONTES:
+    print(f"  h={_h:>2}", end="")
+print()
+for _f, _lbl in zip(_FEAT_TEST, _LABELS):
+    print(f"  {_lbl:<22}", end="")
+    for _h in _HORIZONTES:
+        _v = _corr_p.loc[_f, _h]
+        print(f"  {_v:+.3f}" if np.isfinite(_v) else "    n/a", end="")
+    print()
+
+print(f"\n  Spearman ρ (feature_lag1 vs retiro_neto a h días hábiles):")
+print(f"  {'Feature':<22}", end="")
+for _h in _HORIZONTES:
+    print(f"  h={_h:>2}", end="")
+print()
+for _f, _lbl in zip(_FEAT_TEST, _LABELS):
+    print(f"  {_lbl:<22}", end="")
+    for _h in _HORIZONTES:
+        _v = _corr_s.loc[_f, _h]
+        print(f"  {_v:+.3f}" if np.isfinite(_v) else "    n/a", end="")
+    print()
+
+# ── Análisis por quintil de avance_mes_lag1 (la feature más interpretable) ────
+print(f"\n  Retiro promedio por quintil de avance_mes_lag1:")
+_db["_q_av"] = pd.qcut(_db["avance_mes_lag1"].dropna(),
+                        q=5, labels=["Q1 (<20%)", "Q2", "Q3", "Q4", "Q5 (>80%)"])
+_qt = (
+    _db.groupby("_q_av", observed=True)["retiro_neto"]
+    .agg(n="count", mean=lambda x: x.mean() / 1e6, median=lambda x: x.median() / 1e6)
+)
+print(f"  {'Quintil':<12}  {'N':>6}  {'Media (M)':>10}  {'Mediana (M)':>12}")
+for _qi, _row in _qt.iterrows():
+    print(f"  {str(_qi):<12}  {int(_row['n']):>6}  "
+          f"{_row['mean']:>+10.1f}  {_row['median']:>+12.1f}")
+
+# ── Heatmap correlación Pearson ───────────────────────────────────────────────
+_corr_plot = _corr_p.copy().astype(float)
+_vabs = _corr_plot.abs().max().max()
+_vabs = max(_vabs, 0.05)
+
+fig, axes = plt.subplots(1, 2, figsize=(16, 4))
+fig.suptitle(
+    "Poder predictivo features encaje BBVA vs retiro_neto(t+h)\n"
+    "feature_lag1: información disponible en t-1 | h en días hábiles",
+    fontsize=11, fontweight="bold",
+)
+
+# Panel izquierdo: heatmap
+ax = axes[0]
+_im = ax.imshow(_corr_plot.values, aspect="auto",
+                cmap="RdBu_r", vmin=-_vabs, vmax=_vabs)
+ax.set_xticks(range(len(_HORIZONTES)))
+ax.set_xticklabels([f"h={_h}" for _h in _HORIZONTES], rotation=45, ha="right", fontsize=8)
+ax.set_yticks(range(len(_FEAT_TEST)))
+ax.set_yticklabels(_LABELS, fontsize=9)
+for _i, _f in enumerate(_FEAT_TEST):
+    for _j, _h in enumerate(_HORIZONTES):
+        _v = _corr_plot.loc[_f, _h]
+        if np.isfinite(_v):
+            ax.text(_j, _i, f"{_v:+.2f}", ha="center", va="center",
+                    fontsize=7, color="white" if abs(_v) > _vabs * 0.6 else "black")
+plt.colorbar(_im, ax=ax, label="Pearson r")
+ax.set_title("Pearson r — correlación lineal", fontsize=10)
+
+# Panel derecho: líneas por feature
+ax = axes[1]
+_colores_f = ["#1565C0", "#E53935", "#43A047", "#F57C00"]
+for _f, _lbl, _col in zip(_FEAT_TEST, _LABELS, _colores_f):
+    _vals = [_corr_p.loc[_f, _h] for _h in _HORIZONTES]
+    ax.plot(_HORIZONTES, _vals, marker="o", ms=4, lw=1.5,
+            color=_col, label=_lbl)
+ax.axhline(0, color="black", lw=0.6, ls=":")
+ax.axhline( 0.1, color="gray", lw=0.5, ls="--", alpha=0.5)
+ax.axhline(-0.1, color="gray", lw=0.5, ls="--", alpha=0.5)
+ax.set_xlabel("Horizonte h (días hábiles)")
+ax.set_ylabel("Pearson r")
+ax.set_title("Decaimiento de la correlación por horizonte", fontsize=10)
+ax.legend(fontsize=8)
+ax.set_ylim(-_vabs * 1.3, _vabs * 1.3)
+
+plt.tight_layout()
+_ruta_test = DIR_OUT / "test_poder_predictivo_features.png"
+fig.savefig(_ruta_test, dpi=140, bbox_inches="tight")
+plt.close(fig)
+print(f"\n  Gráfico guardado: {_ruta_test.name}")
+
