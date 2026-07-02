@@ -1292,9 +1292,11 @@ _encaje_min_por_dia = (
     .clip(lower=0)
     / df["dias_restantes"].clip(lower=1)
 )
-# exceso_abs: cuánto puede retirar el banco HOY de su posición sin romper el 90%.
-# Está acotado por encaje_hoy (no puede superar la posición real del banco).
-df["exceso_abs"] = df["encaje"] - _encaje_min_por_dia
+# exceso_abs: capacidad de retiro total del banco hoy sin romper el 90%.
+#   = exceso de encaje computable sobre el mínimo necesario
+#   + overnight completo (no computa encaje → retirable libremente)
+_exceso_encaje = (df["encaje"] - _encaje_min_por_dia).clip(lower=0)
+df["exceso_abs"] = _exceso_encaje + df["overnight"]
 
 # ── Versiones lag1 (información disponible en t-1 para el modelo) ─────────────
 df["avance_mes_lag1"]      = df["avance_mes"].shift(1)
@@ -1385,10 +1387,11 @@ _formulas_doc = [
      "Avance = EncajeAcumMes / ExigibleTotalMes_est. "
      "0→1: fracción del requerimiento mensual estimado ya cubierta. >1 = cumplió."),
     ("exceso_abs",
-     f"={_C['encaje']}3-MAX(0,({_C['ExigibleTotalMes_est']}3*0.9-{_C['EncajeAcumMes']}3)/MAX(1,{_C['dias_en_mes']}3-{_C['dia_mes']}3))",
-     "Cuánto puede retirar el banco HOY sin romper el 90% al cierre del mes. "
-     "= encaje - max(0, brecha_90% / dias_restantes). "
-     "Acotado por la posición real: no puede superar encaje_ovn."),
+     f"=MAX(0,{_C['encaje']}3-MAX(0,({_C['ExigibleTotalMes_est']}3*0.9-{_C['EncajeAcumMes']}3)/MAX(1,{_C['dias_en_mes']}3-{_C['dia_mes']}3)))+{_C['overnight']}3",
+     "Capacidad de retiro total del banco hoy sin romper el 90% al cierre. "
+     "= MAX(0, encaje - encaje_min_por_dia) + overnight. "
+     "El overnight se suma íntegro porque no computa encaje y es libremente retirable. "
+     "encaje_min_por_dia = MAX(0, brecha_90% / dias_restantes)."),
     ("ratio_ovn_total",
      f"={_C['overnight']}3/{_C['encaje_ovn']}3",
      "overnight / encaje_ovn. Alto = banco aún no inició retiro (fondos en overnight). "
