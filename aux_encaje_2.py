@@ -1299,9 +1299,15 @@ _encaje_min_por_dia = (
 _exceso_encaje = (df["encaje"] - _encaje_min_por_dia).clip(lower=0)
 df["exceso_abs"] = _exceso_encaje + df["overnight"]
 
+# exceso_dia: exceso dividido entre días calendario restantes del periodo.
+# Captura la "presión temporal": a fin de mes con exceso alto el banco
+# no puede postergar — el ratio es grande justo cuando el retiro es más probable.
+df["exceso_dia"] = df["exceso_abs"] / df["dias_restantes"].clip(lower=1)
+
 # ── Versiones lag1 (información disponible en t-1 para el modelo) ─────────────
 df["avance_mes_lag1"]      = df["avance_mes"].shift(1)
 df["exceso_abs_lag1"]      = df["exceso_abs"].shift(1)
+df["exceso_dia_lag1"]      = df["exceso_dia"].shift(1)
 df["encaje_ovn_lag1"]      = df["encaje_ovn"].shift(1)
 df["ratio_ovn_total_lag1"] = df["ratio_ovn_total"].shift(1)
 
@@ -1314,9 +1320,10 @@ _COLS_EXPORT = [
     "dia_mes", "dias_en_mes",
     "NecAcumMes", "EncajeAcumMes", "ExigibleTotalMes_est",
     # Features sin lag (valor en t — para verificación)
-    "avance_mes", "exceso_abs", "ratio_ovn_total",
+    "avance_mes", "exceso_abs", "exceso_dia", "ratio_ovn_total",
     # Features con lag1 (para modelo — valor conocido en t-1)
-    "avance_mes_lag1", "exceso_abs_lag1", "encaje_ovn_lag1", "ratio_ovn_total_lag1",
+    "avance_mes_lag1", "exceso_abs_lag1", "exceso_dia_lag1",
+    "encaje_ovn_lag1", "ratio_ovn_total_lag1",
 ]
 df_fe = df[[c for c in _COLS_EXPORT if c in df.columns]].copy()
 
@@ -1403,6 +1410,9 @@ _formulas_doc = [
     ("exceso_abs_lag1",
      f"={_C['exceso_abs']}2",
      "exceso_abs del día anterior. Monto retiable conocido en t-1."),
+    ("exceso_dia_lag1",
+     f"={_C['exceso_dia']}2",
+     "exceso_abs(t-1) / dias_restantes(t-1): presión temporal — exceso ponderado por urgencia de fin de mes."),
     ("encaje_ovn_lag1",
      f"={_C['encaje_ovn']}2",
      "Posición total BCRP del día anterior. Techo del retiro posible."),
@@ -1430,7 +1440,7 @@ for _g, _cols in [
     ("Base (origen)",          ["fecha","overnight","cta_cte","caja","tose","exigible","retiro_neto"]),
     ("Intermedias",            ["encaje","encaje_ovn","var_encaje_ovn","dia_mes","dias_en_mes","NecAcumMes","EncajeAcumMes","ExigibleTotalMes_est"]),
     ("Features sin lag (t)",   ["avance_mes","exceso_abs","ratio_ovn_total"]),
-    ("Features lag1 (modelo)", ["avance_mes_lag1","exceso_abs_lag1","encaje_ovn_lag1","ratio_ovn_total_lag1"]),
+    ("Features lag1 (modelo)", ["avance_mes_lag1","exceso_abs_lag1","exceso_dia_lag1","encaje_ovn_lag1","ratio_ovn_total_lag1"]),
 ]:
     print(f"    {_g}: {', '.join(_cols)}")
 
@@ -1448,19 +1458,9 @@ _is_bday_fe = (
 )
 _db = df[_is_bday_fe & (df["fecha"] >= "2019-01-01")][
     ["fecha", "retiro_neto",
-     "avance_mes_lag1", "exceso_abs_lag1",
-     "encaje_ovn_lag1", "ratio_ovn_total_lag1",
-     "dias_restantes"]
+     "avance_mes_lag1", "exceso_abs_lag1", "exceso_dia_lag1",
+     "encaje_ovn_lag1", "ratio_ovn_total_lag1"]
 ].copy().reset_index(drop=True)
-
-# exceso_dia_lag1: exceso disponible dividido entre días que quedan.
-# Aunque el banco puede retirar todo en un día, este ratio captura
-# la "presión temporal": a fin de mes con exceso alto, el banco ya
-# no puede postergar — el ratio es grande precisamente cuando la
-# probabilidad de retirar es mayor. Se prueba aquí antes de incorporar.
-_db["exceso_dia_lag1"] = (
-    _db["exceso_abs_lag1"] / _db["dias_restantes"].clip(lower=1)
-)
 
 _FEAT_TEST  = ["avance_mes_lag1", "exceso_abs_lag1", "exceso_dia_lag1",
                "encaje_ovn_lag1", "ratio_ovn_total_lag1"]

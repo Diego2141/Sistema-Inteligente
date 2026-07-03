@@ -1469,7 +1469,7 @@ def load_bbva_encaje_features(params):
     Así se evita el problema de construir un índice hábil pre-computado que
     no coincide exactamente con los fecha_t del dataset real.
     """
-    _COLS = ["avance_mes_lag1", "exceso_abs_lag1",
+    _COLS = ["avance_mes_lag1", "exceso_abs_lag1", "exceso_dia_lag1",
              "encaje_ovn_lag1", "ratio_ovn_total_lag1"]
 
     ruta = params.get("ruta_bbva_encaje_features", "")
@@ -1942,7 +1942,7 @@ def build_feature_matrix(
     # banco modelado. Se aplican a todas las entidades sin restricción.
     # bbva_encaje_feat está en días calendario con lag1 ya computado en aux_encaje_2.
     # merge_asof alinea al calendario hábil de cada entidad.
-    _bbva_feat_cols = ["avance_mes_lag1", "exceso_abs_lag1",
+    _bbva_feat_cols = ["avance_mes_lag1", "exceso_abs_lag1", "exceso_dia_lag1",
                        "encaje_ovn_lag1", "ratio_ovn_total_lag1"]
     if bbva_encaje_feat is not None and not bbva_encaje_feat.empty:
         # Construir lookup: fecha_t_única → valor del Excel más reciente ≤ fecha_t.
@@ -2338,6 +2338,7 @@ def build_data_dictionary(params):
     add("proporcion_usada",      f"EncajeD / {_benc}", "retiro_acum_mes(t-1) / techo_10h: fracción del techo ya utilizada (0-1+).", 1, "t")
     add("avance_mes_lag1",       f"aux_encaje_2 / {_benc}", "EncajeAcumMes(t-1) / ExigibleTotalMes_est(t-1): fracción del req. mensual cubierta. Días calendario → ffill a días hábiles.", 1, "t")
     add("exceso_abs_lag1",       f"aux_encaje_2 / {_benc}", "MAX(0, encaje(t-1)−encaje_min_por_dia)+overnight(t-1): capacidad de retiro real sin incumplir 100% al cierre (M USD). Días calendario.", 1, "t")
+    add("exceso_dia_lag1",       f"aux_encaje_2 / {_benc}", "exceso_abs(t-1)/dias_restantes(t-1): presión temporal — exceso ponderado por urgencia de fin de periodo. Q5 media: −290M.", 1, "t")
     add("encaje_ovn_lag1",       f"aux_encaje_2 / {_benc}", "overnight+cta_cte+caja en t-1 (M USD): posición total BCRP. Techo físico máximo de retiro posible.", 1, "t")
     add("ratio_ovn_total_lag1",  f"aux_encaje_2 / {_benc}", "overnight(t-1)/encaje_ovn(t-1): alto = banco aún no inició retiro (fondos en overnight sin mover).", 1, "t")
 
