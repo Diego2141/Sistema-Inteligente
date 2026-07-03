@@ -1449,12 +1449,22 @@ _is_bday_fe = (
 _db = df[_is_bday_fe & (df["fecha"] >= "2019-01-01")][
     ["fecha", "retiro_neto",
      "avance_mes_lag1", "exceso_abs_lag1",
-     "encaje_ovn_lag1", "ratio_ovn_total_lag1"]
+     "encaje_ovn_lag1", "ratio_ovn_total_lag1",
+     "dias_restantes"]
 ].copy().reset_index(drop=True)
 
-_FEAT_TEST  = ["avance_mes_lag1", "exceso_abs_lag1",
+# exceso_dia_lag1: exceso disponible dividido entre días que quedan.
+# Aunque el banco puede retirar todo en un día, este ratio captura
+# la "presión temporal": a fin de mes con exceso alto, el banco ya
+# no puede postergar — el ratio es grande precisamente cuando la
+# probabilidad de retirar es mayor. Se prueba aquí antes de incorporar.
+_db["exceso_dia_lag1"] = (
+    _db["exceso_abs_lag1"] / _db["dias_restantes"].clip(lower=1)
+)
+
+_FEAT_TEST  = ["avance_mes_lag1", "exceso_abs_lag1", "exceso_dia_lag1",
                "encaje_ovn_lag1", "ratio_ovn_total_lag1"]
-_LABELS     = ["avance_mes", "exceso_abs", "encaje_ovn", "ratio_ovn"]
+_LABELS     = ["avance_mes", "exceso_abs", "exceso_dia", "encaje_ovn", "ratio_ovn"]
 # h=1 excluido: el retiro del día siguiente ya se conoce en t
 _HORIZONTES = [2, 3, 5, 10, 15, 22, 30, 45, 60, 75]
 
@@ -1496,18 +1506,25 @@ for _f, _lbl in zip(_FEAT_TEST, _LABELS):
         print(f"  {_v:+.3f}" if np.isfinite(_v) else "    n/a", end="")
     print()
 
-# ── Análisis por quintil de avance_mes_lag1 (la feature más interpretable) ────
-print(f"\n  Retiro promedio por quintil de avance_mes_lag1:")
-_db["_q_av"] = pd.qcut(_db["avance_mes_lag1"].dropna(),
-                        q=5, labels=["Q1 (<20%)", "Q2", "Q3", "Q4", "Q5 (>80%)"])
-_qt = (
-    _db.groupby("_q_av", observed=True)["retiro_neto"]
-    .agg(n="count", mean=lambda x: x.mean() / 1e6, median=lambda x: x.median() / 1e6)
-)
-print(f"  {'Quintil':<12}  {'N':>6}  {'Media (M)':>10}  {'Mediana (M)':>12}")
-for _qi, _row in _qt.iterrows():
-    print(f"  {str(_qi):<12}  {int(_row['n']):>6}  "
-          f"{_row['mean']:>+10.1f}  {_row['median']:>+12.1f}")
+# ── Análisis por quintil: avance_mes y exceso_dia (comparación) ───────────────
+def _print_quintiles(feat_col, label):
+    print(f"\n  Retiro promedio por quintil de {label}:")
+    _mask_q = _db[feat_col].notna()
+    _q = pd.qcut(_db.loc[_mask_q, feat_col],
+                 q=5, labels=["Q1 (<20%)", "Q2", "Q3", "Q4", "Q5 (>80%)"])
+    _qt = (
+        _db.loc[_mask_q].assign(_q=_q)
+        .groupby("_q", observed=True)["retiro_neto"]
+        .agg(n="count", mean=lambda x: x.mean() / 1e6, median=lambda x: x.median() / 1e6)
+    )
+    print(f"  {'Quintil':<12}  {'N':>6}  {'Media (M)':>10}  {'Mediana (M)':>12}")
+    for _qi, _row in _qt.iterrows():
+        print(f"  {str(_qi):<12}  {int(_row['n']):>6}  "
+              f"{_row['mean']:>+10.1f}  {_row['median']:>+12.1f}")
+
+_print_quintiles("avance_mes_lag1",  "avance_mes_lag1")
+_print_quintiles("exceso_dia_lag1",  "exceso_dia_lag1  [PRUEBA — exceso/dias_rest]")
+_print_quintiles("exceso_abs_lag1",  "exceso_abs_lag1  [referencia]")
 
 # ── Heatmap correlación Pearson ───────────────────────────────────────────────
 _corr_plot = _corr_p.copy().astype(float)
