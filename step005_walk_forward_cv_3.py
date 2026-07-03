@@ -323,13 +323,19 @@ def crps_approx(y_true, preds):
 # PARTE 2 — GARCH por fold
 ###############################################################################
 
-# Número de procesos paralelos (uno por cuantil) y threads XGBoost por proceso.
-# Windows/macOS usan spawn → re-importa módulo completo (~500 MB/proceso), límite 2.
-# Linux usa fork (copy-on-write) → overhead mínimo, corre los 5 cuantiles en paralelo.
+# Número de workers paralelos (uno por cuantil) y threads XGBoost por worker.
+# Windows/macOS usan spawn en ProcessPoolExecutor → re-importa el módulo completo
+# (~500 MB/proceso) y serializa los arrays de datos por pickle, lo que provoca
+# MemoryError con datasets grandes.  Solución: ThreadPoolExecutor en Windows/macOS.
+# XGBoost libera el GIL durante el entrenamiento (C++ interno), por lo que el
+# paralelismo real se preserva con threads sin copiar objetos entre procesos.
+# Linux usa ProcessPoolExecutor con fork (copy-on-write) → overhead mínimo.
 _N_QUANTILES   = len([0.01, 0.05, 0.50, 0.95, 0.99])  # = 5
 _spawn_ctx     = sys.platform in ("win32", "darwin")
-_N_QUANTILES_PARALLEL = min(2, _N_QUANTILES) if _spawn_ctx else _N_QUANTILES
+_N_QUANTILES_PARALLEL = _N_QUANTILES          # threads no tienen límite de spawn
 _XGB_NTHREAD = max(2, (os.cpu_count() or 10) // _N_QUANTILES_PARALLEL)
+# Clase de executor según plataforma
+_ExecutorCls = ThreadPoolExecutor if _spawn_ctx else ProcessPoolExecutor
 
 # Cache de parámetros GARCH por fecha de corte de TRAIN — evita re-estimación en el
 # mismo fold y para el guardado de metadata (antes se estimaba 2-3 veces por fold).
@@ -987,7 +993,7 @@ def _entrenar_fold_xgb_qt(X_tr, y_tr, X_va, y_va, std_y, n_trials, fold_num):
 
     modelos     = {}
     best_by_tau = {}
-    with ProcessPoolExecutor(max_workers=_N_QUANTILES_PARALLEL) as ex:
+    with _ExecutorCls(max_workers=_N_QUANTILES_PARALLEL) as ex:
         futures = {ex.submit(_worker_optuna_tau, args): args[0] for args in worker_args}
         for fut in as_completed(futures):
             tau, model, bp, best_val = fut.result()
