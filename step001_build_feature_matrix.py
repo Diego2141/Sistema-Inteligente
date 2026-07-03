@@ -1478,15 +1478,22 @@ def load_bbva_encaje_features(params):
         return pd.DataFrame()
 
     try:
-        df = pd.read_excel(ruta, sheet_name="Datos", usecols=["fecha"] + _COLS)
+        df_raw = pd.read_excel(ruta, sheet_name="Datos")
+        # Seleccionar solo columnas disponibles — si el Excel no tiene alguna
+        # (p.ej. versión anterior sin exceso_dia_lag1) se omite sin fallar.
+        cols_ok = ["fecha"] + [c for c in _COLS if c in df_raw.columns]
+        cols_missing = [c for c in _COLS if c not in df_raw.columns]
+        if cols_missing:
+            logger.warning(f"  bbva_encaje_features: columnas ausentes en Excel — {cols_missing}")
+        df = df_raw[cols_ok].copy()
         df["fecha"] = pd.to_datetime(df["fecha"]).dt.normalize()
         df = df.sort_values("fecha").reset_index(drop=True)
 
-        n_val = df["avance_mes_lag1"].notna().sum()
+        n_val = df["avance_mes_lag1"].notna().sum() if "avance_mes_lag1" in df.columns else 0
         logger.info(
             f"  bbva_encaje_features: {len(df):,} filas calendario cargadas "
             f"({df['fecha'].min().date()} → {df['fecha'].max().date()}) | "
-            f"avance_mes_lag1 válido: {n_val:,}"
+            f"avance_mes_lag1 válido: {n_val:,} | cols: {cols_ok[1:]}"
         )
         return df
 
