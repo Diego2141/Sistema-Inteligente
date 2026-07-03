@@ -1936,43 +1936,40 @@ def build_feature_matrix(
             for col in encaje_features.columns:
                 df[col] = np.nan
 
-    # ── 8b. Features de avance/exceso encaje (aux_encaje_2, solo BBVA) ─────────
-    # bbva_encaje_feat está indexado en días calendario; lag1 ya aplicado.
-    # merge_asof busca la fecha calendario más reciente ≤ fecha_t de cada fila,
-    # lo que equivale al ffill sobre el calendario hábil sin necesidad de
-    # construir un índice hábil pre-computado.
+    # ── 8b. Features de avance/exceso encaje BBVA (todos los bancos) ───────────
+    # BBVA es el principal driver del movimiento sistémico en ME; sus features
+    # de encaje son señales sistémicas relevantes para SISTEMA y cualquier otro
+    # banco modelado. Se aplican a todas las entidades sin restricción.
+    # bbva_encaje_feat está en días calendario con lag1 ya computado en aux_encaje_2.
+    # merge_asof alinea al calendario hábil de cada entidad.
     _bbva_feat_cols = ["avance_mes_lag1", "exceso_abs_lag1",
                        "encaje_ovn_lag1", "ratio_ovn_total_lag1"]
     if bbva_encaje_feat is not None and not bbva_encaje_feat.empty:
-        if banco == banco_encaje:
-            # Construir lookup: fecha_t_única → valor del Excel más reciente ≤ fecha_t.
-            # merge_asof sobre fechas únicas evita ambigüedades con múltiples h por fecha.
-            _ft_norm = pd.to_datetime(df["fecha_t"]).dt.normalize()
-            _dates_unicas = pd.DataFrame(
-                {"fecha_t": _ft_norm.unique()}
-            ).sort_values("fecha_t")
+        # Construir lookup: fecha_t_única → valor del Excel más reciente ≤ fecha_t.
+        # merge_asof sobre fechas únicas evita ambigüedades con múltiples h por fecha.
+        _ft_norm = pd.to_datetime(df["fecha_t"]).dt.normalize()
+        _dates_unicas = pd.DataFrame(
+            {"fecha_t": _ft_norm.unique()}
+        ).sort_values("fecha_t")
 
-            _feat_r = bbva_encaje_feat[["fecha"] + _bbva_feat_cols].copy()
-            _feat_r["fecha"] = pd.to_datetime(_feat_r["fecha"]).dt.normalize()
-            _feat_r = _feat_r.rename(columns={"fecha": "fecha_t"}) \
-                              .sort_values("fecha_t")
+        _feat_r = bbva_encaje_feat[["fecha"] + _bbva_feat_cols].copy()
+        _feat_r["fecha"] = pd.to_datetime(_feat_r["fecha"]).dt.normalize()
+        _feat_r = _feat_r.rename(columns={"fecha": "fecha_t"}) \
+                          .sort_values("fecha_t")
 
-            _lookup = pd.merge_asof(
-                _dates_unicas,
-                _feat_r,
-                on="fecha_t",
-                direction="backward",
-            ).set_index("fecha_t")
+        _lookup = pd.merge_asof(
+            _dates_unicas,
+            _feat_r,
+            on="fecha_t",
+            direction="backward",
+        ).set_index("fecha_t")
 
-            for col in _bbva_feat_cols:
-                df[col] = _ft_norm.map(_lookup[col]).values
+        for col in _bbva_feat_cols:
+            df[col] = _ft_norm.map(_lookup[col]).values
 
-            n_ok = df["avance_mes_lag1"].notna().sum()
-            logger.info(f"  {banco}: bbva_encaje_feat incorporadas — "
-                        f"{n_ok:,}/{len(df):,} filas con valores")
-        else:
-            for col in _bbva_feat_cols:
-                df[col] = np.nan
+        n_ok = df["avance_mes_lag1"].notna().sum()
+        logger.info(f"  {banco}: bbva_encaje_feat incorporadas — "
+                    f"{n_ok:,}/{len(df):,} filas con valores")
 
     # ── 9. Features CC+OVN en BCR (Saldos_CCOVN.xlsx, todos los bancos) ──────
     # ccovn_features está indexado por fecha y contiene valores del día t-1.
