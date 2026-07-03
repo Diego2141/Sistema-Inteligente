@@ -1672,10 +1672,14 @@ def _extraer_importancias(modelos, cols_feat):
     """
     Devuelve {feature: gain_promedio_entre_cuantiles} para XGBoost o LightGBM.
     Los features sin importancia en algún cuantil reciben gain=0.
+    Excluye el modelo 'mean' (reg:squarederror) para ser consistente con
+    _diag_gain_promedio: ambas funciones promedian solo sobre cuantiles.
     """
     acum = {f: 0.0 for f in cols_feat}
     n    = 0
     for tau, model in modelos.items():
+        if tau == "mean":
+            continue
         if MODELO_CV == "lgbm" and _LGBM_OK:
             names  = model.feature_name()
             gains  = model.feature_importance(importance_type="gain")
@@ -2121,10 +2125,28 @@ def _diag_block_perm_promedio(modelos, X_val, y_val, cols_feat, fold_num):
 
 def _diag_shap_promedio(modelos, X_val, cols_feat, fold_num):
     X = X_val.reset_index(drop=True)[cols_feat]
+
+    # Submuestreo estratificado por h — mismo criterio que block-perm para
+    # que ambas métricas evalúen la misma distribución de horizontes.
     if len(X) > DIAG_SHAP_MAX_SAMPLES:
-        X = X.sample(DIAG_SHAP_MAX_SAMPLES, random_state=42 + fold_num)
+        if "h" in X.columns:
+            n_h_vals = X["h"].nunique()
+            per_h    = max(1, DIAG_SHAP_MAX_SAMPLES // n_h_vals)
+            rng_sub  = np.random.default_rng(99 + fold_num)
+            idx_list = []
+            for _, grp in X.groupby("h"):
+                take = min(len(grp), per_h)
+                idx_list.append(rng_sub.choice(grp.index.values, take, replace=False))
+            idx = np.sort(np.concatenate(idx_list))
+            X = X.loc[idx].reset_index(drop=True)
+        else:
+            X = X.sample(DIAG_SHAP_MAX_SAMPLES, random_state=42 + fold_num)
+
+    # h es variable estructural del problema (siempre conocida) — excluirla
+    # del ranking SHAP evita que desplace features reales del top_n.
+    cols_shap = [c for c in cols_feat if c != "h"]
     dmat = xgb.DMatrix(X.values, feature_names=cols_feat)
-    acum = pd.Series(0.0, index=cols_feat)
+    acum = pd.Series(0.0, index=cols_shap)
     n = 0
     for tau in QUANTILES:
         model = modelos.get(tau)
@@ -2134,13 +2156,17 @@ def _diag_shap_promedio(modelos, X_val, cols_feat, fold_num):
             # pred_contribs=True devuelve SHAP values nativos de XGBoost
             # shape: (n_samples, n_features + 1); última col = bias → se descarta
             sv = model.predict(dmat, pred_contribs=True)[:, :-1]
-            s = pd.Series(np.abs(sv).mean(axis=0), index=cols_feat)
+            # sv tiene columnas en el mismo orden que cols_feat
+            h_idx   = list(cols_feat).index("h") if "h" in cols_feat else None
+            sv_cols = [c for c in cols_feat if c != "h"]
+            sv_filt = np.delete(sv, h_idx, axis=1) if h_idx is not None else sv
+            s = pd.Series(np.abs(sv_filt).mean(axis=0), index=sv_cols)
             acum = acum.add(s.fillna(0.0), fill_value=0.0)
             n += 1
         except Exception as e:
             logger.warning(f"      [diag] SHAP τ={tau} falló: {e}")
     if n == 0:
-        return pd.Series(np.nan, index=cols_feat)
+        return pd.Series(np.nan, index=cols_shap)
     return acum / n
 
 
