@@ -1446,7 +1446,7 @@ _is_bday_fe = (
     (df["fecha"].dt.weekday < 5) &
     (~df["fecha"].isin(_hols_all))
 )
-_db = df[_is_bday_fe][
+_db = df[_is_bday_fe & (df["fecha"] >= "2019-01-01")][
     ["fecha", "retiro_neto",
      "avance_mes_lag1", "exceso_abs_lag1",
      "encaje_ovn_lag1", "ratio_ovn_total_lag1"]
@@ -1455,7 +1455,8 @@ _db = df[_is_bday_fe][
 _FEAT_TEST  = ["avance_mes_lag1", "exceso_abs_lag1",
                "encaje_ovn_lag1", "ratio_ovn_total_lag1"]
 _LABELS     = ["avance_mes", "exceso_abs", "encaje_ovn", "ratio_ovn"]
-_HORIZONTES = [1, 2, 3, 5, 10, 15, 22, 30, 45, 60, 75]
+# h=1 excluido: el retiro del día siguiente ya se conoce en t
+_HORIZONTES = [2, 3, 5, 10, 15, 22, 30, 45, 60, 75]
 
 # ── Correlaciones Pearson y Spearman por horizonte ───────────────────────────
 _corr_p = pd.DataFrame(np.nan, index=_FEAT_TEST, columns=_HORIZONTES)
@@ -1515,8 +1516,8 @@ _vabs = max(_vabs, 0.05)
 
 fig, axes = plt.subplots(1, 2, figsize=(16, 4))
 fig.suptitle(
-    "Poder predictivo features encaje BBVA vs retiro_neto(t+h)\n"
-    "feature_lag1: información disponible en t-1 | h en días hábiles",
+    "Poder predictivo features encaje BBVA vs retiro_neto(t+h)  [2019–actualidad]\n"
+    "feature_lag1: información disponible en t-1 | h en días hábiles | h=1 excluido (ya conocido)",
     fontsize=11, fontweight="bold",
 )
 
