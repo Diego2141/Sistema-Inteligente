@@ -182,9 +182,11 @@ GUARDAR_MODELOS_TODOS_FOLDS = True
 SOLO_REGENERAR_PLOTS = False
 COLS_EXCLUIR              = {
     "fecha_t", "banco", "target",
-    # Variables macro de nivel — alta ganancia en train, perm≈0 en val (overfitting por tendencia secular/estacional).
-    # Se mantienen: T10Y_frac (FFD), EMBI_PERU_frac (FFD), delta_EMBI, garch_vol_embi.
-    "T10Y", "EMBI_PERU",
+    # T10Y y EMBI_PERU son series I(0): T10Y es nivel de tasa; EMBI es diferencial de tasas.
+    # Para I(0) el FFD tiene d_opt≈0 → T10Y_frac≈T10Y y EMBI_PERU_frac≈EMBI_PERU (redundantes).
+    # Todas muestran gain≈1.0/perm≈0 en val → overfitting por correlación espuria en train.
+    # Se mantienen: delta_EMBI (shocks de corto plazo), garch_vol_embi (volatilidad del spread).
+    "T10Y", "T10Y_frac", "EMBI_PERU", "EMBI_PERU_frac",
 }
 
 # ── Límite de folds ───────────────────────────────────────────────────────────
