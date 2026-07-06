@@ -1114,10 +1114,12 @@ def preparar_fold_data(df, fold, cols_feat):
     test_end    = fold["test_end"]
 
     mask_train = (df["fecha_t"] >= train_start) & (df["fecha_t"] <= train_end)
-    mask_val   = (df["fecha_t"] >= val_start)   & (df["fecha_t"] <= val_end)
+    # df_fold_all incluye el purge period (val_end → test_start) para que GARCH y FFD
+    # operen sobre una serie continua sin saltos. El purge se excluye de df_val abajo.
+    mask_fold_val = (df["fecha_t"] >= val_start) & (df["fecha_t"] < test_start)
     mask_test  = (df["fecha_t"] >= test_start)  & (df["fecha_t"] <= test_end)
 
-    df_fold_all = df[mask_train | mask_val | mask_test].copy()
+    df_fold_all = df[mask_train | mask_fold_val | mask_test].copy()
 
     garch_cols = [c for c in ["garch_vol", "garch_vol_tc", "garch_vol_embi"]
                   if c in df_fold_all.columns]
@@ -1135,6 +1137,8 @@ def preparar_fold_data(df, fold, cols_feat):
         burn_cutoff = fold.get("burn_cutoff",
                                train_start + pd.offsets.BusinessDay(BURN_IN_DIAS_HAB))
         df_train = df_train[df_train["fecha_t"] >= burn_cutoff]
+    # df_val usa val_end como límite superior — excluye el purge period de X_val/y_val
+    # para que Optuna no vea targets cuyo fecha_th cae dentro del período TEST.
     df_val   = df_fold_all[(df_fold_all["fecha_t"] >= val_start) &
                            (df_fold_all["fecha_t"] <= val_end)]
     df_test  = df_fold_all[df_fold_all["fecha_t"] >= test_start]
