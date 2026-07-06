@@ -152,7 +152,7 @@ _CICL_PARES_PERM = {
 # ── Modelo ────────────────────────────────────────────────────────────────────
 QUANTILES        = [0.01, 0.05, 0.50, 0.95, 0.99]
 S_MIN_FACTOR     = 0.01
-S_MAX_FACTOR     = 0.10   # paper recomienda s∈[0.05,0.10] sobre targets estandarizados
+S_MAX_FACTOR     = 1.00   # targets en escala raw (MM USD), no estandarizados → rango amplio
 
 # ── Trials Optuna ─────────────────────────────────────────────────────────────
 # True  → número de trials varía por cuantil (TRIALS_POR_TAU)
