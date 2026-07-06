@@ -1109,11 +1109,12 @@ def preparar_fold_data(df, fold, cols_feat):
     train_start = fold["train_start"]
     train_end   = fold["train_end"]
     val_start   = fold["val_start"]
+    val_end     = fold["val_end"]      # límite real de VAL — evita incluir el purge en X_val/y_val
     test_start  = fold["test_start"]
     test_end    = fold["test_end"]
 
     mask_train = (df["fecha_t"] >= train_start) & (df["fecha_t"] <= train_end)
-    mask_val   = (df["fecha_t"] >= val_start)   & (df["fecha_t"] <  test_start)
+    mask_val   = (df["fecha_t"] >= val_start)   & (df["fecha_t"] <= val_end)
     mask_test  = (df["fecha_t"] >= test_start)  & (df["fecha_t"] <= test_end)
 
     df_fold_all = df[mask_train | mask_val | mask_test].copy()
@@ -1135,7 +1136,7 @@ def preparar_fold_data(df, fold, cols_feat):
                                train_start + pd.offsets.BusinessDay(BURN_IN_DIAS_HAB))
         df_train = df_train[df_train["fecha_t"] >= burn_cutoff]
     df_val   = df_fold_all[(df_fold_all["fecha_t"] >= val_start) &
-                           (df_fold_all["fecha_t"] <  test_start)]
+                           (df_fold_all["fecha_t"] <= val_end)]
     df_test  = df_fold_all[df_fold_all["fecha_t"] >= test_start]
 
     medianas_fold = df_train[cols_feat].median()
@@ -2791,7 +2792,7 @@ def evaluar_banco(banco: str):
             dir_out=_fanchart_dir,
         )
 
-        modelos_ultimo = modelos
+        modelos_ultimo = modelos_final   # modelo retrenado train+val = el que se despliega
         params_ultimo  = best_params
 
         if not SOLO_REGENERAR_PLOTS:
@@ -2807,7 +2808,7 @@ def evaluar_banco(banco: str):
                 logger.warning(f"  Fold {fold_num}: no se pudo extraer GARCH — {_eg}")
 
             if GUARDAR_MODELOS_TODOS_FOLDS:
-                for tau, model in modelos.items():
+                for tau, model in modelos_final.items():
                     if tau == "mean":
                         ruta_f = (DIR_MODELOS /
                                   f"{sfx}_{banco}_fold{fold_num:02d}_mean_{fecha_hoy}{ext}")
