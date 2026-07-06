@@ -1017,7 +1017,52 @@ def _entrenar_fold_xgb_qt(X_tr, y_tr, X_va, y_va, std_y, n_trials, fold_num):
     logger.info(f"    [xgb_qt] mean fold {fold_num}: reg:squarederror "
                 f"(n_est={bp_mean['n_estimators']})")
 
-    return modelos, best_by_tau.get(0.50, list(best_by_tau.values())[0])
+    return modelos, best_by_tau          # dict completo {tau: bp}
+
+
+def _retrain_train_val_qt(X_tr, y_tr, X_va, y_va, best_by_tau, std_y, fold_num):
+    """
+    Reentrenamiento final sobre train+val con HPs fijos (ya optimizados por Optuna).
+
+    Diseño deliberado sin early stopping: añadir early stopping requeriría un set
+    de evaluación independiente; la única opción sería test, lo que introduciría
+    leakage directo. Se usa el n_estimators encontrado por Optuna, que fue
+    seleccionado con early stopping activo sobre val durante la búsqueda.
+
+    s viene de best_by_tau[tau] — calibrado por Optuna, no derivado de std_y.
+    std_y se mantiene de y_train para consistencia con el objetivo original.
+    preds_val NO usa este modelo; se evalúa con el modelo solo-train para
+    mantener val como estimación out-of-sample honesta.
+    """
+    X_tv      = pd.concat([X_tr, X_va], ignore_index=True)
+    y_tv      = pd.concat([y_tr, y_va], ignore_index=True)
+    col_names = list(X_tv.columns)
+    dtv       = xgb.DMatrix(X_tv.values, label=y_tv.values, feature_names=col_names)
+
+    modelos_tv = {}
+    for tau, bp in best_by_tau.items():
+        s      = bp["s"]
+        n_est  = bp["n_estimators"]
+        params = {k: v for k, v in bp.items() if k not in ("s", "n_estimators")}
+        params.update({"tree_method": "hist", "seed": 42, "nthread": _XGB_NTHREAD})
+        modelos_tv[tau] = xgb.train(
+            params, dtv, num_boost_round=n_est,
+            obj=make_quantile_objective(tau, s, std_y),
+            verbose_eval=False,
+        )
+
+    bp_mean = best_by_tau.get(0.50, list(best_by_tau.values())[0])
+    params_mean = {k: v for k, v in bp_mean.items() if k not in ("s", "n_estimators")}
+    params_mean.update({"objective": "reg:squarederror",
+                        "tree_method": "hist", "nthread": _XGB_NTHREAD, "seed": 42})
+    modelos_tv["mean"] = xgb.train(
+        params_mean, dtv,
+        num_boost_round=bp_mean["n_estimators"],
+        verbose_eval=False,
+    )
+    logger.info(f"    [retrain_tv] fold {fold_num}: train+val "
+                f"({len(y_tv)} obs, s de Optuna, std_y de train, sin early stopping)")
+    return modelos_tv
 
 
 # ── Dispatchers ───────────────────────────────────────────────────────────────
@@ -2602,6 +2647,7 @@ def evaluar_banco(banco: str):
                 logger.warning(f"  [REPLOT] {_e_load} — omitiendo fold {fold_num}")
                 continue
             best_params = {}
+            modelos_final = modelos   # en modo replot no hay retrain
         else:
             # ── Modo normal: Optuna + entrenamiento ─────────────────────────
             modelos, best_params = entrenar_fold(
@@ -2609,13 +2655,27 @@ def evaluar_banco(banco: str):
                 get_n_trials(0.5), fold["fold"]
             )
 
-            # Importancia de features (promedio entre cuantiles)
+            # ── Retrain final sobre train+val (HPs fijos de Optuna) ─────────
+            # modelos_final se usa para preds_test; modelos (solo-train) para
+            # preds_val y métricas de diagnóstico (val out-of-sample honesto).
+            if MODELO_CV == "xgb_qt":
+                modelos_final = _retrain_train_val_qt(
+                    X_train, y_train, X_val, y_val,
+                    best_params, std_y, fold["fold"]
+                )
+            else:
+                X_tv = pd.concat([X_train, X_val], ignore_index=True)
+                y_tv = pd.concat([y_train, y_val], ignore_index=True)
+                modelos_final = entrenar_quantiles(X_tv, y_tv, best_params, QUANTILES, std_y)
+
+            # Gain: refleja el modelo final desplegado
             try:
-                imp = _extraer_importancias(modelos, cols_feat)
+                imp = _extraer_importancias(modelos_final, cols_feat)
                 importancias_folds.append({"fold": fold["fold"], "importancias": imp})
             except Exception as _e_imp:
                 logger.warning(f"    Importancia fold {fold['fold']}: {_e_imp}")
 
+            # Perm + SHAP: val es out-of-sample solo para modelos (solo-train)
             if DIAGNOSTICO_FEATURES:
                 try:
                     diag_por_fold.append(
@@ -2624,8 +2684,8 @@ def evaluar_banco(banco: str):
                 except Exception as _e_diag:
                     logger.warning(f"    [diag] Fold {fold['fold']} falló: {_e_diag}")
 
-        preds_test = predecir_fold(modelos, X_test)
-        preds_val  = predecir_fold(modelos, X_val)
+        preds_test = predecir_fold(modelos_final, X_test)  # modelo train+val
+        preds_val  = predecir_fold(modelos,       X_val)   # modelo solo-train → val honesto
 
         # ── Calibración post-hoc (por horizonte h) ───────────────────────────
         # Shift calculado por separado para cada h en VAL y aplicado solo a
@@ -2665,30 +2725,35 @@ def evaluar_banco(banco: str):
             def _hp(d, key, default=0):
                 return d.get(key, default)
 
+            # xgb_qt devuelve best_params como {tau: bp}; extraer Q50 para logging
+            _bp_log = (best_params.get(0.50, list(best_params.values())[0])
+                       if MODELO_CV == "xgb_qt" and best_params
+                       else best_params)
+
             for row in (row_test, row_val):
                 if MODELO_CV == "lgbm":
                     row.update({
                         "s_optimo"        : 0.0,
-                        "learning_rate"   : round(_hp(best_params, "learning_rate"), 4),
-                        "max_depth"       : int(_hp(best_params, "num_leaves")),
-                        "n_estimators"    : int(_hp(best_params, "n_estimators")),
-                        "min_child_weight": int(_hp(best_params, "min_child_samples")),
-                        "subsample"       : round(_hp(best_params, "subsample"), 3),
-                        "colsample_bytree": round(_hp(best_params, "colsample_bytree"), 3),
-                        "reg_alpha"       : round(_hp(best_params, "reg_alpha"), 5),
-                        "reg_lambda"      : round(_hp(best_params, "reg_lambda"), 5),
+                        "learning_rate"   : round(_hp(_bp_log, "learning_rate"), 4),
+                        "max_depth"       : int(_hp(_bp_log, "num_leaves")),
+                        "n_estimators"    : int(_hp(_bp_log, "n_estimators")),
+                        "min_child_weight": int(_hp(_bp_log, "min_child_samples")),
+                        "subsample"       : round(_hp(_bp_log, "subsample"), 3),
+                        "colsample_bytree": round(_hp(_bp_log, "colsample_bytree"), 3),
+                        "reg_alpha"       : round(_hp(_bp_log, "reg_alpha"), 5),
+                        "reg_lambda"      : round(_hp(_bp_log, "reg_lambda"), 5),
                     })
                 else:
                     row.update({
-                        "s_optimo"        : round(_hp(best_params, "s"), 4),
-                        "learning_rate"   : round(_hp(best_params, "learning_rate"), 4),
-                        "max_depth"       : int(_hp(best_params, "max_depth")),
-                        "n_estimators"    : int(_hp(best_params, "n_estimators")),
-                        "min_child_weight": int(_hp(best_params, "min_child_weight")),
-                        "subsample"       : round(_hp(best_params, "subsample"), 3),
-                        "colsample_bytree": round(_hp(best_params, "colsample_bytree"), 3),
-                        "reg_alpha"       : round(_hp(best_params, "reg_alpha"), 5),
-                        "reg_lambda"      : round(_hp(best_params, "reg_lambda"), 5),
+                        "s_optimo"        : round(_hp(_bp_log, "s"), 4),
+                        "learning_rate"   : round(_hp(_bp_log, "learning_rate"), 4),
+                        "max_depth"       : int(_hp(_bp_log, "max_depth")),
+                        "n_estimators"    : int(_hp(_bp_log, "n_estimators")),
+                        "min_child_weight": int(_hp(_bp_log, "min_child_weight")),
+                        "subsample"       : round(_hp(_bp_log, "subsample"), 3),
+                        "colsample_bytree": round(_hp(_bp_log, "colsample_bytree"), 3),
+                        "reg_alpha"       : round(_hp(_bp_log, "reg_alpha"), 5),
+                        "reg_lambda"      : round(_hp(_bp_log, "reg_lambda"), 5),
                     })
 
             resultados_test.append(row_test)
