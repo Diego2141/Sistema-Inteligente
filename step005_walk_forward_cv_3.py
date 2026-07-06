@@ -180,7 +180,12 @@ GUARDAR_MODELOS_TODOS_FOLDS = True
 # True  → omite Optuna/entrenamiento, carga modelos del disco y solo regenera los plots
 # False → entrenamiento completo (comportamiento normal)
 SOLO_REGENERAR_PLOTS = False
-COLS_EXCLUIR              = {"fecha_t", "banco", "target"}
+COLS_EXCLUIR              = {
+    "fecha_t", "banco", "target",
+    # Variables macro de nivel — alta ganancia en train, perm≈0 en val (overfitting por tendencia secular/estacional).
+    # Se mantienen: T10Y_frac (FFD), EMBI_PERU_frac (FFD), delta_EMBI, garch_vol_embi.
+    "T10Y", "EMBI_PERU",
+}
 
 # ── Límite de folds ───────────────────────────────────────────────────────────
 # None → usa todos los folds generados
@@ -743,7 +748,7 @@ def _objective_optuna(trial, X_tr, y_tr, X_va, y_va, std_y):
          else trial.suggest_float("s", std_y * S_MIN_FACTOR, std_y * S_MAX_FACTOR, log=True))
     params = {
         "learning_rate"   : trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
-        "max_depth"       : trial.suggest_int("max_depth", 3, 6),
+        "max_depth"       : trial.suggest_int("max_depth", 3, 10),
         "min_child_weight": trial.suggest_int("min_child_weight", 10, 200),
         "colsample_bytree": trial.suggest_float("colsample_bytree", 0.4, 1.0),
         "subsample"       : trial.suggest_float("subsample", 0.5, 1.0),
@@ -753,7 +758,7 @@ def _objective_optuna(trial, X_tr, y_tr, X_va, y_va, std_y):
         "nthread"         : _XGB_NTHREAD,
         "seed"            : 42,
     }
-    n_est  = trial.suggest_int("n_estimators", 100, 1000)
+    n_est  = trial.suggest_int("n_estimators", 100, 1500)
     dtrain = xgb.DMatrix(X_tr, label=y_tr)
     dval   = xgb.DMatrix(X_va, label=y_va)
     model  = xgb.train(
@@ -829,7 +834,7 @@ def _objetivo_optuna_lgbm(trial, X_tr, y_tr, X_va, y_va):
         "objective": "quantile", "alpha": tau, "verbosity": -1, "seed": 42,
         "learning_rate"    : trial.suggest_float("learning_rate",    0.01,  0.3,  log=True),
         "num_leaves"       : trial.suggest_int(  "num_leaves",        15,   255),
-        "max_depth"        : trial.suggest_int(  "max_depth",          3,     6),
+        "max_depth"        : trial.suggest_int(  "max_depth",          3,    10),
         "min_child_samples": trial.suggest_int(  "min_child_samples", 10,   200),
         "subsample"        : trial.suggest_float("subsample",         0.5,   1.0),
         "colsample_bytree" : trial.suggest_float("colsample_bytree",  0.4,  1.0),
@@ -837,7 +842,7 @@ def _objetivo_optuna_lgbm(trial, X_tr, y_tr, X_va, y_va):
         "reg_lambda"       : trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
         "subsample_freq"   : 1,
     }
-    n_est  = trial.suggest_int("n_estimators", 100, 1000)
+    n_est  = trial.suggest_int("n_estimators", 100, 1500)
     dtrain = lgb.Dataset(X_tr.values, label=y_tr.values)
     dval   = lgb.Dataset(X_va.values, label=y_va.values, reference=dtrain)
     cbs    = [lgb.log_evaluation(-1)]
@@ -888,7 +893,7 @@ def _objetivo_optuna_xgb_qt_tau(trial, tau, X_tr, y_tr, X_va, y_va, std_y):
          else trial.suggest_float("s", std_y * S_MIN_FACTOR, std_y * S_MAX_FACTOR, log=True))
     params = {
         "learning_rate"   : trial.suggest_float("learning_rate",   0.01,  0.3,  log=True),
-        "max_depth"       : trial.suggest_int(  "max_depth",         3,     6),
+        "max_depth"       : trial.suggest_int(  "max_depth",         3,    10),
         "min_child_weight": trial.suggest_int(  "min_child_weight", 10,   200),
         "colsample_bytree": trial.suggest_float("colsample_bytree",  0.4,  1.0),
         "subsample"       : trial.suggest_float("subsample",         0.5,  1.0),
@@ -898,7 +903,7 @@ def _objetivo_optuna_xgb_qt_tau(trial, tau, X_tr, y_tr, X_va, y_va, std_y):
         "nthread"         : _XGB_NTHREAD,   # limita threads por trial en paralelo
         "seed"            : 42,
     }
-    n_est  = trial.suggest_int("n_estimators", 100, 1000)
+    n_est  = trial.suggest_int("n_estimators", 100, 1500)
     dtrain = xgb.DMatrix(X_tr, label=y_tr)
     dval   = xgb.DMatrix(X_va, label=y_va)
     model  = xgb.train(
@@ -929,7 +934,7 @@ def _worker_optuna_tau(args):
              else trial.suggest_float("s", std_y * S_MIN_FACTOR, std_y * S_MAX_FACTOR, log=True))
         params = {
             "learning_rate"   : trial.suggest_float("learning_rate",   0.01,  0.3,  log=True),
-            "max_depth"       : trial.suggest_int(  "max_depth",         3,     6),
+            "max_depth"       : trial.suggest_int(  "max_depth",         3,    10),
             "min_child_weight": trial.suggest_int(  "min_child_weight", 10,   200),
             "colsample_bytree": trial.suggest_float("colsample_bytree",  0.4,  1.0),
             "subsample"       : trial.suggest_float("subsample",         0.5,  1.0),
@@ -939,7 +944,7 @@ def _worker_optuna_tau(args):
             "nthread"         : _XGB_NTHREAD,
             "seed"            : 42,
         }
-        n_est = trial.suggest_int("n_estimators", 100, 1000)
+        n_est = trial.suggest_int("n_estimators", 100, 1500)
         model = xgb.train(
             params, dtrain, num_boost_round=n_est,
             obj=make_quantile_objective(tau, s, std_y),
