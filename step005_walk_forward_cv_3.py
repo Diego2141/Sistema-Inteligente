@@ -224,6 +224,17 @@ CALIBRACION_PERCENTIL = 25    # percentil del residuo VAL usado como shift
 # None → sin límite (el valor original antes de esta corrección)
 CALIBRACION_MAX_SHIFT_FACTOR = 0.5   # e.g. 0.5 → shift ≤ ±0.5×std_y
 
+# ── Mondrian CQR (Conformalized Quantile Regression por horizonte h) ──────────
+# True  → calibra el intervalo [CQR_TAU_LO, CQR_TAU_HI] usando scores de
+#          conformidad en VAL (modelo solo-train, OOS honesto) y aplica
+#          la corrección simétrica q_hat_h a TEST (modelo retrenado train+val).
+#          Sin leakage: scores vienen de modelos (solo-train), preds_test de
+#          modelos_final (retrain). Mondrian = q_hat separado por cada h.
+# False → sin calibración CQR (comportamiento original)
+CALIBRACION_CQR  = False
+CQR_TAU_LO       = 0.05   # cuantil inferior del intervalo a calibrar
+CQR_TAU_HI       = 0.95   # cuantil superior del intervalo a calibrar
+CQR_ALPHA        = 0.10   # miscoverage objetivo: 1 − cobertura deseada (90% → 0.10)
 
 
 # ── Fan chart TEST: número de snapshots por fold ──────────────────────────────
@@ -2519,6 +2530,65 @@ def _cargar_modelos_step004(banco: str) -> dict | None:
     return modelos_s4
 
 
+def aplicar_mondrian_cqr(preds_val, y_val, h_val, preds_test, h_test):
+    """
+    Mondrian Conformalized Quantile Regression (CQR) por horizonte h.
+
+    Scores calculados con preds_val (modelo solo-train, OOS honesto).
+    Corrección aplicada a preds_test (modelo retrenado train+val).
+    Sin leakage: el modelo que genera scores nunca vio VAL como entrenamiento;
+    el modelo que predice TEST nunca vio TEST.
+
+    Score de conformidad (Romano et al. 2019):
+        score_i = max(CQR_TAU_LO_pred - y_i,  y_i - CQR_TAU_HI_pred)
+    Cuantil de corrección por horizonte h:
+        q_hat_h = quantile(scores_h, (1 - CQR_ALPHA)(1 + 1/n_h))
+    Intervalo calibrado en TEST:
+        [Q_lo_pred - q_hat_h,  Q_hi_pred + q_hat_h]
+    """
+    if CQR_TAU_LO not in preds_val or CQR_TAU_HI not in preds_val:
+        logger.warning("    [CQR] Cuantiles CQR_TAU_LO/HI no encontrados en preds_val — omitiendo")
+        return preds_test
+
+    lo_val = preds_val[CQR_TAU_LO]
+    hi_val = preds_val[CQR_TAU_HI]
+    y_arr  = y_val.values if hasattr(y_val, "values") else np.asarray(y_val)
+
+    q_hat_h = {}
+    for h in np.unique(h_val):
+        mask   = h_val == h
+        scores = np.maximum(lo_val[mask] - y_arr[mask],
+                            y_arr[mask]  - hi_val[mask])
+        n_h    = len(scores)
+        if n_h < 2:
+            continue
+        nivel        = (1 - CQR_ALPHA) * (1 + 1 / n_h)
+        nivel        = min(nivel, 1.0)
+        q_hat_h[int(h)] = float(np.quantile(scores, nivel))
+
+    if not q_hat_h:
+        logger.warning("    [CQR] Sin horizontes con suficientes datos — omitiendo")
+        return preds_test
+
+    adj = np.array([q_hat_h.get(int(h), 0.0) for h in h_test])
+
+    preds_cqr = dict(preds_test)
+    if CQR_TAU_LO in preds_cqr:
+        preds_cqr[CQR_TAU_LO] = preds_test[CQR_TAU_LO] - adj
+    if CQR_TAU_HI in preds_cqr:
+        preds_cqr[CQR_TAU_HI] = preds_test[CQR_TAU_HI] + adj
+
+    _sample_h = sorted(q_hat_h)
+    _log_vals = "  ".join(
+        f"h={h}→{q_hat_h[h]:,.0f}" for h in _sample_h[::max(1, len(_sample_h)//4)]
+    )
+    logger.info(
+        f"    [CQR] Mondrian q_hat por h (alpha={CQR_ALPHA}, "
+        f"tau=[{CQR_TAU_LO},{CQR_TAU_HI}]): {_log_vals}"
+    )
+    return preds_cqr
+
+
 def evaluar_banco(banco: str):
     modo = "EXPANDING" if EXPANDING else "ROLLING"
     logger.info(f"\n{'='*65}")
@@ -2729,6 +2799,14 @@ def evaluar_banco(banco: str):
                 f"h=1→{_shifts_h.get(1,0):,.0f}  "
                 f"h=38→{_shifts_h.get(38,0):,.0f}  "
                 f"h=75→{_shifts_h.get(75,0):,.0f}"
+            )
+
+        # ── Mondrian CQR ─────────────────────────────────────────────────────
+        # Scores en preds_val (solo-train, OOS) → q_hat_h → ajuste en preds_test
+        # (retrain train+val). Sin leakage: cada modelo predice datos que nunca vio.
+        if CALIBRACION_CQR:
+            preds_test = aplicar_mondrian_cqr(
+                preds_val, y_val, h_val, preds_test, h_test
             )
 
         if not SOLO_REGENERAR_PLOTS:
