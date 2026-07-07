@@ -798,8 +798,12 @@ def entrenar_quantiles(X_tr, y_tr, best_params, quantiles, std_y):
     params = {k: v for k, v in best_params.items() if k not in ("s", "n_estimators")}
     params.update({"tree_method": "hist", "seed": 42, "nthread": _XGB_NTHREAD})
 
+    # DMatrix creado una vez y compartido entre threads para evitar
+    # fragmentación de heap en Windows con múltiples allocaciones simultáneas.
+    gc.collect()
+    dtrain = xgb.DMatrix(X_tr, label=y_tr)
+
     def _train_tau(tau):
-        dtrain = xgb.DMatrix(X_tr, label=y_tr)
         return tau, xgb.train(
             params, dtrain, num_boost_round=n_est,
             obj=make_quantile_objective(tau, s_best, std_y),
