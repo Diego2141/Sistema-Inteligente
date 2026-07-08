@@ -32,8 +32,8 @@ Paso 1 — Detección
 Paso 2 — Peor retiro potencial por banco
     Para bancos con alguna_vez_activa = True:
         worst_ratio_B = max(ratio[B,q]) sobre TODOS los cierres históricos con ratio > umbral
-        p95_saldo_B   = P{PERCENTIL_SALDO} del saldo desde inicio del trimestre actual hasta fecha_ref
-                        (incluye días del trimestre anterior completo + días corridos del actual)
+        p95_saldo_B   = P{PERCENTIL_SALDO} del saldo desde inicio del trimestre ANTERIOR hasta fecha_ref-1
+                        (trimestre anterior completo + días corridos del trimestre actual sin incluir hoy)
         peor_B        = worst_ratio_B × p95_saldo_B × (1 + FACTOR_SEGURIDAD)
 
 Paso 3 — Factor multiplicativo y ajuste
@@ -259,6 +259,14 @@ def _quarter_start(fecha: pd.Timestamp) -> pd.Timestamp:
     return pd.Timestamp(fecha.year, ((fecha.month - 1) // 3) * 3 + 1, 1)
 
 
+def _prev_quarter_start(fecha: pd.Timestamp) -> pd.Timestamp:
+    """Primer día del trimestre anterior al que pertenece `fecha`."""
+    q = fecha.quarter
+    if q == 1:
+        return pd.Timestamp(fecha.year - 1, 10, 1)
+    return pd.Timestamp(fecha.year, (q - 2) * 3 + 1, 1)
+
+
 def _ventana_antes_cierre(
     fecha_cierre: pd.Timestamp,
     calendario: pd.DatetimeIndex,
@@ -369,9 +377,9 @@ def _peor_B(
 
     worst_ratio = max(ratios_activos.values())
 
-    # Saldo del trimestre actual (inicio de trimestre → fecha_ref)
-    q_start = _quarter_start(fecha_ref)
-    mask = (df_saldo.index >= q_start) & (df_saldo.index <= fecha_ref)
+    # Saldo: trimestre anterior completo + días corridos del trimestre actual (sin incluir fecha_ref)
+    pq_start = _prev_quarter_start(fecha_ref)
+    mask = (df_saldo.index >= pq_start) & (df_saldo.index < fecha_ref)
     s = df_saldo.loc[mask, col_saldo]
     if isinstance(s, pd.DataFrame):
         s = s.iloc[:, 0]
@@ -719,15 +727,15 @@ def _diagnostico(
         for b in bancos_activos
     )
 
-    # P95 del saldo del trimestre actual hasta fecha_ref (lo que usa _peor_B)
-    q_start_diag = _quarter_start(fecha_ref)
+    # P95 del saldo: trimestre anterior + días corridos del actual hasta fecha_ref (exclusive)
+    pq_start_diag = _prev_quarter_start(fecha_ref)
 
     filas_resumen: list[dict] = []
     for b in sorted(det.keys()):
         info = det[b]
         ratios_act = {fc: r for fc, r in info["ratios"].items() if r > UMBRAL_ACTIVACION}
         worst_r = max(ratios_act.values()) if ratios_act else None
-        mask_q = (df_saldo.index >= q_start_diag) & (df_saldo.index <= fecha_ref)
+        mask_q = (df_saldo.index >= pq_start_diag) & (df_saldo.index < fecha_ref)
         s_q    = df_saldo.loc[mask_q, b].dropna()
         p95_sal = float(s_q.quantile(PERCENTIL_SALDO)) if not s_q.empty and float(s_q.max()) > 0 else None
         pb = (
@@ -989,7 +997,7 @@ def exportar_saldos_retiros(
                 for b in bancos_saldo_unique:
                     fila[f"peor_B_{b}"] = float("nan")
             else:
-                # peor_B usa p95 del trimestre actual hasta t (recálculo diario)
+                # peor_B usa p95 del trim. anterior + corrido actual hasta t (recálculo diario)
                 peor_by_banco = {
                     b: _peor_B(df_saldo, cache_det_t, b, list(cierres_t), fecha_ref=t)
                     for b in bancos_saldo_unique
@@ -1031,11 +1039,12 @@ def exportar_saldos_retiros(
         filas_p95: list[dict] = []
 
         for t in calendario:
-            q_start_t = _quarter_start(t)
-            etq_act   = f"{t.year}-Q{t.quarter}"
-            fila_p95  = {"fecha": t, "trimestre_actual": etq_act}
+            pq_start_t = _prev_quarter_start(t)
+            ventana    = (f"{pq_start_t.year}-Q{pq_start_t.quarter} → "
+                          f"{t.year}-Q{t.quarter} (excl. {t.date()})")
+            fila_p95   = {"fecha": t, "ventana_saldo": ventana}
             for b in bancos_saldo_unique:
-                mask = (df_saldo.index >= q_start_t) & (df_saldo.index <= t)
+                mask = (df_saldo.index >= pq_start_t) & (df_saldo.index < t)
                 s    = df_saldo.loc[mask, b].dropna()
                 fila_p95[f"p95_{b}"] = (
                     float(s.quantile(PERCENTIL_SALDO))
@@ -1045,7 +1054,7 @@ def exportar_saldos_retiros(
             filas_p95.append(fila_p95)
 
         df_p95   = pd.DataFrame(filas_p95)
-        cols_hdr = ["fecha", "trimestre_actual"]
+        cols_hdr = ["fecha", "ventana_saldo"]
         cols_det = sorted(c for c in df_p95.columns if c not in cols_hdr)
         df_p95   = df_p95[cols_hdr + cols_det]
 
