@@ -800,24 +800,34 @@ def exportar_saldos_retiros(
 
     cols_saldo_upper = {c.strip().upper(): c for c in df_saldo_raw.columns}
 
-    # Construir lista de bancos con su nombre en retiros y en saldos
-    bancos_info: list[dict] = []
+    # Consolidar por banco_saldos: múltiples nombres en retiros (CONTINEN+BBVA,
+    # FINANCIERO+PICHINCHA) se agrupan en una sola entrada con nombres combinados.
+    # bancos_consolidados: {col_saldo: [nombre_ret1, nombre_ret2, ...]}
+    from collections import defaultdict
+    bancos_consolidados: dict[str, list[str]] = defaultdict(list)
     for _, row in tabla_mapeo.iterrows():
         nombre_ret = row["BANCOS_RETIROS"]
         nombre_sal = row["BANCOS_SALDOS"]
         col_real   = cols_saldo_upper.get(nombre_sal.strip().upper())
         if col_real:
-            bancos_info.append({
-                "retiros": nombre_ret,
-                "saldos":  col_real,
-            })
+            bancos_consolidados[col_real].append(nombre_ret)
 
-    if not bancos_info:
+    if not bancos_consolidados:
         print("ERROR: Sin bancos en intersección — revisar TablaSaldosRetiros.xlsx")
         return
 
-    # Columnas únicas para el DataFrame (FINANCIERO y PICHINCHA → misma col BANCO PICHINCHA)
-    bancos_saldo_unique = list(dict.fromkeys(b["saldos"] for b in bancos_info))
+    # bancos_info: una entrada por banco_saldos único, nombre_ret combinado con "/"
+    bancos_info: list[dict] = [
+        {
+            "retiros": " / ".join(nombres),   # ej. "CONTINEN / BBVA"
+            "retiros_actual": nombres[-1],     # último nombre = nombre más reciente
+            "saldos": col_sal,
+        }
+        for col_sal, nombres in bancos_consolidados.items()
+    ]
+
+    # Columnas únicas (ya garantizado por la consolidación)
+    bancos_saldo_unique = [b["saldos"] for b in bancos_info]
     df_saldo  = df_saldo_raw[bancos_saldo_unique].copy()
     df_flujos = df_saldo.diff()
     calendario = pd.DatetimeIndex(df_saldo.index)
@@ -846,11 +856,11 @@ def exportar_saldos_retiros(
         # ── Pestaña por banco ─────────────────────────────────────────────────
         for info in bancos_info:
             col_sal  = info["saldos"]
-            nom_ret  = info["retiros"]
+            nom_ret  = info["retiros"]         # "CONTINEN / BBVA" (nombres históricos)
+            nom_act  = info["retiros_actual"]  # "BBVA" (nombre más reciente)
 
-            # Nombre de hoja: usar nombre en retiros (más corto/familiar)
-            # Excel limita nombres de hoja a 31 caracteres
-            sheet = nom_ret[:31]
+            # Nombre de hoja: nombre actual (más reciente), máx 31 chars
+            sheet = nom_act[:31]
 
             df_banco = pd.DataFrame({
                 "fecha":          df_saldo.index,
@@ -886,7 +896,8 @@ def exportar_saldos_retiros(
             ratios   = det.get(col_sal, {}).get("ratios", {})
 
             fila: dict = {
-                "banco_retiros": nom_ret,
+                "banco_retiros": nom_ret,    # nombres históricos combinados
+                "banco_actual":  nom_act,    # nombre más reciente
                 "banco_saldos":  col_sal,
             }
             for fc in cierres_hist:
@@ -900,7 +911,7 @@ def exportar_saldos_retiros(
         df_senal = pd.DataFrame(filas_senal)
 
         # Reordenar: primero columnas de identificación, luego pares ratio/señal por cierre
-        cols_id   = ["banco_retiros", "banco_saldos"]
+        cols_id   = ["banco_retiros", "banco_actual", "banco_saldos"]
         cols_trim = [c for c in df_senal.columns if c not in cols_id]
         df_senal  = df_senal[cols_id + sorted(cols_trim)]
 
