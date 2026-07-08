@@ -931,6 +931,74 @@ def exportar_saldos_retiros(
         df_senal.to_excel(writer, sheet_name="Señal_trimestral", index=False)
         print(f"  + Señal_trimestral  ({len(cierres_hist)} cierres históricos)")
 
+        # ── Pestaña: Ajuste_diario ────────────────────────────────────────────
+        # Para cada día hábil: peor_total calculado con los últimos N cierres
+        # disponibles a esa fecha → input directo para el overlay en step005.
+        # Solo se recomputa cuando cambia el conjunto de N cierres de referencia
+        # (una vez por trimestre), lo que hace el cálculo eficiente.
+        todos_cierres_set = set(todos_cierres)
+
+        filas_ajuste: list[dict] = []
+        prev_cierres_key: tuple = ()
+        cache_peor_by_banco: dict[str, float] = {}
+        cache_activos: list[str] = []
+        cache_peor_total: float = float("nan")
+
+        for t in calendario:
+            cierres_t = tuple(
+                fc for fc in todos_cierres if fc < t
+            )[-N_TRIMESTRES_LOOKBACK:]
+
+            if cierres_t != prev_cierres_key:
+                prev_cierres_key = cierres_t
+                if len(cierres_t) < 2:
+                    cache_peor_by_banco = {}
+                    cache_activos = []
+                    cache_peor_total = float("nan")
+                else:
+                    det_t = detectar_bancos_activos(
+                        df_saldo, df_flujos, bancos_saldo_unique,
+                        list(cierres_t), calendario,
+                    )
+                    cache_activos = [b for b, info in det_t.items() if info["activa"]]
+                    cache_peor_by_banco = {
+                        b: _peor_B(df_saldo, det_t, b, list(cierres_t))
+                        for b in bancos_saldo_unique
+                    }
+                    cache_peor_total = sum(
+                        cache_peor_by_banco.get(b, 0.0) for b in cache_activos
+                    )
+
+            fila: dict = {
+                "fecha":            t,
+                "n_bancos_activos": len(cache_activos),
+                "bancos_activos":   " / ".join(cache_activos) if cache_activos else "",
+                "peor_total":       cache_peor_total,
+            }
+            # Columna peor_B por banco (NaN si el banco no está activo ese día)
+            for b in bancos_saldo_unique:
+                fila[f"peor_B_{b}"] = (
+                    cache_peor_by_banco.get(b, float("nan"))
+                    if b in cache_activos else float("nan")
+                )
+            # Cuartos de referencia usados (legibilidad)
+            fila["cierres_referencia"] = (
+                " | ".join(f"{fc.year}-Q{fc.quarter}" for fc in prev_cierres_key)
+                if prev_cierres_key else ""
+            )
+            filas_ajuste.append(fila)
+
+        df_ajuste = pd.DataFrame(filas_ajuste)
+
+        # Ordenar columnas: fecha, métricas clave, luego peor_B por banco, luego referencia
+        cols_meta  = ["fecha", "n_bancos_activos", "bancos_activos", "peor_total"]
+        cols_banco = [c for c in df_ajuste.columns if c.startswith("peor_B_")]
+        cols_ref   = ["cierres_referencia"]
+        df_ajuste  = df_ajuste[cols_meta + sorted(cols_banco) + cols_ref]
+
+        df_ajuste.to_excel(writer, sheet_name="Ajuste_diario", index=False)
+        print(f"  + Ajuste_diario     ({len(df_ajuste):,} filas — peor_total diario)")
+
     print(f"\nArchivo generado: {ruta_out}\n")
 
 
