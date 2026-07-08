@@ -1010,6 +1010,73 @@ def exportar_saldos_retiros(
         df_ajuste.to_excel(writer, sheet_name="Ajuste_diario", index=False)
         print(f"  + Ajuste_diario     ({len(df_ajuste):,} filas — peor_total diario)")
 
+        # ── Pestaña: P95_saldo_diario ─────────────────────────────────────────
+        # Para cada día hábil: P95 del saldo por banco y por trimestre de
+        # referencia, más el p95_max usado en peor_B.  Solo cambia al cruzar
+        # un cierre trimestral → mismo caché que Ajuste_diario.
+
+        prev_cierres_key2: tuple = ()
+        cache_p95: dict = {}   # {banco: {etiqueta_trim: p95_valor, "p95_max": valor}}
+
+        filas_p95: list[dict] = []
+
+        for t in calendario:
+            cierres_t = tuple(
+                fc for fc in todos_cierres if fc < t
+            )[-N_TRIMESTRES_LOOKBACK:]
+
+            if cierres_t != prev_cierres_key2:
+                prev_cierres_key2 = cierres_t
+                cache_p95 = {}
+                if len(cierres_t) >= 2:
+                    for b in bancos_saldo_unique:
+                        vals: dict[str, float] = {}
+                        p95_list: list[float] = []
+                        for fc in cierres_t:
+                            etq = f"{fc.year}-Q{fc.quarter}"
+                            mask = (
+                                (df_saldo.index.year  == fc.year) &
+                                (df_saldo.index.month == fc.month)
+                            )
+                            s = df_saldo.loc[mask, b].dropna()
+                            if not s.empty and float(s.max()) > 0:
+                                p95_val = float(s.quantile(0.95))
+                                vals[etq]  = p95_val
+                                p95_list.append(p95_val)
+                            else:
+                                vals[etq] = float("nan")
+                        vals["p95_max"] = max(p95_list) if p95_list else float("nan")
+                        cache_p95[b] = vals
+
+            fila_p95: dict = {
+                "fecha":              t,
+                "cierres_referencia": (
+                    " | ".join(f"{fc.year}-Q{fc.quarter}" for fc in prev_cierres_key2)
+                    if prev_cierres_key2 else ""
+                ),
+            }
+            for b in bancos_saldo_unique:
+                info_b = cache_p95.get(b, {})
+                # p95 por cada trimestre de referencia
+                for fc in prev_cierres_key2:
+                    etq = f"{fc.year}-Q{fc.quarter}"
+                    fila_p95[f"p95_{b}_{etq}"] = info_b.get(etq, float("nan"))
+                # máximo entre trimestres (input de peor_B)
+                fila_p95[f"p95_max_{b}"] = info_b.get("p95_max", float("nan"))
+            filas_p95.append(fila_p95)
+
+        df_p95 = pd.DataFrame(filas_p95)
+
+        # Ordenar columnas: fecha, referencia, luego p95_max por banco, luego detalle
+        cols_hdr    = ["fecha", "cierres_referencia"]
+        cols_max    = sorted(c for c in df_p95.columns if c.startswith("p95_max_"))
+        cols_det    = sorted(c for c in df_p95.columns
+                             if c not in cols_hdr and c not in cols_max)
+        df_p95 = df_p95[cols_hdr + cols_max + cols_det]
+
+        df_p95.to_excel(writer, sheet_name="P95_saldo_diario", index=False)
+        print(f"  + P95_saldo_diario  ({len(df_p95):,} filas — P95 por banco y trimestre)")
+
     print(f"\nArchivo generado: {ruta_out}\n")
 
 
