@@ -25,16 +25,18 @@ Lógica en 3 pasos
 Paso 1 — Detección
     Para cada banco B y cada uno de los últimos N cierres trimestrales:
         ratio[B,q] = |retiro_7dh[B,q]| / saldo_max_mes[B,q]
-    El banco activa la estrategia si ratio[B, último trimestre] > UMBRAL_ACTIVACION.
+    El banco contribuye al ajuste si ratio[B,q] > UMBRAL_ACTIVACION en AL MENOS UNO
+    de los últimos N cierres ("alguna_vez_activa").
+    "activa" (último trimestre > umbral) se reporta también para diagnóstico.
 
 Paso 2 — Peor retiro potencial por banco
-    Solo para bancos activos:
+    Para bancos con alguna_vez_activa = True:
         worst_ratio_B = max(ratio[B,q]) sobre cierres donde estrategia estuvo activa
         max_saldo_B   = max(saldo_max_mes[B,q]) sobre los últimos N cierres (sin filtro)
         peor_B        = worst_ratio_B × max_saldo_B × (1 + FACTOR_SEGURIDAD)
 
 Paso 3 — Factor multiplicativo y ajuste
-    peor_total = Σ peor_B   (bancos activos)
+    peor_total = Σ peor_B   (bancos con alguna_vez_activa)
     f          = peor_total / |Q01_h_cierre|
     Si f > 1 → Q_adj[τ, h_cierre] = Q[τ, h_cierre] × f
     Aplica de forma simétrica a todos los cuantiles y la mediana.
@@ -309,9 +311,11 @@ def detectar_bancos_activos(
     Evalúa la estrategia de sobreencaje para cada banco.
 
     Retorna:
-        {col_saldo: {"activa": bool, "ratios": {fecha_cierre: ratio}}}
+        {col_saldo: {"activa": bool, "alguna_vez_activa": bool,
+                     "ratios": {fecha_cierre: ratio}}}
 
-    "activa" = True si ratio en el ÚLTIMO cierre > umbral.
+    "activa"           = True si ratio en el ÚLTIMO cierre > umbral.
+    "alguna_vez_activa"= True si ratio > umbral en AL MENOS UNO de los cierres.
     """
     resultado: dict[str, dict] = {}
     for col in bancos_saldo:
@@ -322,8 +326,10 @@ def detectar_bancos_activos(
             r = _ratio_banco_cierre(df_saldo, df_flujos, col, fc, calendario, n_dh)
             if r is not None:
                 ratios[fc] = r
-        activa = bool(ratios.get(max(ratios), 0) > umbral) if ratios else False
-        resultado[col] = {"activa": activa, "ratios": ratios}
+        activa           = bool(ratios.get(max(ratios), 0) > umbral) if ratios else False
+        alguna_vez_activa = any(r > umbral for r in ratios.values())
+        resultado[col] = {"activa": activa, "alguna_vez_activa": alguna_vez_activa,
+                          "ratios": ratios}
     return resultado
 
 
@@ -469,13 +475,13 @@ def aplicar_overlay_preds(
     df_saldo, df_flujos, bancos_saldo, cierres, calendario = resultado
 
     det = detectar_bancos_activos(df_saldo, df_flujos, bancos_saldo, cierres, calendario)
-    bancos_activos = [b for b, info in det.items() if info["activa"]]
+    bancos_activos = [b for b, info in det.items() if info["alguna_vez_activa"]]
 
     if not bancos_activos:
-        logger.info("[OVERLAY] Sin bancos con estrategia activa — sin ajuste")
+        logger.info("[OVERLAY] Sin bancos con estrategia activa (ningún trimestre) — sin ajuste")
         return preds
 
-    logger.info(f"[OVERLAY] Bancos activos ({len(bancos_activos)}): {bancos_activos}")
+    logger.info(f"[OVERLAY] Bancos con estrategia en algún trimestre ({len(bancos_activos)}): {bancos_activos}")
 
     peor_total = sum(_peor_B(df_saldo, det, b, cierres) for b in bancos_activos)
     logger.info(f"[OVERLAY] peor_total = {peor_total:,.1f}")
@@ -673,7 +679,8 @@ def _diagnostico(
         for fc in cierres_hist:
             col_name = f"{fc.year}-Q{fc.quarter}"
             fila[col_name] = info["ratios"].get(fc)
-        fila["activa_ultimo_trim"] = info["activa"]
+        fila["activa_ultimo_trim"]  = info["activa"]
+        fila["alguna_vez_activa"]   = info["alguna_vez_activa"]
         filas_ratios.append(fila)
     df_ratios = pd.DataFrame(filas_ratios)
 
@@ -687,7 +694,9 @@ def _diagnostico(
     print(header)
     print(f"  {'─'*35} {'─'*12}   {'─'*40}")
     for banco, info in sorted(det.items()):
-        estado = "ACTIVO  ✓" if info["activa"] else "inactivo"
+        estado = ("ACTIVO  ✓" if info["activa"]
+                  else "hist ✓   " if info["alguna_vez_activa"]
+                  else "inactivo")
         ratios_str = "   ".join(
             f"{info['ratios'].get(fc, float('nan')):.0%}" if fc in info["ratios"] else "  N/D "
             for fc in cierres_n
@@ -695,7 +704,7 @@ def _diagnostico(
         print(f"  {banco:<35} {estado:>12}   {ratios_str}")
 
     # ── 6. Resumen peor_B ─────────────────────────────────────────────────────
-    bancos_activos = [b for b, info in det.items() if info["activa"]]
+    bancos_activos = [b for b, info in det.items() if info["alguna_vez_activa"]]
     peor_total = sum(_peor_B(df_saldo, det, b, cierres_n) for b in bancos_activos)
 
     filas_resumen: list[dict] = []
@@ -710,24 +719,26 @@ def _diagnostico(
             if not s.empty:
                 saldos_mx.append(float(s.max()))
         max_sal = max(saldos_mx) if saldos_mx else None
-        pb = _peor_B(df_saldo, det, b, cierres_n) if info["activa"] else 0.0
+        pb = _peor_B(df_saldo, det, b, cierres_n) if info["alguna_vez_activa"] else 0.0
         filas_resumen.append({
-            "banco":          b,
-            "activa":         info["activa"],
-            "worst_ratio":    round(worst_r, 4) if worst_r is not None else None,
-            "max_saldo":      round(max_sal, 1) if max_sal is not None else None,
-            "factor_seg":     FACTOR_SEGURIDAD,
-            "peor_B":         round(pb, 1),
+            "banco":               b,
+            "activa_ultimo_trim":  info["activa"],
+            "alguna_vez_activa":   info["alguna_vez_activa"],
+            "worst_ratio":         round(worst_r, 4) if worst_r is not None else None,
+            "max_saldo":           round(max_sal, 1) if max_sal is not None else None,
+            "factor_seg":          FACTOR_SEGURIDAD,
+            "peor_B":              round(pb, 1),
         })
 
     # Fila total
     filas_resumen.append({
-        "banco":       "TOTAL (bancos activos)",
-        "activa":      True,
-        "worst_ratio": None,
-        "max_saldo":   None,
-        "factor_seg":  None,
-        "peor_B":      round(peor_total, 1),
+        "banco":               "TOTAL (bancos alguna_vez_activa)",
+        "activa_ultimo_trim":  None,
+        "alguna_vez_activa":   True,
+        "worst_ratio":         None,
+        "max_saldo":           None,
+        "factor_seg":          None,
+        "peor_B":              round(peor_total, 1),
     })
     df_resumen = pd.DataFrame(filas_resumen)
 
@@ -960,7 +971,7 @@ def exportar_saldos_retiros(
                         df_saldo, df_flujos, bancos_saldo_unique,
                         list(cierres_t), calendario,
                     )
-                    cache_activos = [b for b, info in det_t.items() if info["activa"]]
+                    cache_activos = [b for b, info in det_t.items() if info["alguna_vez_activa"]]
                     cache_peor_by_banco = {
                         b: _peor_B(df_saldo, det_t, b, list(cierres_t))
                         for b in bancos_saldo_unique
