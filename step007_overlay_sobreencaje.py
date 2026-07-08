@@ -137,7 +137,12 @@ def _cargar_saldos(ruta: Path) -> pd.DataFrame:
     """
     Lee el archivo de saldo fin del día CC + OVN.
     Formato: primera columna = fecha, columnas restantes = bancos (BANCOS_SALDOS).
-    Retorna DataFrame con index=fecha, columnas=bancos.
+
+    El archivo contiene días calendario (incluyendo sábados, domingos y feriados).
+    Se filtran solo días hábiles: lunes-viernes (dayofweek < 5) y con al menos
+    un banco con dato no-NaN (elimina feriados donde no hubo operaciones).
+
+    Retorna DataFrame con index=fechas hábiles, columnas=bancos.
     """
     raw = pd.read_excel(ruta, header=0)
     col_fecha   = raw.columns[0]
@@ -150,8 +155,14 @@ def _cargar_saldos(ruta: Path) -> pd.DataFrame:
     for c in cols_bancos:
         raw[c] = pd.to_numeric(raw[c], errors="coerce")
 
-    # Normalizar nombres: strip espacios
     raw.columns = [str(c).strip() for c in raw.columns]
+
+    # Filtro 1: excluir sábados (5) y domingos (6)
+    raw = raw[raw.index.dayofweek < 5]
+
+    # Filtro 2: excluir feriados — filas donde todos los bancos son NaN
+    raw = raw[raw.notna().any(axis=1)]
+
     return raw
 
 
