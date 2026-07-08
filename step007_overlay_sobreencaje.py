@@ -32,8 +32,8 @@ Paso 1 — Detección
 Paso 2 — Peor retiro potencial por banco
     Para bancos con alguna_vez_activa = True:
         worst_ratio_B = max(ratio[B,q]) sobre cierres donde estrategia estuvo activa
-        max_saldo_B   = max(saldo_max_mes[B,q]) sobre los últimos N cierres (sin filtro)
-        peor_B        = worst_ratio_B × max_saldo_B × (1 + FACTOR_SEGURIDAD)
+        p99_saldo_B   = max(P99_saldo_mes[B,q]) sobre los últimos N cierres (sin filtro)
+        peor_B        = worst_ratio_B × p99_saldo_B × (1 + FACTOR_SEGURIDAD)
 
 Paso 3 — Factor multiplicativo y ajuste
     peor_total = Σ peor_B   (bancos con alguna_vez_activa)
@@ -275,7 +275,7 @@ def _ratio_banco_cierre(
     n_dh: int,
 ) -> float | None:
     """
-    ratio = |retiro acumulado en ventana n_dh dh| / saldo_max del mes del cierre.
+    ratio = |retiro acumulado en ventana n_dh dh| / saldo_P99 del mes del cierre.
     """
     mask_mes = (
         (df_saldo.index.year  == fecha_cierre.year) &
@@ -288,7 +288,7 @@ def _ratio_banco_cierre(
     serie_mes = col_data.dropna()
     if serie_mes.empty or float(serie_mes.max()) <= 0:
         return None
-    saldo_max = float(serie_mes.max())
+    saldo_max = float(serie_mes.quantile(0.99))
 
     ventana     = _ventana_antes_cierre(fecha_cierre, calendario, n_dh)
     disponibles = df_flujos.index.intersection(ventana)
@@ -366,7 +366,7 @@ def _peor_B(
             s = s.iloc[:, 0]
         s = s.dropna()
         if not s.empty:
-            saldos_max.append(float(s.max()))
+            saldos_max.append(float(s.quantile(0.99)))
 
     if not saldos_max:
         return 0.0
@@ -717,7 +717,7 @@ def _diagnostico(
             mask = (df_saldo.index.year == fc.year) & (df_saldo.index.month == fc.month)
             s = df_saldo.loc[mask, b].dropna()
             if not s.empty:
-                saldos_mx.append(float(s.max()))
+                saldos_mx.append(float(s.quantile(0.99)))
         max_sal = max(saldos_mx) if saldos_mx else None
         pb = _peor_B(df_saldo, det, b, cierres_n) if info["alguna_vez_activa"] else 0.0
         filas_resumen.append({
