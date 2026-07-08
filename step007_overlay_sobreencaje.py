@@ -757,6 +757,151 @@ def _diagnostico(
     print(f"\n{sep}\n")
 
 
+###############################################################################
+# Exportación de saldos y retiros raw por banco + señal trimestral
+###############################################################################
+
+def exportar_saldos_retiros(
+    ruta_saldo: Path = RUTA_SALDO,
+    ruta_tabla: Path  = RUTA_TABLA,
+    fecha_ref: pd.Timestamp | None = None,
+    dir_output: Path = DIR_OUTPUT_DIAG,
+) -> None:
+    """
+    Genera saldos_retiros_bancos.xlsx con:
+      - Una pestaña por banco: fecha | saldo | retiro_diario | es_cierre_trim
+      - Última pestaña "Señal": banco × cierre trimestral → ratio (%) y activación
+
+    La columna es_cierre_trim marca con 1 el último día hábil de cada trimestre,
+    facilitando identificar visualmente los eventos de sobreencaje.
+    """
+    if fecha_ref is None:
+        fecha_ref = pd.Timestamp.today().normalize()
+
+    # ── Cargar datos ──────────────────────────────────────────────────────────
+    try:
+        tabla_mapeo = cargar_tabla_mapeo(ruta_tabla)
+    except Exception as e:
+        print(f"ERROR: No se pudo leer TablaSaldosRetiros.xlsx: {e}")
+        return
+
+    try:
+        df_saldo_raw = _cargar_saldos(ruta_saldo)
+    except Exception as e:
+        print(f"ERROR: No se pudo leer Saldos_CCOVN.xlsx: {e}")
+        return
+
+    cols_saldo_upper = {c.strip().upper(): c for c in df_saldo_raw.columns}
+
+    # Construir lista de bancos con su nombre en retiros y en saldos
+    bancos_info: list[dict] = []
+    for _, row in tabla_mapeo.iterrows():
+        nombre_ret = row["BANCOS_RETIROS"]
+        nombre_sal = row["BANCOS_SALDOS"]
+        col_real   = cols_saldo_upper.get(nombre_sal.strip().upper())
+        if col_real:
+            bancos_info.append({
+                "retiros": nombre_ret,
+                "saldos":  col_real,
+            })
+
+    if not bancos_info:
+        print("ERROR: Sin bancos en intersección — revisar TablaSaldosRetiros.xlsx")
+        return
+
+    bancos_saldo = [b["saldos"] for b in bancos_info]
+    df_saldo  = df_saldo_raw[bancos_saldo].copy()
+    df_flujos = df_saldo.diff()
+    calendario = pd.DatetimeIndex(df_saldo.index)
+
+    # Cierres trimestrales históricos (todos, no solo los últimos N)
+    todos_cierres = _cierres_trimestrales(calendario)
+    cierres_hist  = [fc for fc in todos_cierres if fc <= fecha_ref]
+    cierres_n     = cierres_hist[-N_TRIMESTRES_LOOKBACK:]
+
+    # Marca de cierre trimestral en el calendario
+    set_cierres = set(cierres_hist)
+
+    # Ratios históricos para todos los cierres
+    det = detectar_bancos_activos(
+        df_saldo, df_flujos, bancos_saldo, cierres_hist, calendario
+    )
+
+    # ── Exportar ──────────────────────────────────────────────────────────────
+    dir_output.mkdir(parents=True, exist_ok=True)
+    ruta_out = dir_output / "saldos_retiros_bancos.xlsx"
+
+    print(f"\nExportando {ruta_out} ...")
+
+    with pd.ExcelWriter(ruta_out, engine="openpyxl") as writer:
+
+        # ── Pestaña por banco ─────────────────────────────────────────────────
+        for info in bancos_info:
+            col_sal  = info["saldos"]
+            nom_ret  = info["retiros"]
+
+            # Nombre de hoja: usar nombre en retiros (más corto/familiar)
+            # Excel limita nombres de hoja a 31 caracteres
+            sheet = nom_ret[:31]
+
+            df_banco = pd.DataFrame({
+                "fecha":          df_saldo.index,
+                "saldo":          df_saldo[col_sal].values,
+                "retiro_diario":  df_flujos[col_sal].values,
+                "es_cierre_trim": [1 if d in set_cierres else 0
+                                   for d in df_saldo.index],
+            })
+
+            # Calcular retiro acumulado en ventana de VENTANA_RETIRO_DH dh
+            # para cada cierre trimestral (columna auxiliar de referencia)
+            retiro_cierre: list[float | None] = []
+            for fecha in df_saldo.index:
+                if fecha in set_cierres:
+                    ventana = _ventana_antes_cierre(fecha, calendario, VENTANA_RETIRO_DH)
+                    disp    = df_flujos.index.intersection(ventana)
+                    val     = float(df_flujos.loc[disp, col_sal].sum()) if not disp.empty else None
+                    retiro_cierre.append(val)
+                else:
+                    retiro_cierre.append(None)
+
+            df_banco["retiro_acum_cierre"] = retiro_cierre
+
+            df_banco.to_excel(writer, sheet_name=sheet, index=False)
+            print(f"  + {sheet:<20}  ({len(df_banco):,} filas)")
+
+        # ── Última pestaña: Señal ─────────────────────────────────────────────
+        # Filas: bancos | Columnas: cierre trimestral → ratio y activación
+        filas_senal: list[dict] = []
+        for info in bancos_info:
+            col_sal  = info["saldos"]
+            nom_ret  = info["retiros"]
+            ratios   = det.get(col_sal, {}).get("ratios", {})
+
+            fila: dict = {
+                "banco_retiros": nom_ret,
+                "banco_saldos":  col_sal,
+            }
+            for fc in cierres_hist:
+                etiqueta = f"{fc.year}-Q{fc.quarter}"
+                ratio    = ratios.get(fc)
+                fila[f"ratio_{etiqueta}"]  = round(ratio, 4) if ratio is not None else None
+                fila[f"señal_{etiqueta}"]  = (1 if ratio is not None and ratio > UMBRAL_ACTIVACION
+                                               else 0 if ratio is not None else None)
+            filas_senal.append(fila)
+
+        df_senal = pd.DataFrame(filas_senal)
+
+        # Reordenar: primero columnas de identificación, luego pares ratio/señal por cierre
+        cols_id   = ["banco_retiros", "banco_saldos"]
+        cols_trim = [c for c in df_senal.columns if c not in cols_id]
+        df_senal  = df_senal[cols_id + sorted(cols_trim)]
+
+        df_senal.to_excel(writer, sheet_name="Señal_trimestral", index=False)
+        print(f"  + Señal_trimestral  ({len(cierres_hist)} cierres históricos)")
+
+    print(f"\nArchivo generado: {ruta_out}\n")
+
+
 if __name__ == "__main__":
     logging.basicConfig(
         level=logging.INFO,
@@ -764,3 +909,4 @@ if __name__ == "__main__":
         datefmt="%H:%M:%S",
     )
     _diagnostico()
+    exportar_saldos_retiros()
