@@ -70,6 +70,13 @@ except ImportError:
     shap = None
     _SHAP_OK = False
 
+try:
+    from step007_overlay_sobreencaje import aplicar_overlay_preds as _overlay_preds
+    _OVERLAY_OK = True
+except ImportError:
+    _overlay_preds = None
+    _OVERLAY_OK = False
+
 warnings.filterwarnings("ignore", category=UserWarning)
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
@@ -246,6 +253,9 @@ CALIBRACION_PERCENTIL = 50    # percentil del residuo VAL usado como shift
 # que distorsionan el eje Y cuando el modelo tiene sesgo grande.
 # None → sin límite (el valor original antes de esta corrección)
 CALIBRACION_MAX_SHIFT_FACTOR = 0.5   # e.g. 0.5 → shift ≤ ±0.5×std_y
+
+# ── Overlay sobreencaje BBVA (step007_overlay_sobreencaje.py) ─────────────────
+OVERLAY_SOBREENCAJE = False   # True → activa ajuste multiplicativo en cierres trimestrales
 
 
 # Limita el salto máximo de cada árbol para evitar overshooting con gradientes
@@ -3052,6 +3062,21 @@ def evaluar_banco(banco: str):
                 f"h=75→{_shifts_h.get(75,0):,.0f}"
             )
         
+        # ── Overlay sobreencaje (step007) ─────────────────────────────────────
+        if OVERLAY_SOBREENCAJE and _OVERLAY_OK and _overlay_preds is not None:
+            try:
+                import step007_overlay_sobreencaje as _ov7
+                _ov7.OVERLAY_SOBREENCAJE_ACTIVO = True
+                preds_test = _overlay_preds(
+                    preds_test,
+                    h_arr=h_test,
+                    fecha_origen=pd.Timestamp(fold["test_start"]),
+                )
+            except Exception as _e_ov:
+                logger.warning(f"    [OVERLAY] Error aplicando overlay: {_e_ov}")
+        elif OVERLAY_SOBREENCAJE and not _OVERLAY_OK:
+            logger.warning("    [OVERLAY] step007_overlay_sobreencaje.py no encontrado — omitiendo")
+
         # ── Estimacion de rho_s en VAL (anti-leakage) ──────────────────────
         _rho_s_val = None
         if ESTIMAR_RHO_EN_VAL and USAR_FEATURE_REGIMEN and año_corte_regimen is not None:

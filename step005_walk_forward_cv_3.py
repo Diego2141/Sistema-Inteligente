@@ -71,6 +71,13 @@ except ImportError:
 
 _SHAP_OK = True  # XGBoost nativo pred_contribs=True siempre disponible
 
+try:
+    from step007_overlay_sobreencaje import aplicar_overlay_preds as _overlay_preds
+    _OVERLAY_OK = True
+except ImportError:
+    _overlay_preds = None
+    _OVERLAY_OK = False
+
 warnings.filterwarnings("ignore", category=UserWarning)
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
@@ -235,6 +242,16 @@ CALIBRACION_CQR  = False
 CQR_TAU_LO       = 0.05   # cuantil inferior del intervalo a calibrar
 CQR_TAU_HI       = 0.95   # cuantil superior del intervalo a calibrar
 CQR_ALPHA        = 0.10   # miscoverage objetivo: 1 − cobertura deseada (90% → 0.10)
+
+# ── Overlay sobreencaje BBVA (step007_overlay_sobreencaje.py) ─────────────────
+# True  → aplica el overlay comportamental de retiros trimestrales DESPUÉS de
+#          CQR. Usa datos de saldo CC+OVN por banco para detectar si algún banco
+#          activó la estrategia de sobreencaje y ajusta TODOS los cuantiles
+#          multiplicativamente en los horizontes de cierre trimestral.
+#          Requiere step007_overlay_sobreencaje.py en el mismo directorio y
+#          que OVERLAY_SOBREENCAJE_ACTIVO=True en ese módulo.
+# False → sin overlay (comportamiento original)
+OVERLAY_SOBREENCAJE = False
 
 
 # ── Fan chart TEST: número de snapshots por fold ──────────────────────────────
@@ -2808,6 +2825,24 @@ def evaluar_banco(banco: str):
             preds_test = aplicar_mondrian_cqr(
                 preds_val, y_val, h_val, preds_test, h_test
             )
+
+        # ── Overlay sobreencaje (step007) ─────────────────────────────────────
+        # Se aplica por fecha de origen: para cada fecha_t única en el test,
+        # recalcula el factor con los cierres históricos anteriores a esa fecha.
+        # Se usa test_start como referencia de fold para el backtest histórico.
+        if OVERLAY_SOBREENCAJE and _OVERLAY_OK and _overlay_preds is not None:
+            try:
+                import step007_overlay_sobreencaje as _ov7
+                _ov7.OVERLAY_SOBREENCAJE_ACTIVO = True
+                preds_test = _overlay_preds(
+                    preds_test,
+                    h_arr=h_test,
+                    fecha_origen=pd.Timestamp(fold["test_start"]),
+                )
+            except Exception as _e_ov:
+                logger.warning(f"    [OVERLAY] Error aplicando overlay: {_e_ov}")
+        elif OVERLAY_SOBREENCAJE and not _OVERLAY_OK:
+            logger.warning("    [OVERLAY] step007_overlay_sobreencaje.py no encontrado — omitiendo")
 
         if not SOLO_REGENERAR_PLOTS:
             row_test = calcular_metricas_fold(preds_test, y_test.values, fold, "test")
