@@ -32,7 +32,8 @@ Paso 1 — Detección
 Paso 2 — Peor retiro potencial por banco
     Para bancos con alguna_vez_activa = True:
         worst_ratio_B = max(ratio[B,q]) sobre TODOS los cierres históricos con ratio > umbral
-        p95_saldo_B   = P{PERCENTIL_SALDO} del saldo en el ÚLTIMO trimestre completo
+        p95_saldo_B   = P{PERCENTIL_SALDO} del saldo desde inicio del trimestre actual hasta fecha_ref
+                        (incluye días del trimestre anterior completo + días corridos del actual)
         peor_B        = worst_ratio_B × p95_saldo_B × (1 + FACTOR_SEGURIDAD)
 
 Paso 3 — Factor multiplicativo y ajuste
@@ -253,6 +254,11 @@ def _cierres_trimestrales(calendario: pd.DatetimeIndex) -> list[pd.Timestamp]:
     )
 
 
+def _quarter_start(fecha: pd.Timestamp) -> pd.Timestamp:
+    """Primer día del trimestre al que pertenece `fecha`."""
+    return pd.Timestamp(fecha.year, ((fecha.month - 1) // 3) * 3 + 1, 1)
+
+
 def _ventana_antes_cierre(
     fecha_cierre: pd.Timestamp,
     calendario: pd.DatetimeIndex,
@@ -343,17 +349,18 @@ def _peor_B(
     det: dict[str, dict],
     col_saldo: str,
     cierres: list[pd.Timestamp],
+    fecha_ref: pd.Timestamp,
     factor_seg: float = FACTOR_SEGURIDAD,
     umbral: float = UMBRAL_ACTIVACION,
     percentil: float = PERCENTIL_SALDO,
 ) -> float:
     """
-    peor_B = worst_ratio_B × P{percentil}_saldo_ultimo_trim × (1 + factor_seg)
+    peor_B = worst_ratio_B × P{percentil}_saldo_trim_actual × (1 + factor_seg)
 
-    worst_ratio : máximo ratio histórico sobre TODOS los cierres donde el banco
-                  usó la estrategia (cierres debe incluir todo el historial).
-    P95_saldo   : percentil del saldo durante el ÚLTIMO trimestre de referencia,
-                  mejor estimación del saldo disponible hoy para retirar.
+    worst_ratio      : máximo ratio histórico sobre TODOS los cierres donde el banco
+                       usó la estrategia (cierres debe incluir todo el historial).
+    p{percentil}_saldo: percentil del saldo desde el inicio del trimestre actual hasta
+                        fecha_ref, inclusive — captura lo disponible hoy para retirar.
     """
     ratios = det[col_saldo]["ratios"]
     ratios_activos = {fc: r for fc, r in ratios.items() if r > umbral}
@@ -362,12 +369,9 @@ def _peor_B(
 
     worst_ratio = max(ratios_activos.values())
 
-    # Saldo del último trimestre completo disponible (más representativo del presente)
-    ultimo_cierre = max(cierres)
-    mask = (
-        (df_saldo.index.year  == ultimo_cierre.year) &
-        (df_saldo.index.month == ultimo_cierre.month)
-    )
+    # Saldo del trimestre actual (inicio de trimestre → fecha_ref)
+    q_start = _quarter_start(fecha_ref)
+    mask = (df_saldo.index >= q_start) & (df_saldo.index <= fecha_ref)
     s = df_saldo.loc[mask, col_saldo]
     if isinstance(s, pd.DataFrame):
         s = s.iloc[:, 0]
@@ -488,7 +492,7 @@ def aplicar_overlay_preds(
 
     logger.info(f"[OVERLAY] Bancos con estrategia en algún trimestre ({len(bancos_activos)}): {bancos_activos}")
 
-    peor_total = sum(_peor_B(df_saldo, det, b, cierres) for b in bancos_activos)
+    peor_total = sum(_peor_B(df_saldo, det, b, cierres, fecha_ref=fecha_origen) for b in bancos_activos)
     logger.info(f"[OVERLAY] peor_total = {peor_total:,.1f}")
 
     # Mapeo h → fecha_pred usando pandas bdate_range (calendario estándar)
@@ -710,32 +714,32 @@ def _diagnostico(
 
     # ── 6. Resumen peor_B ─────────────────────────────────────────────────────
     bancos_activos = [b for b, info in det.items() if info["alguna_vez_activa"]]
-    peor_total = sum(_peor_B(df_saldo, det, b, cierres_hist) for b in bancos_activos)
+    peor_total = sum(
+        _peor_B(df_saldo, det, b, cierres_hist, fecha_ref=fecha_ref)
+        for b in bancos_activos
+    )
 
-    # P95 del saldo del último trimestre (lo que usa _peor_B)
-    ultimo_cierre_hist = cierres_hist[-1] if cierres_hist else None
+    # P95 del saldo del trimestre actual hasta fecha_ref (lo que usa _peor_B)
+    q_start_diag = _quarter_start(fecha_ref)
 
     filas_resumen: list[dict] = []
     for b in sorted(det.keys()):
         info = det[b]
         ratios_act = {fc: r for fc, r in info["ratios"].items() if r > UMBRAL_ACTIVACION}
         worst_r = max(ratios_act.values()) if ratios_act else None
-        p95_sal = None
-        if ultimo_cierre_hist is not None:
-            mask = (
-                (df_saldo.index.year  == ultimo_cierre_hist.year) &
-                (df_saldo.index.month == ultimo_cierre_hist.month)
-            )
-            s = df_saldo.loc[mask, b].dropna()
-            if not s.empty and float(s.max()) > 0:
-                p95_sal = float(s.quantile(PERCENTIL_SALDO))
-        pb = _peor_B(df_saldo, det, b, cierres_hist) if info["alguna_vez_activa"] else 0.0
+        mask_q = (df_saldo.index >= q_start_diag) & (df_saldo.index <= fecha_ref)
+        s_q    = df_saldo.loc[mask_q, b].dropna()
+        p95_sal = float(s_q.quantile(PERCENTIL_SALDO)) if not s_q.empty and float(s_q.max()) > 0 else None
+        pb = (
+            _peor_B(df_saldo, det, b, cierres_hist, fecha_ref=fecha_ref)
+            if info["alguna_vez_activa"] else 0.0
+        )
         filas_resumen.append({
             "banco":               b,
             "activa_ultimo_trim":  info["activa"],
             "alguna_vez_activa":   info["alguna_vez_activa"],
             "worst_ratio":         round(worst_r, 4) if worst_r is not None else None,
-            "p95_saldo_ultimo_trim": round(p95_sal, 1) if p95_sal is not None else None,
+            "p95_saldo_trim_actual": round(p95_sal, 1) if p95_sal is not None else None,
             "factor_seg":          FACTOR_SEGURIDAD,
             "peor_B":              round(pb, 1),
         })
@@ -746,7 +750,7 @@ def _diagnostico(
         "activa_ultimo_trim":      None,
         "alguna_vez_activa":       True,
         "worst_ratio":             None,
-        "p95_saldo_ultimo_trim":   None,
+        "p95_saldo_trim_actual":   None,
         "factor_seg":              None,
         "peor_B":              round(peor_total, 1),
     })
@@ -953,55 +957,55 @@ def exportar_saldos_retiros(
         print(f"  + Señal_trimestral  ({len(cierres_hist)} cierres históricos)")
 
         # ── Pestaña: Ajuste_diario ────────────────────────────────────────────
-        # Para cada día hábil: peor_total calculado con los últimos N cierres
-        # disponibles a esa fecha → input directo para el overlay en step005.
-        # Solo se recomputa cuando cambia el conjunto de N cierres de referencia
-        # (una vez por trimestre), lo que hace el cálculo eficiente.
-        todos_cierres_set = set(todos_cierres)
-
+        # worst_ratio se cachea por trimestre (cambia cuando hay nuevo cierre).
+        # p95_saldo usa el trimestre actual hasta t → se recalcula cada día.
         filas_ajuste: list[dict] = []
         prev_cierres_key: tuple = ()
-        cache_peor_by_banco: dict[str, float] = {}
+        cache_det_t: dict | None = None
         cache_activos: list[str] = []
-        cache_peor_total: float = float("nan")
 
         for t in calendario:
-            # Todo el historial: worst_ratio usa todos los trimestres previos
             cierres_t = tuple(fc for fc in todos_cierres if fc < t)
 
             if cierres_t != prev_cierres_key:
                 prev_cierres_key = cierres_t
                 if len(cierres_t) < 2:
-                    cache_peor_by_banco = {}
+                    cache_det_t  = None
                     cache_activos = []
-                    cache_peor_total = float("nan")
                 else:
-                    det_t = detectar_bancos_activos(
+                    cache_det_t = detectar_bancos_activos(
                         df_saldo, df_flujos, bancos_saldo_unique,
                         list(cierres_t), calendario,
                     )
-                    cache_activos = [b for b, info in det_t.items() if info["alguna_vez_activa"]]
-                    cache_peor_by_banco = {
-                        b: _peor_B(df_saldo, det_t, b, list(cierres_t))
-                        for b in bancos_saldo_unique
-                    }
-                    cache_peor_total = sum(
-                        cache_peor_by_banco.get(b, 0.0) for b in cache_activos
+                    cache_activos = [
+                        b for b, info in cache_det_t.items() if info["alguna_vez_activa"]
+                    ]
+
+            if cache_det_t is None:
+                fila: dict = {
+                    "fecha": t, "n_bancos_activos": 0,
+                    "bancos_activos": "", "peor_total": float("nan"),
+                }
+                for b in bancos_saldo_unique:
+                    fila[f"peor_B_{b}"] = float("nan")
+            else:
+                # peor_B usa p95 del trimestre actual hasta t (recálculo diario)
+                peor_by_banco = {
+                    b: _peor_B(df_saldo, cache_det_t, b, list(cierres_t), fecha_ref=t)
+                    for b in bancos_saldo_unique
+                }
+                peor_total_t = sum(peor_by_banco.get(b, 0.0) for b in cache_activos)
+                fila = {
+                    "fecha":            t,
+                    "n_bancos_activos": len(cache_activos),
+                    "bancos_activos":   " / ".join(cache_activos),
+                    "peor_total":       peor_total_t,
+                }
+                for b in bancos_saldo_unique:
+                    fila[f"peor_B_{b}"] = (
+                        peor_by_banco[b] if b in cache_activos else float("nan")
                     )
 
-            fila: dict = {
-                "fecha":            t,
-                "n_bancos_activos": len(cache_activos),
-                "bancos_activos":   " / ".join(cache_activos) if cache_activos else "",
-                "peor_total":       cache_peor_total,
-            }
-            # Columna peor_B por banco (NaN si el banco no está activo ese día)
-            for b in bancos_saldo_unique:
-                fila[f"peor_B_{b}"] = (
-                    cache_peor_by_banco.get(b, float("nan"))
-                    if b in cache_activos else float("nan")
-                )
-            # Cuartos de referencia usados (legibilidad)
             fila["cierres_referencia"] = (
                 " | ".join(f"{fc.year}-Q{fc.quarter}" for fc in prev_cierres_key)
                 if prev_cierres_key else ""
@@ -1009,8 +1013,6 @@ def exportar_saldos_retiros(
             filas_ajuste.append(fila)
 
         df_ajuste = pd.DataFrame(filas_ajuste)
-
-        # Ordenar columnas: fecha, métricas clave, luego peor_B por banco, luego referencia
         cols_meta  = ["fecha", "n_bancos_activos", "bancos_activos", "peor_total"]
         cols_banco = [c for c in df_ajuste.columns if c.startswith("peor_B_")]
         cols_ref   = ["cierres_referencia"]
@@ -1024,59 +1026,31 @@ def exportar_saldos_retiros(
         # referencia, más el p95_max usado en peor_B.  Solo cambia al cruzar
         # un cierre trimestral → mismo caché que Ajuste_diario.
 
-        prev_cierres_key2: tuple = ()
-        cache_p95: dict = {}   # {banco: {etiqueta_trim: p95_valor, "p95_max": valor}}
-
-        filas_p95: list[dict] = []
-
-        # El caché para P95_saldo_diario solo cambia cuando cambia el último
-        # trimestre de referencia (max del historial), que es el que usa _peor_B.
-        prev_cierres_key2: tuple = ()
-        cache_p95: dict = {}   # {banco: {"ultimo_trim": etq, "p95": valor}}
-
+        # P95_saldo_diario: p95 del trimestre actual hasta t — se recalcula cada día
+        # porque el trimestre actual crece a diario (igual que en _peor_B).
         filas_p95: list[dict] = []
 
         for t in calendario:
-            cierres_t = tuple(fc for fc in todos_cierres if fc < t)
-
-            if cierres_t != prev_cierres_key2:
-                prev_cierres_key2 = cierres_t
-                cache_p95 = {}
-                if len(cierres_t) >= 2:
-                    ultimo_cierre = cierres_t[-1]   # trimestre más reciente
-                    etq_ult = f"{ultimo_cierre.year}-Q{ultimo_cierre.quarter}"
-                    for b in bancos_saldo_unique:
-                        mask = (
-                            (df_saldo.index.year  == ultimo_cierre.year) &
-                            (df_saldo.index.month == ultimo_cierre.month)
-                        )
-                        s = df_saldo.loc[mask, b].dropna()
-                        if not s.empty and float(s.max()) > 0:
-                            p95_val = float(s.quantile(PERCENTIL_SALDO))
-                        else:
-                            p95_val = float("nan")
-                        cache_p95[b] = {"ultimo_trim": etq_ult, "p95": p95_val}
-
-            fila_p95: dict = {
-                "fecha": t,
-                "ultimo_trim_ref": (
-                    cache_p95[bancos_saldo_unique[0]]["ultimo_trim"]
-                    if cache_p95 else ""
-                ),
-            }
+            q_start_t = _quarter_start(t)
+            etq_act   = f"{t.year}-Q{t.quarter}"
+            fila_p95  = {"fecha": t, "trimestre_actual": etq_act}
             for b in bancos_saldo_unique:
-                info_b = cache_p95.get(b, {})
-                fila_p95[f"p95_{b}"] = info_b.get("p95", float("nan"))
+                mask = (df_saldo.index >= q_start_t) & (df_saldo.index <= t)
+                s    = df_saldo.loc[mask, b].dropna()
+                fila_p95[f"p95_{b}"] = (
+                    float(s.quantile(PERCENTIL_SALDO))
+                    if not s.empty and float(s.max()) > 0
+                    else float("nan")
+                )
             filas_p95.append(fila_p95)
 
-        df_p95 = pd.DataFrame(filas_p95)
-
-        cols_hdr  = ["fecha", "ultimo_trim_ref"]
-        cols_det  = sorted(c for c in df_p95.columns if c not in cols_hdr)
-        df_p95    = df_p95[cols_hdr + cols_det]
+        df_p95   = pd.DataFrame(filas_p95)
+        cols_hdr = ["fecha", "trimestre_actual"]
+        cols_det = sorted(c for c in df_p95.columns if c not in cols_hdr)
+        df_p95   = df_p95[cols_hdr + cols_det]
 
         df_p95.to_excel(writer, sheet_name="P95_saldo_diario", index=False)
-        print(f"  + P95_saldo_diario  ({len(df_p95):,} filas — P95 último trimestre por banco)")
+        print(f"  + P95_saldo_diario  ({len(df_p95):,} filas — P95 trim. actual por banco)")
 
     print(f"\nArchivo generado: {ruta_out}\n")
 
