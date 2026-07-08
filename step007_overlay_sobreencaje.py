@@ -524,42 +524,45 @@ def aplicar_overlay_df(
 
 
 ###############################################################################
-# Diagnóstico standalone — outliers + activación
+# Diagnóstico standalone — outliers + activación + exporta a Excel
 ###############################################################################
+
+# Ruta de salida del diagnóstico Excel
+DIR_OUTPUT_DIAG = BASE_SISTEMA / "2. Output" / "analisis_cc"
+
 
 def _diagnostico(
     ruta_saldo: Path = RUTA_SALDO,
     ruta_tabla: Path  = RUTA_TABLA,
     fecha_ref: pd.Timestamp | None = None,
+    dir_output: Path = DIR_OUTPUT_DIAG,
 ) -> None:
     """
-    Imprime:
-      1. Bancos del mapeo presentes/ausentes en Saldos_CCOVN
-      2. Outliers de saldo por banco (zscore > 4σ o IQR > 6×IQR)
-      3. Ratios históricos y bancos activos
-      4. peor_B por banco y peor_total
+    Genera el diagnóstico del overlay y lo exporta a Excel con 4 hojas:
+
+      1. Cruce        — mapeo BANCOS_RETIROS ↔ BANCOS_SALDOS con estado OK/AUSENTE
+      2. Outliers     — fechas y valores atípicos por banco (zscore > 4σ o IQR > 6×IQR)
+      3. Ratios       — ratio |retiro_7dh|/saldo_max por banco y cierre trimestral
+      4. Resumen      — bancos activos, peor_B, peor_total y parámetros del overlay
+
+    El archivo se guarda en dir_output/diag_overlay_sobreencaje.xlsx.
     """
     if fecha_ref is None:
         fecha_ref = pd.Timestamp.today().normalize()
 
     sep = "═" * 72
-
     print(f"\n{sep}")
     print(f"  Overlay Sobreencaje — Diagnóstico  ({fecha_ref.date()})")
     print(sep)
 
-    # ── Mapeo ────────────────────────────────────────────────────────────────
+    # ── 1. Mapeo ──────────────────────────────────────────────────────────────
     try:
-        tabla = cargar_tabla_mapeo(ruta_tabla)
+        tabla_mapeo = cargar_tabla_mapeo(ruta_tabla)
     except Exception as e:
         print(f"\n  ERROR: No se pudo leer TablaSaldosRetiros.xlsx: {e}")
         return
 
-    print(f"\n  Mapeo BANCOS_RETIROS ↔ BANCOS_SALDOS ({len(tabla)} bancos con saldo):")
-    for _, row in tabla.iterrows():
-        print(f"    {row['BANCOS_RETIROS']:<20} → {row['BANCOS_SALDOS']}")
-
-    # ── Cargar saldos ────────────────────────────────────────────────────────
+    # ── 2. Cargar saldos ──────────────────────────────────────────────────────
     try:
         df_saldo_raw = _cargar_saldos(ruta_saldo)
     except Exception as e:
@@ -568,97 +571,189 @@ def _diagnostico(
 
     print(f"\n  Saldos CC+OVN: {len(df_saldo_raw):,} filas | "
           f"{df_saldo_raw.index.min().date()} → {df_saldo_raw.index.max().date()}")
-    print(f"  Columnas en archivo ({len(df_saldo_raw.columns)}): {list(df_saldo_raw.columns)}")
 
-    # Cruce mapeo ↔ saldo
+    # ── 3. Cruce mapeo ↔ saldo ────────────────────────────────────────────────
     cols_saldo_upper = {c.strip().upper(): c for c in df_saldo_raw.columns}
     bancos_saldo: list[str] = []
-    print(f"\n  Cruce mapeo ↔ saldo:")
-    for _, row in tabla.iterrows():
-        nombre_ret  = row["BANCOS_RETIROS"]
-        nombre_sal  = row["BANCOS_SALDOS"]
-        col_real    = cols_saldo_upper.get(nombre_sal.strip().upper())
+    filas_cruce: list[dict] = []
+
+    for _, row in tabla_mapeo.iterrows():
+        nombre_ret = row["BANCOS_RETIROS"]
+        nombre_sal = row["BANCOS_SALDOS"]
+        col_real   = cols_saldo_upper.get(nombre_sal.strip().upper())
         if col_real:
             if col_real not in bancos_saldo:
                 bancos_saldo.append(col_real)
             estado = "OK"
         else:
             estado = "AUSENTE EN SALDO"
-        print(f"    {nombre_ret:<20} → {nombre_sal:<30}  [{estado}]")
+        filas_cruce.append({
+            "BANCOS_RETIROS": nombre_ret,
+            "BANCOS_SALDOS":  nombre_sal,
+            "Col_en_archivo": col_real or "",
+            "Estado":         estado,
+        })
+
+    df_cruce = pd.DataFrame(filas_cruce)
+    print(f"\n  Cruce mapeo ↔ saldo:")
+    for _, r in df_cruce.iterrows():
+        print(f"    {r['BANCOS_RETIROS']:<20} → {r['BANCOS_SALDOS']:<30}  [{r['Estado']}]")
 
     if not bancos_saldo:
         print("\n  Sin bancos en intersección — revisar nombres en TablaSaldosRetiros.xlsx")
         return
 
-    df_saldo = df_saldo_raw[bancos_saldo].copy()
+    df_saldo  = df_saldo_raw[bancos_saldo].copy()
+    df_flujos = df_saldo.diff()
+    calendario = pd.DatetimeIndex(df_saldo.index)
 
-    # ── Outliers por banco ───────────────────────────────────────────────────
+    # ── 4. Outliers por banco ─────────────────────────────────────────────────
     print(f"\n{'─'*72}")
-    print(f"  OUTLIERS DE SALDO POR BANCO (zscore > {OUTLIER_ZSCORE}σ  |  IQR > {OUTLIER_IQR}×IQR)")
+    print(f"  OUTLIERS DE SALDO (zscore > {OUTLIER_ZSCORE}σ  |  IQR > {OUTLIER_IQR}×IQR)")
     print(f"{'─'*72}")
 
-    total_outliers = 0
+    filas_outliers: list[dict] = []
     for banco in bancos_saldo:
         outs = detectar_outliers_banco(df_saldo[banco])
         if outs.empty:
             print(f"  {banco:<35}  sin outliers")
         else:
-            total_outliers += len(outs)
-            print(f"\n  {banco:<35}  {len(outs)} outliers:")
+            print(f"  {banco:<35}  {len(outs)} outlier(s):")
             for _, r in outs.iterrows():
                 metodo = ("zscore+IQR" if r["outlier_zscore"] and r["outlier_iqr"]
                           else "zscore" if r["outlier_zscore"] else "IQR")
                 print(f"    {str(r['fecha'].date()):<12}  valor={r['valor']:>12,.1f}  "
                       f"z={r['z_score']:+.1f}σ  [{metodo}]")
+                filas_outliers.append({
+                    "banco":          banco,
+                    "fecha":          r["fecha"],
+                    "valor":          r["valor"],
+                    "z_score":        round(r["z_score"], 2),
+                    "outlier_zscore": r["outlier_zscore"],
+                    "outlier_iqr":    r["outlier_iqr"],
+                    "metodo":         metodo,
+                })
 
-    print(f"\n  Total outliers detectados: {total_outliers}")
+    df_outliers = pd.DataFrame(filas_outliers) if filas_outliers else pd.DataFrame(
+        columns=["banco", "fecha", "valor", "z_score", "outlier_zscore", "outlier_iqr", "metodo"]
+    )
+    print(f"\n  Total outliers: {len(df_outliers)}")
 
-    # ── Activación de estrategia ─────────────────────────────────────────────
-    df_flujos  = df_saldo.diff()
-    calendario = pd.DatetimeIndex(df_saldo.index)
-
+    # ── 5. Ratios históricos ──────────────────────────────────────────────────
     todos_cierres = _cierres_trimestrales(calendario)
-    cierres = [fc for fc in todos_cierres if fc < fecha_ref][-N_TRIMESTRES_LOOKBACK:]
+    # Para el diagnóstico usar TODOS los cierres históricos (no solo los últimos N)
+    cierres_hist  = [fc for fc in todos_cierres if fc < fecha_ref]
+    cierres_n     = cierres_hist[-N_TRIMESTRES_LOOKBACK:]   # últimos N para el overlay
 
+    det = detectar_bancos_activos(df_saldo, df_flujos, bancos_saldo, cierres_hist, calendario)
+
+    # Tabla pivot: banco × cierre → ratio
+    filas_ratios: list[dict] = []
+    for banco, info in sorted(det.items()):
+        fila: dict = {"banco": banco}
+        for fc in cierres_hist:
+            col_name = f"{fc.year}-Q{fc.quarter}"
+            fila[col_name] = info["ratios"].get(fc)
+        fila["activa_ultimo_trim"] = info["activa"]
+        filas_ratios.append(fila)
+    df_ratios = pd.DataFrame(filas_ratios)
+
+    # Consola: solo últimos N cierres
     print(f"\n{'─'*72}")
-    print(f"  DETECCIÓN DE ESTRATEGIA — últimos {N_TRIMESTRES_LOOKBACK} cierres trimestrales")
+    print(f"  RATIOS |retiro_7dh|/saldo_max — últimos {N_TRIMESTRES_LOOKBACK} cierres")
     print(f"{'─'*72}")
-    for fc in cierres:
-        print(f"  {fc.date()}")
-
-    det = detectar_bancos_activos(df_saldo, df_flujos, bancos_saldo, cierres, calendario)
-
-    print(f"\n  {'Banco (saldo)':<35} {'Estado':>12}   Ratios por cierre trimestral")
-    print(f"  {'─'*35} {'─'*12}   {'─'*35}")
+    header = f"  {'Banco':<35} {'Estado':>12}   " + "   ".join(
+        f"{fc.year}-Q{fc.quarter}" for fc in cierres_n
+    )
+    print(header)
+    print(f"  {'─'*35} {'─'*12}   {'─'*40}")
     for banco, info in sorted(det.items()):
         estado = "ACTIVO  ✓" if info["activa"] else "inactivo"
-        ratios_str = "  ".join(
-            f"{fc.year}-Q{fc.quarter}: {r:.0%}"
-            for fc, r in sorted(info["ratios"].items())
+        ratios_str = "   ".join(
+            f"{info['ratios'].get(fc, float('nan')):.0%}" if fc in info["ratios"] else "  N/D "
+            for fc in cierres_n
         )
         print(f"  {banco:<35} {estado:>12}   {ratios_str}")
 
-    # ── peor_B y peor_total ─────────────────────────────────────────────────
+    # ── 6. Resumen peor_B ─────────────────────────────────────────────────────
     bancos_activos = [b for b, info in det.items() if info["activa"]]
-    peor_total = sum(_peor_B(df_saldo, det, b, cierres) for b in bancos_activos)
+    peor_total = sum(_peor_B(df_saldo, det, b, cierres_n) for b in bancos_activos)
 
+    filas_resumen: list[dict] = []
+    for b in sorted(det.keys()):
+        info = det[b]
+        ratios_act = {fc: r for fc, r in info["ratios"].items() if r > UMBRAL_ACTIVACION}
+        worst_r = max(ratios_act.values()) if ratios_act else None
+        saldos_mx = []
+        for fc in cierres_n:
+            mask = (df_saldo.index.year == fc.year) & (df_saldo.index.month == fc.month)
+            s = df_saldo.loc[mask, b].dropna()
+            if not s.empty:
+                saldos_mx.append(float(s.max()))
+        max_sal = max(saldos_mx) if saldos_mx else None
+        pb = _peor_B(df_saldo, det, b, cierres_n) if info["activa"] else 0.0
+        filas_resumen.append({
+            "banco":          b,
+            "activa":         info["activa"],
+            "worst_ratio":    round(worst_r, 4) if worst_r is not None else None,
+            "max_saldo":      round(max_sal, 1) if max_sal is not None else None,
+            "factor_seg":     FACTOR_SEGURIDAD,
+            "peor_B":         round(pb, 1),
+        })
+
+    # Fila total
+    filas_resumen.append({
+        "banco":       "TOTAL (bancos activos)",
+        "activa":      True,
+        "worst_ratio": None,
+        "max_saldo":   None,
+        "factor_seg":  None,
+        "peor_B":      round(peor_total, 1),
+    })
+    df_resumen = pd.DataFrame(filas_resumen)
+
+    # Hoja de parámetros
+    df_params = pd.DataFrame([
+        {"parametro": "fecha_ref",                  "valor": str(fecha_ref.date())},
+        {"parametro": "OVERLAY_SOBREENCAJE_ACTIVO", "valor": str(OVERLAY_SOBREENCAJE_ACTIVO)},
+        {"parametro": "UMBRAL_ACTIVACION",          "valor": f"{UMBRAL_ACTIVACION:.0%}"},
+        {"parametro": "N_TRIMESTRES_LOOKBACK",      "valor": str(N_TRIMESTRES_LOOKBACK)},
+        {"parametro": "VENTANA_RETIRO_DH",          "valor": str(VENTANA_RETIRO_DH)},
+        {"parametro": "FACTOR_SEGURIDAD",           "valor": f"{FACTOR_SEGURIDAD:.0%}"},
+        {"parametro": "OUTLIER_ZSCORE",             "valor": str(OUTLIER_ZSCORE)},
+        {"parametro": "OUTLIER_IQR",                "valor": str(OUTLIER_IQR)},
+        {"parametro": "peor_total",                 "valor": f"{peor_total:,.1f}"},
+        {"parametro": "bancos_activos",             "valor": ", ".join(bancos_activos) or "ninguno"},
+    ])
+
+    # Consola: resumen final
     print(f"\n{'─'*72}")
-    print(f"  PEOR RETIRO POTENCIAL (bancos activos)")
+    print(f"  RESUMEN — peor retiro potencial por banco activo")
     print(f"{'─'*72}")
     for b in bancos_activos:
-        pb = _peor_B(df_saldo, det, b, cierres)
+        pb = _peor_B(df_saldo, det, b, cierres_n)
         print(f"  {b:<35}  {pb:>14,.1f}")
     if bancos_activos:
         print(f"  {'─'*35}  {'─'*14}")
-        print(f"  {'peor_total':35}  {peor_total:>14,.1f}")
+        print(f"  {'TOTAL':35}  {peor_total:>14,.1f}")
 
-    print(f"\n  Parámetros activos:")
-    print(f"    OVERLAY_SOBREENCAJE_ACTIVO = {OVERLAY_SOBREENCAJE_ACTIVO}")
-    print(f"    UMBRAL_ACTIVACION          = {UMBRAL_ACTIVACION:.0%}")
-    print(f"    N_TRIMESTRES_LOOKBACK      = {N_TRIMESTRES_LOOKBACK}")
-    print(f"    VENTANA_RETIRO_DH          = {VENTANA_RETIRO_DH} dh")
-    print(f"    FACTOR_SEGURIDAD           = {FACTOR_SEGURIDAD:.0%}")
-    print(f"    OUTLIER_ZSCORE / IQR       = {OUTLIER_ZSCORE} / {OUTLIER_IQR}")
+    # ── 7. Exportar a Excel ───────────────────────────────────────────────────
+    dir_output.mkdir(parents=True, exist_ok=True)
+    ruta_out = dir_output / "diag_overlay_sobreencaje.xlsx"
+
+    with pd.ExcelWriter(ruta_out, engine="openpyxl") as writer:
+        df_cruce.to_excel(writer, sheet_name="1_Cruce", index=False)
+        df_outliers.to_excel(writer, sheet_name="2_Outliers", index=False)
+        df_ratios.to_excel(writer, sheet_name="3_Ratios", index=False)
+        df_resumen.to_excel(writer, sheet_name="4_Resumen", index=False)
+        df_params.to_excel(writer, sheet_name="5_Parametros", index=False)
+
+        # Hoja de saldos completos (una columna por banco, index=fecha)
+        df_saldo.reset_index().rename(columns={"fecha": "fecha"}).to_excel(
+            writer, sheet_name="Saldos_raw", index=False
+        )
+
+    print(f"\n  Excel exportado: {ruta_out}")
     print(f"\n{sep}\n")
 
 
