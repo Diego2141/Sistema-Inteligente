@@ -268,8 +268,12 @@ def _ratio_banco_cierre(
         (df_saldo.index.year  == fecha_cierre.year) &
         (df_saldo.index.month == fecha_cierre.month)
     )
-    serie_mes = df_saldo.loc[mask_mes, col_saldo].dropna()
-    if serie_mes.empty or serie_mes.max() <= 0:
+    col_data  = df_saldo.loc[mask_mes, col_saldo]
+    # Si hay columnas duplicadas, loc devuelve DataFrame — tomar la primera columna
+    if isinstance(col_data, pd.DataFrame):
+        col_data = col_data.iloc[:, 0]
+    serie_mes = col_data.dropna()
+    if serie_mes.empty or float(serie_mes.max()) <= 0:
         return None
     saldo_max = float(serie_mes.max())
 
@@ -340,7 +344,10 @@ def _peor_B(
             (df_saldo.index.year  == fc.year) &
             (df_saldo.index.month == fc.month)
         )
-        s = df_saldo.loc[mask, col_saldo].dropna()
+        s = df_saldo.loc[mask, col_saldo]
+        if isinstance(s, pd.DataFrame):
+            s = s.iloc[:, 0]
+        s = s.dropna()
         if not s.empty:
             saldos_max.append(float(s.max()))
 
@@ -809,8 +816,9 @@ def exportar_saldos_retiros(
         print("ERROR: Sin bancos en intersección — revisar TablaSaldosRetiros.xlsx")
         return
 
-    bancos_saldo = [b["saldos"] for b in bancos_info]
-    df_saldo  = df_saldo_raw[bancos_saldo].copy()
+    # Columnas únicas para el DataFrame (FINANCIERO y PICHINCHA → misma col BANCO PICHINCHA)
+    bancos_saldo_unique = list(dict.fromkeys(b["saldos"] for b in bancos_info))
+    df_saldo  = df_saldo_raw[bancos_saldo_unique].copy()
     df_flujos = df_saldo.diff()
     calendario = pd.DatetimeIndex(df_saldo.index)
 
@@ -822,9 +830,9 @@ def exportar_saldos_retiros(
     # Marca de cierre trimestral en el calendario
     set_cierres = set(cierres_hist)
 
-    # Ratios históricos para todos los cierres
+    # Ratios históricos para todos los cierres (usar lista única)
     det = detectar_bancos_activos(
-        df_saldo, df_flujos, bancos_saldo, cierres_hist, calendario
+        df_saldo, df_flujos, bancos_saldo_unique, cierres_hist, calendario
     )
 
     # ── Exportar ──────────────────────────────────────────────────────────────
