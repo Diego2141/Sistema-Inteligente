@@ -658,9 +658,10 @@ def _diagnostico(
     print(f"\n  Total outliers: {len(df_outliers)}")
 
     # ── 5. Ratios históricos ──────────────────────────────────────────────────
-    todos_cierres = _cierres_trimestrales(calendario)
+    todos_cierres  = _cierres_trimestrales(calendario)
     # Para el diagnóstico usar TODOS los cierres históricos (no solo los últimos N)
-    cierres_hist  = [fc for fc in todos_cierres if fc < fecha_ref]
+    fecha_max_data = df_saldo.index.max()
+    cierres_hist   = [fc for fc in todos_cierres if fc <= min(fecha_ref, fecha_max_data)]
     cierres_n     = cierres_hist[-N_TRIMESTRES_LOOKBACK:]   # últimos N para el overlay
 
     det = detectar_bancos_activos(df_saldo, df_flujos, bancos_saldo, cierres_hist, calendario)
@@ -844,9 +845,10 @@ def exportar_saldos_retiros(
     calendario = pd.DatetimeIndex(df_saldo.index)
 
     # Cierres trimestrales históricos (todos, no solo los últimos N)
-    todos_cierres = _cierres_trimestrales(calendario)
-    cierres_hist  = [fc for fc in todos_cierres if fc <= fecha_ref]
-    cierres_n     = cierres_hist[-N_TRIMESTRES_LOOKBACK:]
+    todos_cierres  = _cierres_trimestrales(calendario)
+    fecha_max_data = df_saldo.index.max()
+    cierres_hist   = [fc for fc in todos_cierres if fc <= min(fecha_ref, fecha_max_data)]
+    cierres_n      = cierres_hist[-N_TRIMESTRES_LOOKBACK:]
 
     # Marca de cierre trimestral en el calendario
     set_cierres = set(cierres_hist)
