@@ -58,6 +58,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
