@@ -43,12 +43,25 @@ Paso 3 -- Factor multiplicativo y ajuste
     Aplica de forma simétrica a todos los cuantiles y la mediana.
     Solo afecta horizontes h que correspondan a un cierre trimestral.
 
-Uso desde step005 (walk-forward, multiples origenes)
-----------------------------------------------------
-    from step007_overlay_sobreencaje import aplicar_overlay_preds
+Arquitectura
+------------
+step007 calcula el ajuste (peor_total); step005 aplica el factor.
 
-    # Justo despues de denormalizar las predicciones del fold:
-    preds_test = aplicar_overlay_preds(preds_test, h_test, fechas_t_test)
+Uso en step005
+--------------
+    from step007_overlay_sobreencaje import get_peor_total, OVERLAY_SOBREENCAJE_ACTIVO
+
+    peor_total, fecha_cierre = get_peor_total(fecha_origen)  # 0.0, None si sin bancos activos
+    if peor_total > 0:
+        # Localizar el h del primer cierre en el array de horizontes
+        bh = pd.bdate_range(start=fecha_origen + BDay(1), periods=75)
+        h_cierre = int(np.where(bh == fecha_cierre)[0][0]) + 1
+        idx = np.where(h_arr == h_cierre)[0]
+        q01_cierre = float(preds[0.01][idx[0]]) if len(idx) else float(preds[0.01][-1])
+        f = peor_total / abs(q01_cierre) if q01_cierre < 0 else 1.0
+        if f > 1.0:
+            # Factor uniforme para toda la ventana de proyeccion
+            preds = {tau: arr * f for tau, arr in preds.items()}
 
 Uso desde step006 / postproceso (DataFrame con fecha_t, h, q01..q99)
 ----------------------------------------------------------------------
@@ -493,7 +506,78 @@ def _preparar_datos(
 
 
 ###############################################################################
-# Función principal -- formato dict {tau: array}  (uso desde step005)
+# Interfaz pública principal -- step005 llama a esta función
+###############################################################################
+
+def get_peor_total(
+    fecha_origen: pd.Timestamp,
+    h_max: int = 75,
+    ruta_saldo: Path = RUTA_SALDO,
+    ruta_tabla: Path  = RUTA_TABLA,
+) -> tuple[float, pd.Timestamp | None]:
+    """
+    Calcula el peor retiro potencial del sistema para una fecha de origen dada.
+
+    Retorna (peor_total, fecha_primer_cierre):
+      - peor_total       : magnitud del retiro esperado (M USD).  0.0 si no aplica ajuste.
+      - fecha_primer_cierre: primer cierre trimestral dentro del horizonte h_max.
+                            None si no hay cierre en el horizonte o no aplica ajuste.
+
+    El ajuste se referencia al PRIMER cierre trimestral proyectado, que es cuando
+    se produce el retiro de sobreencaje.  step005 usa fecha_primer_cierre para
+    localizar el h correspondiente y obtener el Q01 de referencia:
+
+        peor_total, fecha_cierre = get_peor_total(fecha_origen)
+        if peor_total > 0:
+            # Encontrar el h donde cae el primer cierre
+            bh = pd.bdate_range(start=fecha_origen + BDay(1), periods=h_max)
+            h_cierre = int(np.where(bh == fecha_cierre)[0][0]) + 1
+            idx_cierre = np.where(h_arr == h_cierre)[0]
+            q01_cierre = float(preds[0.01][idx_cierre[0]]) if len(idx_cierre) else float(preds[0.01][-1])
+            f = peor_total / abs(q01_cierre) if q01_cierre < 0 else 1.0
+            if f > 1.0:
+                preds = {tau: arr * f for tau, arr in preds.items()}  # uniforme en todos los h
+    """
+    if not OVERLAY_SOBREENCAJE_ACTIVO:
+        return 0.0, None
+
+    resultado = _preparar_datos(ruta_saldo, ruta_tabla, fecha_origen)
+    if resultado is None:
+        return 0.0, None
+
+    df_saldo, df_flujos, bancos_saldo, cierres, calendario = resultado
+
+    # Primer cierre trimestral dentro del horizonte de proyeccion
+    # (75dh ~ 3.4 meses > 1 trimestre, asi que siempre existe al menos uno)
+    bh_futuro = pd.bdate_range(
+        start=fecha_origen + pd.offsets.BDay(1),
+        periods=h_max,
+    )
+    fecha_primer_cierre = _cierres_trimestrales(pd.DatetimeIndex(bh_futuro))[0]
+
+    # Deteccion de bancos activos
+    det = detectar_bancos_activos(
+        df_saldo, df_flujos, bancos_saldo, cierres, calendario,
+        cierres_lookback=cierres[-N_TRIMESTRES_LOOKBACK:],
+    )
+    activos = [b for b, info in det.items() if info["alguna_vez_activa"]]
+    if not activos:
+        logger.info(f"[OVERLAY] {fecha_origen.date()}: sin bancos activos -- sin ajuste")
+        return 0.0, None
+
+    peor_total = sum(
+        _peor_B(df_saldo, det, b, cierres, fecha_ref=fecha_origen)
+        for b in activos
+    )
+    logger.info(
+        f"[OVERLAY] {fecha_origen.date()} | primer cierre: {fecha_primer_cierre.date()} | "
+        f"bancos={activos} | peor_total={peor_total:,.0f}"
+    )
+    return peor_total, fecha_primer_cierre
+
+
+###############################################################################
+# Función auxiliar -- formato dict {tau: array}  (uso desde step005/step006)
 ###############################################################################
 
 def aplicar_overlay_preds(
