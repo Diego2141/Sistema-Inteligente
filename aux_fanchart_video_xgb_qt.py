@@ -395,11 +395,16 @@ def _cargar_ajuste_overlay() -> "pd.DataFrame | None":
 
 
 def _aplicar_overlay_frame(res: "pd.DataFrame", fecha_origen: "pd.Timestamp",
-                           df_aj: "pd.DataFrame") -> "pd.DataFrame":
+                           df_aj: "pd.DataFrame",
+                           df_base: "pd.DataFrame | None" = None) -> "pd.DataFrame":
     """
     Aplica el factor multiplicativo de sobreencaje a un frame de predicciones.
     res: DataFrame con columnas q01, q05, q50, q95, q99 (y opcionalmente mean).
     Modifica en raw units (antes de /1e6).
+
+    peor_total actua como tope: los retiros ya realizados en la ventana de 7dh
+    antes del cierre se descuentan del cap (netting). A medida que los retiros
+    se materializan, el margen restante disminuye y el factor se estabiliza.
     """
     disponibles = df_aj.index[df_aj.index <= fecha_origen]
     if len(disponibles) == 0:
@@ -433,6 +438,25 @@ def _aplicar_overlay_frame(res: "pd.DataFrame", fecha_origen: "pd.Timestamp",
 
     h_inicio = max(1, h_cierre - OVERLAY_VENTANA_DH + 1)
 
+    # -- Netting: descontar retiros ya realizados en la ventana de 7dh ---------
+    fecha_inicio_ventana_real = fecha_cierre - pd.offsets.BDay(OVERLAY_VENTANA_DH - 1)
+    retiro_realizado = 0.0
+    if df_base is not None and fecha_inicio_ventana_real <= fecha_origen:
+        past_days = pd.bdate_range(start=fecha_inicio_ventana_real, end=fecha_origen)
+        for _d in past_days:
+            _d_prev = _d - pd.offsets.BDay(1)
+            _rows = df_base[(df_base["fecha_t"] == _d_prev) & (df_base["h"] == 1)]
+            if not _rows.empty:
+                _flow = float(_rows["target"].values[0])
+                if _flow < 0:
+                    retiro_realizado += abs(_flow)
+
+    peor_restante = max(0.0, peor_total - retiro_realizado)
+    if peor_restante < 1e-6:
+        print(f"  [OVERLAY] {fecha_origen.date()} | cap consumido "
+              f"(realizados={retiro_realizado:,.0f} >= peor={peor_total:,.0f}) -- sin ajuste")
+        return res
+
     # Columna de referencia para el denominador
     q_col = f"q{int(OVERLAY_TAU_REFERENCIA * 100):02d}"
     if q_col not in res.columns:
@@ -448,7 +472,7 @@ def _aplicar_overlay_frame(res: "pd.DataFrame", fecha_origen: "pd.Timestamp",
     if q_acum >= 0 or abs(q_acum) < 1e-6:
         return res
 
-    f = peor_total / abs(q_acum)
+    f = peor_restante / abs(q_acum)
     if f <= 1.0:
         return res
 
@@ -461,7 +485,8 @@ def _aplicar_overlay_frame(res: "pd.DataFrame", fecha_origen: "pd.Timestamp",
 
     print(f"  [OVERLAY] {fecha_origen.date()} | cierre: {fecha_cierre.date()} "
           f"h=[{h_inicio},{h_cierre}] | {q_col}_acum={q_acum:+.0f} | "
-          f"peor_total={peor_total:,.0f} | f={f:.3f}")
+          f"peor={peor_total:,.0f} | realiz={retiro_realizado:,.0f} | "
+          f"restante={peor_restante:,.0f} | f={f:.3f}")
     return res
 
 
@@ -513,7 +538,7 @@ def precomputar(df, medianas, cols_num, cols_feat, modelos, fechas_validas,
         res  = predecir_fecha(df_frame, fecha_origen, medianas_frame,
                               cols_num, cols_feat, modelos_frame)
         if OVERLAY_SOBREENCAJE and df_ajuste is not None:
-            res = _aplicar_overlay_frame(res, fecha_origen, df_ajuste)
+            res = _aplicar_overlay_frame(res, fecha_origen, df_ajuste, df_frame)
         hs   = res["h"].values
         real = res["target"].values / 1e6
         mask = ~np.isnan(real)

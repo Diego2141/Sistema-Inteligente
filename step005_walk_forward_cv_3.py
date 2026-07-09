@@ -2459,13 +2459,18 @@ def _aplicar_overlay_sobreencaje(
     preds: dict,
     h_arr: np.ndarray,
     fechas_t: pd.DatetimeIndex,
+    df_hist: "pd.DataFrame | None" = None,
 ) -> dict:
     """
     Lee peor_total diario desde la tab 'Ajuste_diario' del Excel de step007
     y aplica un factor multiplicativo uniforme sobre toda la ventana de proyeccion.
 
-    f = peor_total / |sum(Q[OVERLAY_TAU_REFERENCIA] en ventana de OVERLAY_VENTANA_DH
-                          dias habiles antes del primer cierre trimestral proyectado)|
+    peor_total actua como tope: los retiros ya realizados en la ventana de 7dh
+    antes del cierre se descuentan del cap (netting). Asi el factor se estabiliza
+    a medida que los retiros se materializan y el margen restante disminuye.
+
+    peor_restante = max(0, peor_total - retiros_ya_realizados_en_ventana)
+    f = peor_restante / |sum(Q[OVERLAY_TAU_REFERENCIA] en ventana)|
     """
     if not OVERLAY_SOBREENCAJE:
         return preds
@@ -2517,6 +2522,28 @@ def _aplicar_overlay_sobreencaje(
 
         h_inicio = max(1, h_cierre - OVERLAY_VENTANA_DH + 1)
 
+        # -- Netting: descontar retiros ya realizados en la ventana de 7dh ------
+        # fecha_inicio_ventana_real = primer dia del periodo de 7dh antes del cierre
+        fecha_inicio_ventana_real = fecha_cierre - pd.offsets.BDay(OVERLAY_VENTANA_DH - 1)
+        retiro_realizado = 0.0
+        if df_hist is not None and fecha_inicio_ventana_real <= fecha_t:
+            past_days = pd.bdate_range(start=fecha_inicio_ventana_real, end=fecha_t)
+            for _d in past_days:
+                _d_prev = _d - pd.offsets.BDay(1)
+                _rows = df_hist[(df_hist["fecha_t"] == _d_prev) & (df_hist["h"] == 1)]
+                if not _rows.empty:
+                    _flow = float(_rows["target"].values[0])
+                    if _flow < 0:
+                        retiro_realizado += abs(_flow)
+
+        peor_restante = max(0.0, peor_total - retiro_realizado)
+        if peor_restante < 1e-6:
+            logger.info(
+                f"[OVERLAY] {fecha_t.date()} | cap consumido "
+                f"(realizados={retiro_realizado:,.0f} >= peor={peor_total:,.0f}) -- sin ajuste"
+            )
+            continue
+
         mask_origen  = (fechas_t == fecha_t)
         mask_ventana = mask_origen & (h_arr >= h_inicio) & (h_arr <= h_cierre)
         if not mask_ventana.any():
@@ -2528,7 +2555,7 @@ def _aplicar_overlay_sobreencaje(
         if q01_acum >= 0 or abs(q01_acum) < 1e-6:
             continue
 
-        f = peor_total / abs(q01_acum)
+        f = peor_restante / abs(q01_acum)
         if f <= 1.0:
             continue
 
@@ -2538,7 +2565,8 @@ def _aplicar_overlay_sobreencaje(
         logger.info(
             f"[OVERLAY] {fecha_t.date()} | cierre: {fecha_cierre.date()} "
             f"h=[{h_inicio},{h_cierre}] | Q{int(OVERLAY_TAU_REFERENCIA*100):02d}_acum={q01_acum:+.0f} | "
-            f"peor_total={peor_total:,.0f} | f={f:.3f}"
+            f"peor={peor_total:,.0f} | realiz={retiro_realizado:,.0f} | "
+            f"restante={peor_restante:,.0f} | f={f:.3f}"
         )
 
     return preds_adj
@@ -2916,7 +2944,7 @@ def evaluar_banco(banco: str):
         # Lee peor_total desde Excel (step007) y aplica factor multiplicativo
         # uniforme sobre todo el horizonte, por fecha_t unica.
         if OVERLAY_SOBREENCAJE:
-            preds_test = _aplicar_overlay_sobreencaje(preds_test, h_test, fechas_t_test)
+            preds_test = _aplicar_overlay_sobreencaje(preds_test, h_test, fechas_t_test, df)
 
         if not SOLO_REGENERAR_PLOTS:
             row_test = calcular_metricas_fold(preds_test, y_test.values, fold, "test")
