@@ -62,13 +62,6 @@ import matplotlib.ticker as mticker
 from scipy.optimize import minimize
 
 try:
-    from step007_overlay_sobreencaje import aplicar_overlay_preds, OVERLAY_SOBREENCAJE_ACTIVO
-    _OVERLAY_OK = True
-except ImportError:
-    _OVERLAY_OK = False
-    OVERLAY_SOBREENCAJE_ACTIVO = False
-
-try:
     import lightgbm as lgb
     _LGBM_OK = True
 except ImportError:
@@ -231,6 +224,15 @@ DIAGNOSTICO_FEATURES  = True
 DIAG_BLOCK_SIZE       = 20    # filas por bloque en la permutación (preserva autocorrelación)
 DIAG_N_REPEATS        = 3     # repeticiones por feature para estabilizar la estimación
 DIAG_SHAP_MAX_SAMPLES = 800   # máximo de filas VAL para SHAP (None = todas)
+
+# ── Overlay sobreencaje (step007) ────────────────────────────────────────────
+# Requiere haber ejecutado step007 para generar saldos_retiros_bancos.xlsx.
+# El ajuste diario (peor_total) se lee desde la tab "Ajuste_diario" de ese archivo.
+OVERLAY_SOBREENCAJE_ACTIVO = False
+RUTA_AJUSTE_OVERLAY = (
+    BASE_SISTEMA / "2. Output" / "analisis_cc" / "saldos_retiros_bancos.xlsx"
+)
+OVERLAY_VENTANA_DH = 7   # dias habiles de la ventana de retiro (mismo valor que step007)
 
 # ── Comparación con Step004 en fan charts ─────────────────────────────────────
 # True  → superpone predicciones del modelo step004 (línea naranja discontinua)
@@ -2281,6 +2283,115 @@ def consolidar_diagnostico(diag_por_fold, cols_feat, banco, top_n=25):
 
 
 ###############################################################################
+###############################################################################
+# Overlay sobreencaje — aplica ajuste de step007 a las predicciones
+###############################################################################
+
+def _aplicar_overlay_sobreencaje(
+    preds: dict,
+    h_arr: np.ndarray,
+    fechas_t: pd.DatetimeIndex,
+) -> dict:
+    """
+    Aplica el overlay de sobreencaje a las predicciones del fold.
+
+    Lee peor_total diario desde la tab 'Ajuste_diario' del archivo generado
+    por step007 (ruta: RUTA_AJUSTE_OVERLAY).
+
+    Para cada fecha_t unica:
+      1. Lookup peor_total en el Excel (fecha mas reciente disponible <= fecha_t).
+      2. Localizar el primer cierre trimestral dentro del horizonte de 75dh.
+      3. Ventana de retiro: ultimos OVERLAY_VENTANA_DH dias habiles hasta el cierre.
+         h_inicio = h_cierre - OVERLAY_VENTANA_DH + 1
+      4. f = peor_total / |sum(Q01 en [h_inicio, h_cierre])|
+         (misma escala: peor_total es retiro acumulado en 7dh).
+      5. Si f > 1: aplicar f UNIFORMEMENTE a todos los horizontes de esa fecha_t.
+    """
+    if not OVERLAY_SOBREENCAJE_ACTIVO:
+        return preds
+
+    # Leer ajuste diario pre-computado por step007
+    try:
+        df_aj = pd.read_excel(
+            RUTA_AJUSTE_OVERLAY, sheet_name="Ajuste_diario",
+            index_col=0, parse_dates=True,
+        )
+        df_aj.index = pd.DatetimeIndex(df_aj.index)
+    except Exception as e:
+        logger.warning(f"[OVERLAY] No se pudo leer Ajuste_diario: {e} -- sin ajuste")
+        return preds
+
+    if "peor_total" not in df_aj.columns:
+        logger.warning("[OVERLAY] Columna peor_total no encontrada en Ajuste_diario -- sin ajuste")
+        return preds
+
+    preds_adj = {tau: arr.copy() for tau, arr in preds.items()}
+
+    for fecha_t in sorted(set(fechas_t)):
+        # Lookup peor_total: fecha mas reciente disponible en el Excel <= fecha_t
+        disponibles = df_aj.index[df_aj.index <= fecha_t]
+        if len(disponibles) == 0:
+            continue
+        peor_total = float(df_aj.loc[disponibles[-1], "peor_total"])
+        if peor_total <= 0:
+            continue
+
+        # Primer cierre trimestral dentro del horizonte de proyeccion
+        # (75dh ~ 3.4 meses > 1 trimestre -> siempre existe al menos uno)
+        bh = pd.bdate_range(
+            start=fecha_t + pd.offsets.BDay(1),
+            periods=OVERLAY_VENTANA_DH + 75,
+        )
+        df_bh = pd.DataFrame({"fecha": bh, "mes": bh.month, "anio": bh.year, "trim": bh.quarter})
+        cierres_proy = (
+            df_bh[df_bh["mes"].isin([3, 6, 9, 12])]
+            .groupby(["anio", "trim"])["fecha"].max()
+            .sort_values().tolist()
+        )
+        if not cierres_proy:
+            continue
+        fecha_cierre = cierres_proy[0]
+
+        # h del cierre (1-indexed) en el bdate_range
+        bh_list = list(bh)
+        try:
+            h_cierre = bh_list.index(fecha_cierre) + 1
+        except ValueError:
+            diffs = [abs((d - fecha_cierre).days) for d in bh_list]
+            h_cierre = diffs.index(min(diffs)) + 1
+
+        h_inicio = max(1, h_cierre - OVERLAY_VENTANA_DH + 1)
+
+        # Filas de esta fecha_t
+        mask_origen  = (fechas_t == fecha_t)
+        mask_ventana = mask_origen & (h_arr >= h_inicio) & (h_arr <= h_cierre)
+        if not mask_ventana.any():
+            h_t = h_arr[mask_origen]
+            h_fb = h_t[np.abs(h_t - h_cierre).argmin()]
+            mask_ventana = mask_origen & (h_arr == h_fb)
+
+        # Q01 acumulado en los 7dh de la ventana (misma escala que peor_total)
+        q01_acum = float(preds[0.01][mask_ventana].sum())
+        if q01_acum >= 0 or abs(q01_acum) < 1e-6:
+            continue
+
+        f = peor_total / abs(q01_acum)
+        if f <= 1.0:
+            continue
+
+        # Factor uniforme sobre todos los horizontes de esta fecha_t
+        for tau in preds_adj:
+            preds_adj[tau][mask_origen] *= f
+
+        logger.info(
+            f"[OVERLAY] {fecha_t.date()} | cierre: {fecha_cierre.date()} "
+            f"h=[{h_inicio},{h_cierre}] | Q01_acum={q01_acum:+.0f} | "
+            f"peor_total={peor_total:,.0f} | f={f:.3f}"
+        )
+
+    return preds_adj
+
+
 # PARTE 8 — Pipeline principal
 ###############################################################################
 
@@ -2554,12 +2665,11 @@ def evaluar_banco(banco: str):
             preds_test = preds_test_raw
             preds_val  = preds_val_raw
 
-        # ── Overlay sobreencaje (step007) ────────────────────────────────────
-        # Aplica un factor multiplicativo uniforme en toda la ventana de
-        # proyeccion cuando se detecta estrategia de sobreencaje activa.
-        # Controlado por OVERLAY_SOBREENCAJE_ACTIVO en step007.
-        if _OVERLAY_OK and OVERLAY_SOBREENCAJE_ACTIVO:
-            preds_test = aplicar_overlay_preds(preds_test, h_test, fechas_t_test)
+        # ── Overlay sobreencaje ───────────────────────────────────────────────
+        # Lee peor_total desde saldos_retiros_bancos.xlsx (generado por step007).
+        # Requiere OVERLAY_SOBREENCAJE_ACTIVO = True y haber ejecutado step007.
+        if OVERLAY_SOBREENCAJE_ACTIVO:
+            preds_test = _aplicar_overlay_sobreencaje(preds_test, h_test, fechas_t_test)
 
         if not SOLO_REGENERAR_PLOTS:
             row_test = calcular_metricas_fold(preds_test, y_test.values, fold, "test")
