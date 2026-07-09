@@ -1018,9 +1018,11 @@ def exportar_saldos_retiros(
                         peor_by_banco[b] if b in cache_activos else float("nan")
                     )
 
+            # Mostrar solo los últimos N_TRIMESTRES_LOOKBACK para legibilidad
+            ultimos = prev_cierres_key[-N_TRIMESTRES_LOOKBACK:]
             fila["cierres_referencia"] = (
-                " | ".join(f"{fc.year}-Q{fc.quarter}" for fc in prev_cierres_key)
-                if prev_cierres_key else ""
+                " | ".join(f"{fc.year}-Q{fc.quarter}" for fc in ultimos)
+                if ultimos else ""
             )
             filas_ajuste.append(fila)
 
