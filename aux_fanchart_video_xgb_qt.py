@@ -79,6 +79,7 @@ RUTA_AJUSTE_OVERLAY             = BASE_SISTEMA / "2. Output" / "analisis_cc" / "
 OVERLAY_VENTANA_DH              = 7      # dias habiles de la ventana de retiro
 OVERLAY_TAU_REFERENCIA          = 0.05   # quantil usado como denominador del factor
 OVERLAY_CONOCIMIENTO_ANTICIPADO = 2      # T+N: flujos conocidos con N dias habiles de antelacion
+OVERLAY_MAX_FACTOR              = 3.0   # tope del factor f; None = sin tope
 
 # Si True, el video lee las predicciones ya ajustadas que exportó step005 (parquet)
 # en lugar de predecir desde cero. Requiere haber corrido step005 con OVERLAY_SOBREENCAJE=True.
@@ -527,15 +528,21 @@ def _aplicar_overlay_frame(res: "pd.DataFrame", fecha_origen: "pd.Timestamp",
     if f <= 1.0:
         return res
 
+    f_raw = f
+    if OVERLAY_MAX_FACTOR is not None and f > OVERLAY_MAX_FACTOR:
+        f = OVERLAY_MAX_FACTOR
+
     for col in [c for c in res.columns if c.startswith("q")]:
         res[col] = res[col] * f
     if "mean" in res.columns:
         res["mean"] = res["mean"] * f
 
+    tope_msg = (f" [raw={f_raw:.1f} -> tope={OVERLAY_MAX_FACTOR}]"
+                if f_raw > f else "")
     print(f"  [OVERLAY] {fecha_origen.date()} | cierre: {fecha_cierre.date()} "
           f"h=[{h_inicio_incierto},{h_cierre}] | {q_col}_acum={q_acum:+.0f} | "
           f"peor={peor_total:,.0f} | conocidos={retiro_conocido:,.0f} | "
-          f"restante={peor_restante:,.0f} | f={f:.3f}")
+          f"restante={peor_restante:,.0f} | f={f:.3f}{tope_msg}")
     return res
 
 
