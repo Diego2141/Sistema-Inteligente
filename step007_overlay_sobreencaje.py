@@ -1099,6 +1099,160 @@ def exportar_saldos_retiros(
     print(f"\nArchivo generado: {ruta_out}\n")
 
 
+###############################################################################
+# Visualización del ajuste overlay
+###############################################################################
+
+# Paleta categórica fija (CVD-safe, slot order from dataviz skill)
+_COLORES_BANCOS = [
+    "#2a78d6",  # blue
+    "#1baf7a",  # aqua
+    "#eda100",  # yellow
+    "#008300",  # green
+    "#4a3aa7",  # violet
+    "#e34948",  # red
+    "#e87ba4",  # magenta
+    "#eb6834",  # orange
+]
+
+
+def graficar_ajuste_overlay(
+    dir_output: Path = DIR_OUTPUT_DIAG,
+    ruta_excel: Path | None = None,
+) -> None:
+    """
+    Lee Ajuste_diario de saldos_retiros_bancos.xlsx y genera dos paneles:
+      1. peor_total diario — magnitud del ajuste a lo largo del tiempo
+      2. Stacked area por banco — qué bancos impulsan el ajuste
+
+    Exporta el gráfico a DIR_OUTPUT_DIAG / "overlay_ajuste.png".
+    """
+    if ruta_excel is None:
+        ruta_excel = dir_output / "saldos_retiros_bancos.xlsx"
+
+    if not ruta_excel.exists():
+        print(f"  No se encontró {ruta_excel} — ejecuta exportar_saldos_retiros() primero")
+        return
+
+    print("Leyendo Ajuste_diario...")
+    df = pd.read_excel(ruta_excel, sheet_name="Ajuste_diario", parse_dates=["fecha"])
+    df = df.sort_values("fecha").reset_index(drop=True)
+
+    # Columnas por banco
+    cols_banco = sorted(c for c in df.columns if c.startswith("peor_B_"))
+    nombres    = [c.replace("peor_B_", "") for c in cols_banco]
+
+    # Solo bancos con algún valor no-NaN (bancos que fueron activos en algún momento)
+    cols_activos = [c for c in cols_banco if df[c].notna().any()]
+    nombres_act  = [c.replace("peor_B_", "") for c in cols_activos]
+
+    # Rellenar NaN con 0 para el área apilada
+    df_stack = df[cols_activos].fillna(0)
+
+    # Detectar cierres trimestrales (cambio en peor_total — proxy de cierre)
+    todos_cierres_vis = _cierres_trimestrales(pd.DatetimeIndex(df["fecha"]))
+
+    # ── Layout ────────────────────────────────────────────────────────────────
+    fig, (ax1, ax2) = plt.subplots(
+        2, 1, figsize=(16, 9), sharex=True,
+        gridspec_kw={"height_ratios": [1.2, 1.8]},
+    )
+    fig.patch.set_facecolor("#fcfcfb")
+    for ax in (ax1, ax2):
+        ax.set_facecolor("#fcfcfb")
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.spines[["left", "bottom"]].set_color("#c3c2b7")
+        ax.tick_params(colors="#52514e", labelsize=9)
+        ax.yaxis.set_tick_params(length=0)
+        ax.grid(axis="y", color="#e1e0d9", linewidth=0.6, zorder=0)
+
+    # ── Panel 1: peor_total ───────────────────────────────────────────────────
+    mask_valid = df["peor_total"].notna() & (df["peor_total"] > 0)
+    ax1.plot(
+        df.loc[mask_valid, "fecha"],
+        df.loc[mask_valid, "peor_total"] / 1e6,
+        color="#2a78d6", linewidth=1.6, zorder=3,
+    )
+    ax1.fill_between(
+        df.loc[mask_valid, "fecha"],
+        df.loc[mask_valid, "peor_total"] / 1e6,
+        alpha=0.12, color="#2a78d6", zorder=2,
+    )
+    ax1.set_ylabel("peor_total (M USD)", fontsize=9, color="#52514e")
+    ax1.set_title("Magnitud del ajuste overlay sobreencaje", fontsize=11,
+                  fontweight="bold", color="#0b0b0b", pad=10)
+    ax1.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:,.0f}M"))
+
+    # Valor actual anotado
+    ultimo_val = df.loc[mask_valid, "peor_total"].iloc[-1] if mask_valid.any() else None
+    if ultimo_val is not None:
+        ultima_fecha = df.loc[mask_valid, "fecha"].iloc[-1]
+        ax1.annotate(
+            f"{ultimo_val/1e6:,.1f}M",
+            xy=(ultima_fecha, ultimo_val / 1e6),
+            xytext=(8, 4), textcoords="offset points",
+            fontsize=8.5, color="#2a78d6", fontweight="bold",
+        )
+
+    # ── Panel 2: stacked area por banco ──────────────────────────────────────
+    fechas   = df["fecha"].values
+    baseline = np.zeros(len(df))
+
+    for i, (col, nombre) in enumerate(zip(cols_activos, nombres_act)):
+        vals   = df_stack[col].values / 1e6
+        color  = _COLORES_BANCOS[i % len(_COLORES_BANCOS)]
+        top    = baseline + vals
+        ax2.fill_between(fechas, baseline, top,
+                         color=color, alpha=0.85, linewidth=0, label=nombre, zorder=2 + i)
+        ax2.plot(fechas, top, color=color, linewidth=0.4, alpha=0.5, zorder=10 + i)
+        baseline = top
+
+    ax2.set_ylabel("peor_B por banco (M USD)", fontsize=9, color="#52514e")
+    ax2.set_title("Contribución por banco al ajuste", fontsize=10,
+                  color="#52514e", pad=6)
+    ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:,.0f}M"))
+
+    legend = ax2.legend(
+        fontsize=8, ncol=min(len(nombres_act), 5),
+        loc="upper left", framealpha=0.9,
+        edgecolor="#e1e0d9", labelcolor="#0b0b0b",
+    )
+    legend.get_frame().set_linewidth(0.6)
+
+    # ── Marcadores de cierre trimestral en ambos paneles ─────────────────────
+    for fc in todos_cierres_vis:
+        for ax in (ax1, ax2):
+            ax.axvline(fc, color="#c3c2b7", linewidth=0.7,
+                       linestyle="--", zorder=1, alpha=0.7)
+        # Etiquetar cierres en el panel superior (solo Q4 para no saturar)
+        if fc.month == 12:
+            ax1.text(fc, ax1.get_ylim()[1] if ax1.get_ylim()[1] != 1.0 else 0,
+                     str(fc.year), fontsize=7, color="#898781",
+                     ha="center", va="bottom")
+
+    # ── Eje X ─────────────────────────────────────────────────────────────────
+    import matplotlib.dates as mdates
+    ax2.xaxis.set_major_locator(mdates.YearLocator())
+    ax2.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+    ax2.xaxis.set_minor_locator(mdates.MonthLocator(bymonth=[4, 7, 10]))
+    plt.setp(ax2.xaxis.get_majorticklabels(), color="#52514e", fontsize=9)
+
+    fig.text(0.5, 0.01,
+             "Líneas punteadas = cierres trimestrales  |  "
+             f"UMBRAL_ACTIVACION={UMBRAL_ACTIVACION:.0%}  |  "
+             f"N_TRIMESTRES_LOOKBACK={N_TRIMESTRES_LOOKBACK}  |  "
+             f"VENTANA={VENTANA_RETIRO_DH}dh",
+             ha="center", fontsize=7.5, color="#898781")
+
+    plt.tight_layout(rect=[0, 0.03, 1, 1])
+
+    ruta_png = dir_output / "overlay_ajuste.png"
+    ruta_png.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(ruta_png, dpi=150, bbox_inches="tight", facecolor="#fcfcfb")
+    plt.close()
+    print(f"  Gráfico guardado: {ruta_png}")
+
+
 if __name__ == "__main__":
     logging.basicConfig(
         level=logging.INFO,
@@ -1107,3 +1261,4 @@ if __name__ == "__main__":
     )
     _diagnostico()
     exportar_saldos_retiros()
+    graficar_ajuste_overlay()
