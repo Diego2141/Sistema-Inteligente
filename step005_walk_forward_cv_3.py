@@ -71,12 +71,7 @@ except ImportError:
 
 _SHAP_OK = True  # XGBoost nativo pred_contribs=True siempre disponible
 
-try:
-    from step007_overlay_sobreencaje import aplicar_overlay_preds as _overlay_preds
-    _OVERLAY_OK = True
-except ImportError:
-    _overlay_preds = None
-    _OVERLAY_OK = False
+# Overlay: la logica vive aqui; step007 solo provee el Excel con peor_total diario.
 
 warnings.filterwarnings("ignore", category=UserWarning)
 optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -243,15 +238,12 @@ CQR_TAU_LO       = 0.05   # cuantil inferior del intervalo a calibrar
 CQR_TAU_HI       = 0.95   # cuantil superior del intervalo a calibrar
 CQR_ALPHA        = 0.10   # miscoverage objetivo: 1 - cobertura deseada (90% -> 0.10)
 
-# -- Overlay sobreencaje BBVA (step007_overlay_sobreencaje.py) -----------------
-# True  -> aplica el overlay comportamental de retiros trimestrales DESPUÉS de
-#          CQR. Usa datos de saldo CC+OVN por banco para detectar si algún banco
-#          activó la estrategia de sobreencaje y ajusta TODOS los cuantiles
-#          multiplicativamente en los horizontes de cierre trimestral.
-#          Requiere step007_overlay_sobreencaje.py en el mismo directorio y
-#          que OVERLAY_SOBREENCAJE_ACTIVO=True en ese módulo.
-# False -> sin overlay (comportamiento original)
-OVERLAY_SOBREENCAJE = False
+# -- Overlay sobreencaje (step007) --------------------------------------------
+# Requiere haber ejecutado step007 para generar saldos_retiros_bancos.xlsx.
+# El ajuste diario (peor_total) se lee desde la tab "Ajuste_diario" de ese archivo.
+OVERLAY_SOBREENCAJE  = False
+RUTA_AJUSTE_OVERLAY  = BASE_SISTEMA / "2. Output" / "analisis_cc" / "saldos_retiros_bancos.xlsx"
+OVERLAY_VENTANA_DH   = 7   # dias habiles de la ventana de retiro (mismo valor que step007)
 
 
 # -- Fan chart TEST: número de snapshots por fold ------------------------------
@@ -2458,6 +2450,99 @@ def consolidar_diagnostico(diag_por_fold, cols_feat, banco, top_n=25):
 
 
 ###############################################################################
+###############################################################################
+# Overlay sobreencaje -- lee ajuste de step007 y aplica a las predicciones
+###############################################################################
+
+def _aplicar_overlay_sobreencaje(
+    preds: dict,
+    h_arr: np.ndarray,
+    fechas_t: pd.DatetimeIndex,
+) -> dict:
+    """
+    Lee peor_total diario desde la tab 'Ajuste_diario' del Excel de step007
+    y aplica un factor multiplicativo uniforme sobre toda la ventana de proyeccion.
+
+    f = peor_total / |sum(Q01 en ventana de OVERLAY_VENTANA_DH dias habiles
+                          antes del primer cierre trimestral proyectado)|
+    """
+    if not OVERLAY_SOBREENCAJE:
+        return preds
+
+    try:
+        df_aj = pd.read_excel(
+            RUTA_AJUSTE_OVERLAY, sheet_name="Ajuste_diario",
+            index_col=0, parse_dates=True,
+        )
+        df_aj.index = pd.DatetimeIndex(df_aj.index)
+    except Exception as e:
+        logger.warning(f"[OVERLAY] No se pudo leer Ajuste_diario: {e} -- sin ajuste")
+        return preds
+
+    if "peor_total" not in df_aj.columns:
+        logger.warning("[OVERLAY] Columna peor_total no encontrada en Ajuste_diario -- sin ajuste")
+        return preds
+
+    preds_adj = {tau: arr.copy() for tau, arr in preds.items()}
+
+    for fecha_t in sorted(set(fechas_t)):
+        disponibles = df_aj.index[df_aj.index <= fecha_t]
+        if len(disponibles) == 0:
+            continue
+        peor_total = float(df_aj.loc[disponibles[-1], "peor_total"])
+        if peor_total <= 0:
+            continue
+
+        bh = pd.bdate_range(
+            start=fecha_t + pd.offsets.BDay(1),
+            periods=OVERLAY_VENTANA_DH + 75,
+        )
+        df_bh = pd.DataFrame({"fecha": bh, "mes": bh.month, "anio": bh.year, "trim": bh.quarter})
+        cierres_proy = (
+            df_bh[df_bh["mes"].isin([3, 6, 9, 12])]
+            .groupby(["anio", "trim"])["fecha"].max()
+            .sort_values().tolist()
+        )
+        if not cierres_proy:
+            continue
+        fecha_cierre = cierres_proy[0]
+
+        bh_list = list(bh)
+        try:
+            h_cierre = bh_list.index(fecha_cierre) + 1
+        except ValueError:
+            diffs = [abs((d - fecha_cierre).days) for d in bh_list]
+            h_cierre = diffs.index(min(diffs)) + 1
+
+        h_inicio = max(1, h_cierre - OVERLAY_VENTANA_DH + 1)
+
+        mask_origen  = (fechas_t == fecha_t)
+        mask_ventana = mask_origen & (h_arr >= h_inicio) & (h_arr <= h_cierre)
+        if not mask_ventana.any():
+            h_t = h_arr[mask_origen]
+            h_fb = h_t[np.abs(h_t - h_cierre).argmin()]
+            mask_ventana = mask_origen & (h_arr == h_fb)
+
+        q01_acum = float(preds[0.01][mask_ventana].sum())
+        if q01_acum >= 0 or abs(q01_acum) < 1e-6:
+            continue
+
+        f = peor_total / abs(q01_acum)
+        if f <= 1.0:
+            continue
+
+        for tau in preds_adj:
+            preds_adj[tau][mask_origen] *= f
+
+        logger.info(
+            f"[OVERLAY] {fecha_t.date()} | cierre: {fecha_cierre.date()} "
+            f"h=[{h_inicio},{h_cierre}] | Q01_acum={q01_acum:+.0f} | "
+            f"peor_total={peor_total:,.0f} | f={f:.3f}"
+        )
+
+    return preds_adj
+
+
 # PARTE 8 -- Pipeline principal
 ###############################################################################
 
@@ -2826,23 +2911,11 @@ def evaluar_banco(banco: str):
                 preds_val, y_val, h_val, preds_test, h_test
             )
 
-        # -- Overlay sobreencaje (step007) -------------------------------------
-        # Se aplica por fecha de origen: para cada fecha_t única en el test,
-        # recalcula el factor con los cierres históricos anteriores a esa fecha.
-        # Se usa test_start como referencia de fold para el backtest histórico.
-        if OVERLAY_SOBREENCAJE and _OVERLAY_OK and _overlay_preds is not None:
-            try:
-                import step007_overlay_sobreencaje as _ov7
-                _ov7.OVERLAY_SOBREENCAJE_ACTIVO = True
-                preds_test = _overlay_preds(
-                    preds_test,
-                    h_arr=h_test,
-                    fecha_origen=pd.Timestamp(fold["test_start"]),
-                )
-            except Exception as _e_ov:
-                logger.warning(f"    [OVERLAY] Error aplicando overlay: {_e_ov}")
-        elif OVERLAY_SOBREENCAJE and not _OVERLAY_OK:
-            logger.warning("    [OVERLAY] step007_overlay_sobreencaje.py no encontrado -- omitiendo")
+        # -- Overlay sobreencaje -----------------------------------------------
+        # Lee peor_total desde Excel (step007) y aplica factor multiplicativo
+        # uniforme sobre todo el horizonte, por fecha_t unica.
+        if OVERLAY_SOBREENCAJE:
+            preds_test = _aplicar_overlay_sobreencaje(preds_test, h_test, fechas_t_test)
 
         if not SOLO_REGENERAR_PLOTS:
             row_test = calcular_metricas_fold(preds_test, y_test.values, fold, "test")
