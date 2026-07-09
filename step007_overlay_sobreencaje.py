@@ -43,9 +43,18 @@ Paso 3 -- Factor multiplicativo y ajuste
     Aplica de forma simétrica a todos los cuantiles y la mediana.
     Solo afecta horizontes h que correspondan a un cierre trimestral.
 
-Uso
----
-    from step007_overlay_sobreencaje import aplicar_overlay_preds, aplicar_overlay_df
+Uso desde step005 (walk-forward, multiples origenes)
+----------------------------------------------------
+    from step007_overlay_sobreencaje import aplicar_overlay_preds
+
+    # Justo despues de denormalizar las predicciones del fold:
+    preds_test = aplicar_overlay_preds(preds_test, h_test, fechas_t_test)
+
+Uso desde step006 / postproceso (DataFrame con fecha_t, h, q01..q99)
+----------------------------------------------------------------------
+    from step007_overlay_sobreencaje import aplicar_overlay_df
+
+    df_preds_adj = aplicar_overlay_df(df_preds)   # lee fecha_t desde el DataFrame
 
 Diagnóstico / outliers standalone
 ----------------------------------
@@ -74,7 +83,7 @@ BASE_SISTEMA = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente"
 OVERLAY_SOBREENCAJE_ACTIVO = False
 
 # -- Parámetros del overlay ----------------------------------------------------
-UMBRAL_ACTIVACION     = 0.40   # ratio |retiro_7dh| / saldo_P95_mes para activar
+UMBRAL_ACTIVACION     = 0.50   # ratio |retiro_7dh| / saldo_P95_mes para activar
 N_TRIMESTRES_LOOKBACK = 4      # cierres para la tabla Señal (display); el worst_ratio usa todo el historial
 MIN_TRIMESTRES_ACTIVO = 1      # mín. trimestres (dentro del lookback) con ratio > umbral para activar
 VENTANA_RETIRO_DH     = 7      # días hábiles de la ventana antes del cierre
@@ -490,66 +499,109 @@ def _preparar_datos(
 def aplicar_overlay_preds(
     preds: dict[float, np.ndarray],
     h_arr: np.ndarray,
-    fecha_origen: pd.Timestamp,
+    fechas_t,
     ruta_saldo: Path = RUTA_SALDO,
     ruta_tabla: Path  = RUTA_TABLA,
 ) -> dict[float, np.ndarray]:
     """
     Aplica el overlay sobreencaje a un dict de predicciones.
 
-    Parámetros
+    Parametros
     ----------
-    preds        : {0.01: arr, 0.05: arr, 0.50: arr, 0.95: arr, 0.99: arr}
-    h_arr        : horizonte de cada fila, shape (n,).
-    fecha_origen : fecha de inicio del pronóstico (fecha_t en step005).
+    preds    : {0.01: arr, 0.05: arr, 0.50: arr, 0.95: arr, 0.99: arr}
+               Cada array tiene longitud N (una entrada por par fecha_t x h).
+    h_arr    : horizonte en dias habiles de cada fila, shape (N,).
+    fechas_t : array-like de pd.Timestamp con la fecha de origen de cada fila,
+               shape (N,).  Permite multiples origenes (walk-forward CV).
+
+    Logica
+    ------
+    Para cada fila i:
+      fecha_pred = fechas_t[i] + h_arr[i] dias habiles
+      Si fecha_pred es cierre trimestral:
+          f = peor_total(fechas_t[i]) / |Q01[i]|
+          Si f > 1: todos los cuantiles y la media se multiplican por f
+
+    Cache
+    -----
+    La deteccion de bancos (det) se cachea por trimestre (cambia solo cuando
+    el conjunto de cierres historicos crece).  El peor_total se recomputa por
+    fecha_t (la ventana P95 de saldo crece dia a dia).
     """
     if not OVERLAY_SOBREENCAJE_ACTIVO:
         return preds
 
-    resultado = _preparar_datos(ruta_saldo, ruta_tabla, fecha_origen)
+    fechas_t = pd.DatetimeIndex(fechas_t)
+    if len(fechas_t) == 0 or 0.01 not in preds:
+        return preds
+
+    # Cargar datos usando la fecha maxima disponible (cobertura historica completa)
+    fecha_max = fechas_t.max()
+    resultado = _preparar_datos(ruta_saldo, ruta_tabla, fecha_max)
     if resultado is None:
         return preds
 
-    df_saldo, df_flujos, bancos_saldo, cierres, calendario = resultado
-
-    det = detectar_bancos_activos(df_saldo, df_flujos, bancos_saldo, cierres, calendario,
-                                  cierres_lookback=cierres[-N_TRIMESTRES_LOOKBACK:])
-    bancos_activos = [b for b, info in det.items() if info["alguna_vez_activa"]]
-
-    if not bancos_activos:
-        logger.info("[OVERLAY] Sin bancos con estrategia activa (ningún trimestre) -- sin ajuste")
-        return preds
-
-    logger.info(f"[OVERLAY] Bancos con estrategia en algún trimestre ({len(bancos_activos)}): {bancos_activos}")
-
-    peor_total = sum(_peor_B(df_saldo, det, b, cierres, fecha_ref=fecha_origen) for b in bancos_activos)
-    logger.info(f"[OVERLAY] peor_total = {peor_total:,.1f}")
-
-    # Mapeo h -> fecha_pred usando pandas bdate_range (calendario estándar)
-    h_max = int(h_arr.max())
-    bh_future = pd.bdate_range(
-        start=fecha_origen + pd.offsets.BDay(1),
-        periods=h_max + 10,
-    )
-    h_to_fecha = {h + 1: bh_future[h] for h in range(len(bh_future))}
-    cierres_futuros = set(_cierres_trimestrales(pd.DatetimeIndex(bh_future)))
+    df_saldo, df_flujos, bancos_saldo, _cierres_hasta_max, calendario = resultado
+    todos_cierres   = _cierres_trimestrales(calendario)
+    set_cierres_cal = set(todos_cierres)
 
     preds_adj = {tau: arr.copy() for tau, arr in preds.items()}
 
-    for i, h in enumerate(h_arr):
-        fecha_pred = h_to_fecha.get(int(h))
-        if fecha_pred is None or fecha_pred not in cierres_futuros:
+    # Cache: cierres_key -> (det, lista_activos)
+    _det_cache: dict[tuple, tuple[dict, list]] = {}
+
+    for i, (fecha_t, h) in enumerate(zip(fechas_t, h_arr)):
+        # Fecha predicha = fecha_t + h dias habiles
+        fecha_pred = fecha_t + pd.offsets.BDay(int(h))
+
+        # Solo actuar si la fecha predicha cae exactamente en un cierre trimestral
+        if fecha_pred not in set_cierres_cal:
             continue
+
+        # Cierres historicos visibles desde fecha_t (sin leakage)
+        cierres_hist = [fc for fc in todos_cierres if fc < fecha_t]
+        if len(cierres_hist) < 2:
+            continue
+
+        # Deteccion de bancos activos (cache trimestral)
+        cierres_key = tuple(cierres_hist)
+        if cierres_key not in _det_cache:
+            lb = list(cierres_hist[-N_TRIMESTRES_LOOKBACK:])
+            det = detectar_bancos_activos(
+                df_saldo, df_flujos, bancos_saldo,
+                list(cierres_hist), calendario,
+                cierres_lookback=lb,
+            )
+            activos = [b for b, info in det.items() if info["alguna_vez_activa"]]
+            _det_cache[cierres_key] = (det, activos)
+            if activos:
+                logger.info(f"[OVERLAY] {fecha_t.date()} | bancos activos: {activos}")
+
+        det_t, activos_t = _det_cache[cierres_key]
+        if not activos_t:
+            continue
+
+        # peor_total: ventana P95 crece diariamente -> recomputar por fecha_t
+        peor_total = sum(
+            _peor_B(df_saldo, det_t, b, list(cierres_hist), fecha_ref=fecha_t)
+            for b in activos_t
+        )
+        if peor_total <= 0:
+            continue
+
+        # Factor multiplicativo basado en Q01
         q01_val = float(preds[0.01][i])
         f = _factor_overlay(peor_total, q01_val)
         if f <= 1.0:
             continue
+
+        # Aplica a TODOS los cuantiles y la media
         for tau in preds_adj:
-            if tau in (0.01, 0.05, 0.50, 0.95, 0.99):
-                preds_adj[tau][i] *= f
+            preds_adj[tau][i] *= f
+
         logger.info(
-            f"[OVERLAY] h={h:3d} ({fecha_pred.date()}) | "
-            f"Q01={q01_val:+.1f} -> {q01_val*f:+.1f} | f={f:.3f}"
+            f"[OVERLAY] fecha_t={fecha_t.date()} h={int(h):3d} ({fecha_pred.date()}) | "
+            f"peor_total={peor_total:,.0f} | Q01={q01_val:+.1f} -> {q01_val*f:+.1f} | f={f:.3f}"
         )
 
     return preds_adj
@@ -561,22 +613,34 @@ def aplicar_overlay_preds(
 
 def aplicar_overlay_df(
     df: pd.DataFrame,
-    fecha_origen: pd.Timestamp,
+    fecha_origen: pd.Timestamp | None = None,
     ruta_saldo: Path = RUTA_SALDO,
     ruta_tabla: Path  = RUTA_TABLA,
 ) -> pd.DataFrame:
     """
-    Variante para DataFrames con columnas q01, q05, q50, q95, q99 y columna h.
+    Variante para DataFrames con columnas q01..q99, columna h y (preferiblemente)
+    columna fecha_t.
+
+    Si el DataFrame tiene columna 'fecha_t', se usa directamente para el walk-forward
+    (multiples origenes).  Si no, se usa fecha_origen como origen unico de respaldo.
     """
     q_cols_presentes = [c for c in Q_COLS if c in df.columns]
     if not q_cols_presentes or "h" not in df.columns:
         logger.warning("[OVERLAY] Columnas q0x/h no encontradas -- sin ajuste")
         return df
 
+    if "fecha_t" in df.columns:
+        fechas_t = pd.DatetimeIndex(df["fecha_t"])
+    elif fecha_origen is not None:
+        fechas_t = pd.DatetimeIndex([fecha_origen] * len(df))
+    else:
+        logger.warning("[OVERLAY] Sin columna fecha_t ni fecha_origen -- sin ajuste")
+        return df
+
     preds = {float(c[1:]) / 100.0: df[c].values.copy() for c in q_cols_presentes}
     h_arr = df["h"].values
 
-    preds_adj = aplicar_overlay_preds(preds, h_arr, fecha_origen, ruta_saldo, ruta_tabla)
+    preds_adj = aplicar_overlay_preds(preds, h_arr, fechas_t, ruta_saldo, ruta_tabla)
 
     df_adj = df.copy()
     for c in q_cols_presentes:
