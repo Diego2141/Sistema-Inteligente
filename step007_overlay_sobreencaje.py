@@ -74,7 +74,7 @@ BASE_SISTEMA = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente"
 OVERLAY_SOBREENCAJE_ACTIVO = False
 
 # -- Parámetros del overlay ----------------------------------------------------
-UMBRAL_ACTIVACION     = 0.50   # ratio |retiro_7dh| / saldo_P95_mes para activar
+UMBRAL_ACTIVACION     = 0.40   # ratio |retiro_7dh| / saldo_P95_mes para activar
 N_TRIMESTRES_LOOKBACK = 4      # cierres para la tabla Señal (display); el worst_ratio usa todo el historial
 MIN_TRIMESTRES_ACTIVO = 1      # mín. trimestres (dentro del lookback) con ratio > umbral para activar
 VENTANA_RETIRO_DH     = 7      # días hábiles de la ventana antes del cierre
