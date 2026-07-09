@@ -8,38 +8,38 @@ Problema que resuelve
 ----------------------
 El modelo cuantílico predice el flujo neto del sistema bancario para los
 siguientes 75 días hábiles.  En cierres trimestrales (mar/jun/sep/dic) ciertos
-bancos — en particular BBVA — ejecutan retiros masivos de encaje + overnight que
+bancos -- en particular BBVA -- ejecutan retiros masivos de encaje + overnight que
 exceden el percentil 1% pronosticado.  Este overlay ajusta esa asimetría de
 forma transparente y auditable, sin re-entrenar el modelo.
 
-Mapeo retiros ↔ saldos
+Mapeo retiros <-> saldos
 -----------------------
 Los nombres de bancos en Transacciones_BancaLocal (columna Broker) difieren de
 los nombres en el archivo de saldo CC+OVN.  TablaSaldosRetiros.xlsx contiene el
 mapeo explícito entre ambas fuentes, incluyendo cambios históricos de nombre
-(CONTINEN → BBVA, FINANCIERO → BANCO PICHINCHA).
+(CONTINEN -> BBVA, FINANCIERO -> BANCO PICHINCHA).
 Bancos con BANCOS_SALDOS = "NA" (BONY, FEDERAL) son excluidos del overlay.
 
 Lógica en 3 pasos
 ------------------
-Paso 1 — Detección
+Paso 1 -- Detección
     Para cada banco B y cada uno de los últimos N cierres trimestrales:
         ratio[B,q] = |retiro_7dh[B,q]| / saldo_max_mes[B,q]
     El banco contribuye al ajuste si ratio[B,q] > UMBRAL_ACTIVACION en AL MENOS UNO
     de los últimos N cierres ("alguna_vez_activa").
     "activa" (último trimestre > umbral) se reporta también para diagnóstico.
 
-Paso 2 — Peor retiro potencial por banco
+Paso 2 -- Peor retiro potencial por banco
     Para bancos con alguna_vez_activa = True:
         worst_ratio_B = max(ratio[B,q]) sobre TODOS los cierres históricos con ratio > umbral
         p95_saldo_B   = P{PERCENTIL_SALDO} del saldo desde inicio del trimestre ANTERIOR hasta fecha_ref-1
                         (trimestre anterior completo + días corridos del trimestre actual sin incluir hoy)
         peor_B        = worst_ratio_B × p95_saldo_B × (1 + FACTOR_SEGURIDAD)
 
-Paso 3 — Factor multiplicativo y ajuste
-    peor_total = Σ peor_B   (bancos con alguna_vez_activa)
+Paso 3 -- Factor multiplicativo y ajuste
+    peor_total = sum peor_B   (bancos con alguna_vez_activa)
     f          = peor_total / |Q01_h_cierre|
-    Si f > 1 → Q_adj[τ, h_cierre] = Q[τ, h_cierre] × f
+    Si f > 1 -> Q_adj[tau, h_cierre] = Q[tau, h_cierre] × f
     Aplica de forma simétrica a todos los cuantiles y la mediana.
     Solo afecta horizontes h que correspondan a un cierre trimestral.
 
@@ -50,7 +50,7 @@ Uso
 Diagnóstico / outliers standalone
 ----------------------------------
     python step007_overlay_sobreencaje.py
-    → carga Saldos_CCOVN, detecta outliers por banco y muestra bancos activos.
+    -> carga Saldos_CCOVN, detecta outliers por banco y muestra bancos activos.
 """
 
 from __future__ import annotations
@@ -70,43 +70,43 @@ logger = logging.getLogger(__name__)
 
 BASE_SISTEMA = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente")
 
-# ── Master switch ─────────────────────────────────────────────────────────────
+# -- Master switch -------------------------------------------------------------
 OVERLAY_SOBREENCAJE_ACTIVO = False
 
-# ── Parámetros del overlay ────────────────────────────────────────────────────
+# -- Parámetros del overlay ----------------------------------------------------
 UMBRAL_ACTIVACION     = 0.50   # ratio |retiro_7dh| / saldo_P95_mes para activar
 N_TRIMESTRES_LOOKBACK = 4      # cierres para la tabla Señal (display); el worst_ratio usa todo el historial
 MIN_TRIMESTRES_ACTIVO = 1      # mín. trimestres (dentro del lookback) con ratio > umbral para activar
 VENTANA_RETIRO_DH     = 7      # días hábiles de la ventana antes del cierre
-FACTOR_SEGURIDAD      = 0.00   # margen extra sobre peor_B  (0.00→0.10 = 0%→10%)
+FACTOR_SEGURIDAD      = 0.00   # margen extra sobre peor_B  (0.00->0.10 = 0%->10%)
 PERCENTIL_SALDO       = 0.95   # percentil del saldo usado en el denominador del ratio y en peor_B
 
-# ── Detección de outliers (diagnóstico) ──────────────────────────────────────
-OUTLIER_ZSCORE = 4.0   # |z| > 4 σ → sospechoso (muy conservador para datos de saldo)
-OUTLIER_IQR    = 6.0   # valor > mediana ± 6×IQR → outlier severo
+# -- Detección de outliers (diagnóstico) --------------------------------------
+OUTLIER_ZSCORE = 4.0   # |z| > 4 sigma -> sospechoso (muy conservador para datos de saldo)
+OUTLIER_IQR    = 6.0   # valor > mediana ± 6×IQR -> outlier severo
 
-# ── Rutas de datos ────────────────────────────────────────────────────────────
-# Tabla de mapeo BANCOS_RETIROS ↔ BANCOS_SALDOS
+# -- Rutas de datos ------------------------------------------------------------
+# Tabla de mapeo BANCOS_RETIROS <-> BANCOS_SALDOS
 RUTA_TABLA = Path(__file__).parent / "TablaSaldosRetiros.xlsx"
 
-# Saldo fin del día (CC + Overnight) por banco — formato wide:
+# Saldo fin del día (CC + Overnight) por banco -- formato wide:
 #   col 0 = fecha | col 1..N = bancos (nombre = BANCOS_SALDOS)
 RUTA_SALDO = BASE_SISTEMA / "1. Data" / "Raw" / "Saldos_CCOVN.xlsx"
 
 # Alternativa si el archivo tiene nombre diferente:
 # RUTA_SALDO = BASE_SISTEMA / "1. Data" / "Raw" / "Saldo fin del dia CC+OVN.xlsx"
 
-# Transacciones bancarias — formato transaccional:
+# Transacciones bancarias -- formato transaccional:
 #   columnas: Broker (= BANCOS_RETIROS), Fecha Valor, Delivery Principal Usd
 RUTA_TRANS = BASE_SISTEMA / "1. Data" / "Raw" / "Transacciones_BancaLocal.xlsx"
 
-# ── Cuantiles ─────────────────────────────────────────────────────────────────
+# -- Cuantiles -----------------------------------------------------------------
 QUANTILES = [0.01, 0.05, 0.50, 0.95, 0.99]
 Q_COLS    = [f"q{int(t * 100):02d}" for t in QUANTILES]   # q01, q05, q50, q95, q99
 
 
 ###############################################################################
-# Carga del mapeo BANCOS_RETIROS ↔ BANCOS_SALDOS
+# Carga del mapeo BANCOS_RETIROS <-> BANCOS_SALDOS
 ###############################################################################
 
 def cargar_tabla_mapeo(ruta: Path = RUTA_TABLA) -> pd.DataFrame:
@@ -166,7 +166,7 @@ def _cargar_saldos(ruta: Path) -> pd.DataFrame:
     # Filtro 1: excluir sábados (5) y domingos (6)
     raw = raw[raw.index.dayofweek < 5]
 
-    # Filtro 2: excluir feriados — filas donde todos los bancos son NaN
+    # Filtro 2: excluir feriados -- filas donde todos los bancos son NaN
     raw = raw[raw.notna().any(axis=1)]
 
     return raw
@@ -192,7 +192,7 @@ def detectar_outliers_banco(
 
     Usa dos criterios independientes:
       - Z-score: |z| > zscore_thresh
-      - IQR: valor fuera de [Q25 − iqr_thresh×IQR, Q75 + iqr_thresh×IQR]
+      - IQR: valor fuera de [Q25 - iqr_thresh×IQR, Q75 + iqr_thresh×IQR]
 
     Retorna DataFrame con columnas: fecha, valor, z_score, outlier_zscore,
     outlier_iqr, outlier (True si cualquiera de los dos criterios se activa).
@@ -280,7 +280,7 @@ def _ventana_antes_cierre(
 
 
 ###############################################################################
-# Paso 1 — Detección por banco
+# Paso 1 -- Detección por banco
 ###############################################################################
 
 def _ratio_banco_cierre(
@@ -293,14 +293,14 @@ def _ratio_banco_cierre(
 ) -> float | None:
     """
     ratio = |retiro_neto_acumulado en ventana n_dh dh| / saldo_P95 del mes del cierre.
-    Retorna None si el flujo neto es positivo (ingreso) — la estrategia solo aplica a retiros.
+    Retorna None si el flujo neto es positivo (ingreso) -- la estrategia solo aplica a retiros.
     """
     mask_mes = (
         (df_saldo.index.year  == fecha_cierre.year) &
         (df_saldo.index.month == fecha_cierre.month)
     )
     col_data  = df_saldo.loc[mask_mes, col_saldo]
-    # Si hay columnas duplicadas, loc devuelve DataFrame — tomar la primera columna
+    # Si hay columnas duplicadas, loc devuelve DataFrame -- tomar la primera columna
     if isinstance(col_data, pd.DataFrame):
         col_data = col_data.iloc[:, 0]
     serie_mes = col_data.dropna()
@@ -333,7 +333,7 @@ def detectar_bancos_activos(
     """
     Evalúa la estrategia de sobreencaje para cada banco.
 
-    cierres          : historial completo → se computan todos los ratios (para worst_ratio).
+    cierres          : historial completo -> se computan todos los ratios (para worst_ratio).
     cierres_lookback : ventana de activación (últimos N_TRIMESTRES_LOOKBACK).
                        Si None se usa cierres[-N_TRIMESTRES_LOOKBACK:].
 
@@ -370,7 +370,7 @@ def detectar_bancos_activos(
 
 
 ###############################################################################
-# Paso 2 — Peor retiro potencial por banco
+# Paso 2 -- Peor retiro potencial por banco
 ###############################################################################
 
 def _peor_B(
@@ -389,7 +389,7 @@ def _peor_B(
     worst_ratio      : máximo ratio histórico sobre TODOS los cierres donde el banco
                        usó la estrategia (cierres debe incluir todo el historial).
     p{percentil}_saldo: percentil del saldo desde el inicio del trimestre actual hasta
-                        fecha_ref, inclusive — captura lo disponible hoy para retirar.
+                        fecha_ref, inclusive -- captura lo disponible hoy para retirar.
     """
     ratios = det[col_saldo]["ratios"]
     ratios_activos = {fc: r for fc, r in ratios.items() if r > umbral}
@@ -413,13 +413,13 @@ def _peor_B(
 
 
 ###############################################################################
-# Paso 3 — Factor multiplicativo
+# Paso 3 -- Factor multiplicativo
 ###############################################################################
 
 def _factor_overlay(peor_total: float, q01_val: float) -> float:
     """
     f = peor_total / |Q01_h_cierre|
-    Retorna 1.0 si el modelo ya cubre el peor caso o si Q01 ≥ 0.
+    Retorna 1.0 si el modelo ya cubre el peor caso o si Q01 >= 0.
     """
     if q01_val >= 0.0 or abs(q01_val) < 1e-6:
         return 1.0
@@ -440,7 +440,7 @@ def _preparar_datos(
     Carga saldos, aplica el mapeo, calcula flujos y selecciona los últimos
     N cierres históricos.  Retorna None si hay un error crítico.
     """
-    # Mapeo BANCOS_RETIROS → BANCOS_SALDOS
+    # Mapeo BANCOS_RETIROS -> BANCOS_SALDOS
     try:
         tabla = cargar_tabla_mapeo(ruta_tabla)
     except Exception as e:
@@ -466,7 +466,7 @@ def _preparar_datos(
             bancos_saldo.append(col_real)
 
     if not bancos_saldo:
-        logger.warning("[OVERLAY] Ningún banco del mapeo encontrado en Saldos_CCOVN — sin ajuste")
+        logger.warning("[OVERLAY] Ningún banco del mapeo encontrado en Saldos_CCOVN -- sin ajuste")
         return None
 
     df_saldo  = df_saldo_raw[bancos_saldo].copy()
@@ -484,7 +484,7 @@ def _preparar_datos(
 
 
 ###############################################################################
-# Función principal — formato dict {tau: array}  (uso desde step005)
+# Función principal -- formato dict {tau: array}  (uso desde step005)
 ###############################################################################
 
 def aplicar_overlay_preds(
@@ -517,7 +517,7 @@ def aplicar_overlay_preds(
     bancos_activos = [b for b, info in det.items() if info["alguna_vez_activa"]]
 
     if not bancos_activos:
-        logger.info("[OVERLAY] Sin bancos con estrategia activa (ningún trimestre) — sin ajuste")
+        logger.info("[OVERLAY] Sin bancos con estrategia activa (ningún trimestre) -- sin ajuste")
         return preds
 
     logger.info(f"[OVERLAY] Bancos con estrategia en algún trimestre ({len(bancos_activos)}): {bancos_activos}")
@@ -525,7 +525,7 @@ def aplicar_overlay_preds(
     peor_total = sum(_peor_B(df_saldo, det, b, cierres, fecha_ref=fecha_origen) for b in bancos_activos)
     logger.info(f"[OVERLAY] peor_total = {peor_total:,.1f}")
 
-    # Mapeo h → fecha_pred usando pandas bdate_range (calendario estándar)
+    # Mapeo h -> fecha_pred usando pandas bdate_range (calendario estándar)
     h_max = int(h_arr.max())
     bh_future = pd.bdate_range(
         start=fecha_origen + pd.offsets.BDay(1),
@@ -549,14 +549,14 @@ def aplicar_overlay_preds(
                 preds_adj[tau][i] *= f
         logger.info(
             f"[OVERLAY] h={h:3d} ({fecha_pred.date()}) | "
-            f"Q01={q01_val:+.1f} → {q01_val*f:+.1f} | f={f:.3f}"
+            f"Q01={q01_val:+.1f} -> {q01_val*f:+.1f} | f={f:.3f}"
         )
 
     return preds_adj
 
 
 ###############################################################################
-# Variante DataFrame — columnas q01..q99  (uso desde step006 / postproceso)
+# Variante DataFrame -- columnas q01..q99  (uso desde step006 / postproceso)
 ###############################################################################
 
 def aplicar_overlay_df(
@@ -570,7 +570,7 @@ def aplicar_overlay_df(
     """
     q_cols_presentes = [c for c in Q_COLS if c in df.columns]
     if not q_cols_presentes or "h" not in df.columns:
-        logger.warning("[OVERLAY] Columnas q0x/h no encontradas — sin ajuste")
+        logger.warning("[OVERLAY] Columnas q0x/h no encontradas -- sin ajuste")
         return df
 
     preds = {float(c[1:]) / 100.0: df[c].values.copy() for c in q_cols_presentes}
@@ -587,7 +587,7 @@ def aplicar_overlay_df(
 
 
 ###############################################################################
-# Diagnóstico standalone — outliers + activación + exporta a Excel
+# Diagnóstico standalone -- outliers + activación + exporta a Excel
 ###############################################################################
 
 # Ruta de salida del diagnóstico Excel
@@ -603,29 +603,29 @@ def _diagnostico(
     """
     Genera el diagnóstico del overlay y lo exporta a Excel con 4 hojas:
 
-      1. Cruce        — mapeo BANCOS_RETIROS ↔ BANCOS_SALDOS con estado OK/AUSENTE
-      2. Outliers     — fechas y valores atípicos por banco (zscore > 4σ o IQR > 6×IQR)
-      3. Ratios       — ratio |retiro_7dh|/saldo_max por banco y cierre trimestral
-      4. Resumen      — bancos activos, peor_B, peor_total y parámetros del overlay
+      1. Cruce        -- mapeo BANCOS_RETIROS <-> BANCOS_SALDOS con estado OK/AUSENTE
+      2. Outliers     -- fechas y valores atípicos por banco (zscore > 4sigma o IQR > 6×IQR)
+      3. Ratios       -- ratio |retiro_7dh|/saldo_max por banco y cierre trimestral
+      4. Resumen      -- bancos activos, peor_B, peor_total y parámetros del overlay
 
     El archivo se guarda en dir_output/diag_overlay_sobreencaje.xlsx.
     """
     if fecha_ref is None:
         fecha_ref = pd.Timestamp.today().normalize()
 
-    sep = "═" * 72
+    sep = "=" * 72
     print(f"\n{sep}")
-    print(f"  Overlay Sobreencaje — Diagnóstico  ({fecha_ref.date()})")
+    print(f"  Overlay Sobreencaje -- Diagnóstico  ({fecha_ref.date()})")
     print(sep)
 
-    # ── 1. Mapeo ──────────────────────────────────────────────────────────────
+    # -- 1. Mapeo --------------------------------------------------------------
     try:
         tabla_mapeo = cargar_tabla_mapeo(ruta_tabla)
     except Exception as e:
         print(f"\n  ERROR: No se pudo leer TablaSaldosRetiros.xlsx: {e}")
         return
 
-    # ── 2. Cargar saldos ──────────────────────────────────────────────────────
+    # -- 2. Cargar saldos ------------------------------------------------------
     try:
         df_saldo_raw = _cargar_saldos(ruta_saldo)
     except Exception as e:
@@ -633,9 +633,9 @@ def _diagnostico(
         return
 
     print(f"\n  Saldos CC+OVN: {len(df_saldo_raw):,} filas | "
-          f"{df_saldo_raw.index.min().date()} → {df_saldo_raw.index.max().date()}")
+          f"{df_saldo_raw.index.min().date()} -> {df_saldo_raw.index.max().date()}")
 
-    # ── 3. Cruce mapeo ↔ saldo ────────────────────────────────────────────────
+    # -- 3. Cruce mapeo <-> saldo ------------------------------------------------
     cols_saldo_upper = {c.strip().upper(): c for c in df_saldo_raw.columns}
     bancos_saldo: list[str] = []
     filas_cruce: list[dict] = []
@@ -658,22 +658,22 @@ def _diagnostico(
         })
 
     df_cruce = pd.DataFrame(filas_cruce)
-    print(f"\n  Cruce mapeo ↔ saldo:")
+    print(f"\n  Cruce mapeo <-> saldo:")
     for _, r in df_cruce.iterrows():
-        print(f"    {r['BANCOS_RETIROS']:<20} → {r['BANCOS_SALDOS']:<30}  [{r['Estado']}]")
+        print(f"    {r['BANCOS_RETIROS']:<20} -> {r['BANCOS_SALDOS']:<30}  [{r['Estado']}]")
 
     if not bancos_saldo:
-        print("\n  Sin bancos en intersección — revisar nombres en TablaSaldosRetiros.xlsx")
+        print("\n  Sin bancos en intersección -- revisar nombres en TablaSaldosRetiros.xlsx")
         return
 
     df_saldo  = df_saldo_raw[bancos_saldo].copy()
     df_flujos = df_saldo.diff()
     calendario = pd.DatetimeIndex(df_saldo.index)
 
-    # ── 4. Outliers por banco ─────────────────────────────────────────────────
-    print(f"\n{'─'*72}")
-    print(f"  OUTLIERS DE SALDO (zscore > {OUTLIER_ZSCORE}σ  |  IQR > {OUTLIER_IQR}×IQR)")
-    print(f"{'─'*72}")
+    # -- 4. Outliers por banco -------------------------------------------------
+    print(f"\n{'-'*72}")
+    print(f"  OUTLIERS DE SALDO (zscore > {OUTLIER_ZSCORE}sigma  |  IQR > {OUTLIER_IQR}×IQR)")
+    print(f"{'-'*72}")
 
     filas_outliers: list[dict] = []
     for banco in bancos_saldo:
@@ -686,7 +686,7 @@ def _diagnostico(
                 metodo = ("zscore+IQR" if r["outlier_zscore"] and r["outlier_iqr"]
                           else "zscore" if r["outlier_zscore"] else "IQR")
                 print(f"    {str(r['fecha'].date()):<12}  valor={r['valor']:>12,.1f}  "
-                      f"z={r['z_score']:+.1f}σ  [{metodo}]")
+                      f"z={r['z_score']:+.1f}sigma  [{metodo}]")
                 filas_outliers.append({
                     "banco":          banco,
                     "fecha":          r["fecha"],
@@ -702,7 +702,7 @@ def _diagnostico(
     )
     print(f"\n  Total outliers: {len(df_outliers)}")
 
-    # ── 5. Ratios históricos ──────────────────────────────────────────────────
+    # -- 5. Ratios históricos --------------------------------------------------
     todos_cierres  = _cierres_trimestrales(calendario)
     # Para el diagnóstico usar TODOS los cierres históricos (no solo los últimos N)
     fecha_max_data = df_saldo.index.max()
@@ -712,7 +712,7 @@ def _diagnostico(
     det = detectar_bancos_activos(df_saldo, df_flujos, bancos_saldo, cierres_hist, calendario,
                                   cierres_lookback=cierres_n)
 
-    # Tabla pivot: banco × cierre → ratio
+    # Tabla pivot: banco × cierre -> ratio
     filas_ratios: list[dict] = []
     for banco, info in sorted(det.items()):
         fila: dict = {"banco": banco}
@@ -725,17 +725,17 @@ def _diagnostico(
     df_ratios = pd.DataFrame(filas_ratios)
 
     # Consola: solo últimos N cierres
-    print(f"\n{'─'*72}")
-    print(f"  RATIOS |retiro_7dh|/saldo_max — últimos {N_TRIMESTRES_LOOKBACK} cierres")
-    print(f"{'─'*72}")
+    print(f"\n{'-'*72}")
+    print(f"  RATIOS |retiro_7dh|/saldo_max -- últimos {N_TRIMESTRES_LOOKBACK} cierres")
+    print(f"{'-'*72}")
     header = f"  {'Banco':<35} {'Estado':>12}   " + "   ".join(
         f"{fc.year}-Q{fc.quarter}" for fc in cierres_n
     )
     print(header)
-    print(f"  {'─'*35} {'─'*12}   {'─'*40}")
+    print(f"  {'-'*35} {'-'*12}   {'-'*40}")
     for banco, info in sorted(det.items()):
-        estado = ("ACTIVO  ✓" if info["activa"]
-                  else "hist ✓   " if info["alguna_vez_activa"]
+        estado = ("ACTIVO  [OK]" if info["activa"]
+                  else "hist [OK]   " if info["alguna_vez_activa"]
                   else "inactivo")
         ratios_str = "   ".join(
             f"{info['ratios'].get(fc, float('nan')):.0%}" if fc in info["ratios"] else "  N/D "
@@ -743,7 +743,7 @@ def _diagnostico(
         )
         print(f"  {banco:<35} {estado:>12}   {ratios_str}")
 
-    # ── 6. Resumen peor_B ─────────────────────────────────────────────────────
+    # -- 6. Resumen peor_B -----------------------------------------------------
     bancos_activos = [b for b, info in det.items() if info["alguna_vez_activa"]]
     peor_total = sum(
         _peor_B(df_saldo, det, b, cierres_hist, fecha_ref=fecha_ref)
@@ -804,17 +804,17 @@ def _diagnostico(
     ])
 
     # Consola: resumen final
-    print(f"\n{'─'*72}")
-    print(f"  RESUMEN — peor retiro potencial por banco activo")
-    print(f"{'─'*72}")
+    print(f"\n{'-'*72}")
+    print(f"  RESUMEN -- peor retiro potencial por banco activo")
+    print(f"{'-'*72}")
     for b in bancos_activos:
         pb = _peor_B(df_saldo, det, b, cierres_hist, fecha_ref=fecha_ref)
         print(f"  {b:<35}  {pb:>14,.1f}")
     if bancos_activos:
-        print(f"  {'─'*35}  {'─'*14}")
+        print(f"  {'-'*35}  {'-'*14}")
         print(f"  {'TOTAL':35}  {peor_total:>14,.1f}")
 
-    # ── 7. Exportar a Excel ───────────────────────────────────────────────────
+    # -- 7. Exportar a Excel ---------------------------------------------------
     dir_output.mkdir(parents=True, exist_ok=True)
     ruta_out = dir_output / "diag_overlay_sobreencaje.xlsx"
 
@@ -847,7 +847,7 @@ def exportar_saldos_retiros(
     """
     Genera saldos_retiros_bancos.xlsx con:
       - Una pestaña por banco: fecha | saldo | retiro_diario | es_cierre_trim
-      - Última pestaña "Señal": banco × cierre trimestral → ratio (%) y activación
+      - Última pestaña "Señal": banco × cierre trimestral -> ratio (%) y activación
 
     La columna es_cierre_trim marca con 1 el último día hábil de cada trimestre,
     facilitando identificar visualmente los eventos de sobreencaje.
@@ -855,7 +855,7 @@ def exportar_saldos_retiros(
     if fecha_ref is None:
         fecha_ref = pd.Timestamp.today().normalize()
 
-    # ── Cargar datos ──────────────────────────────────────────────────────────
+    # -- Cargar datos ----------------------------------------------------------
     try:
         tabla_mapeo = cargar_tabla_mapeo(ruta_tabla)
     except Exception as e:
@@ -883,7 +883,7 @@ def exportar_saldos_retiros(
             bancos_consolidados[col_real].append(nombre_ret)
 
     if not bancos_consolidados:
-        print("ERROR: Sin bancos en intersección — revisar TablaSaldosRetiros.xlsx")
+        print("ERROR: Sin bancos en intersección -- revisar TablaSaldosRetiros.xlsx")
         return
 
     # bancos_info: una entrada por banco_saldos único, nombre_ret combinado con "/"
@@ -917,7 +917,7 @@ def exportar_saldos_retiros(
         cierres_lookback=cierres_n,
     )
 
-    # ── Exportar ──────────────────────────────────────────────────────────────
+    # -- Exportar --------------------------------------------------------------
     dir_output.mkdir(parents=True, exist_ok=True)
     ruta_out = dir_output / "saldos_retiros_bancos.xlsx"
 
@@ -925,7 +925,7 @@ def exportar_saldos_retiros(
 
     with pd.ExcelWriter(ruta_out, engine="openpyxl") as writer:
 
-        # ── Pestaña por banco ─────────────────────────────────────────────────
+        # -- Pestaña por banco -------------------------------------------------
         for info in bancos_info:
             col_sal  = info["saldos"]
             nom_ret  = info["retiros"]         # "CONTINEN / BBVA" (nombres históricos)
@@ -965,8 +965,8 @@ def exportar_saldos_retiros(
             )
             print(f"  + {sheet:<25}  saldo válido: {n_saldo_ok:,}/{n_total:,} ({pct_ok:.0f}%){aviso}")
 
-        # ── Última pestaña: Señal ─────────────────────────────────────────────
-        # Filas: bancos | Columnas: cierre trimestral → ratio y activación
+        # -- Última pestaña: Señal ---------------------------------------------
+        # Filas: bancos | Columnas: cierre trimestral -> ratio y activación
         filas_senal: list[dict] = []
         for info in bancos_info:
             col_sal  = info["saldos"]
@@ -996,9 +996,9 @@ def exportar_saldos_retiros(
         df_senal.to_excel(writer, sheet_name="Señal_trimestral", index=False)
         print(f"  + Señal_trimestral  ({len(cierres_hist)} cierres históricos)")
 
-        # ── Pestaña: Ajuste_diario ────────────────────────────────────────────
+        # -- Pestaña: Ajuste_diario --------------------------------------------
         # worst_ratio se cachea por trimestre (cambia cuando hay nuevo cierre).
-        # p95_saldo usa el trimestre actual hasta t → se recalcula cada día.
+        # p95_saldo usa el trimestre actual hasta t -> se recalcula cada día.
         filas_ajuste: list[dict] = []
         prev_cierres_key: tuple = ()
         cache_det_t: dict | None = None
@@ -1063,20 +1063,20 @@ def exportar_saldos_retiros(
         df_ajuste  = df_ajuste[cols_meta + sorted(cols_banco) + cols_ref]
 
         df_ajuste.to_excel(writer, sheet_name="Ajuste_diario", index=False)
-        print(f"  + Ajuste_diario     ({len(df_ajuste):,} filas — peor_total diario)")
+        print(f"  + Ajuste_diario     ({len(df_ajuste):,} filas -- peor_total diario)")
 
-        # ── Pestaña: P95_saldo_diario ─────────────────────────────────────────
+        # -- Pestaña: P95_saldo_diario -----------------------------------------
         # Para cada día hábil: P95 del saldo por banco y por trimestre de
         # referencia, más el p95_max usado en peor_B.  Solo cambia al cruzar
-        # un cierre trimestral → mismo caché que Ajuste_diario.
+        # un cierre trimestral -> mismo caché que Ajuste_diario.
 
-        # P95_saldo_diario: p95 del trimestre actual hasta t — se recalcula cada día
+        # P95_saldo_diario: p95 del trimestre actual hasta t -- se recalcula cada día
         # porque el trimestre actual crece a diario (igual que en _peor_B).
         filas_p95: list[dict] = []
 
         for t in calendario:
             pq_start_t = _prev_quarter_start(t)
-            ventana    = (f"{pq_start_t.year}-Q{pq_start_t.quarter} → "
+            ventana    = (f"{pq_start_t.year}-Q{pq_start_t.quarter} -> "
                           f"{t.year}-Q{t.quarter} (excl. {t.date()})")
             fila_p95   = {"fecha": t, "ventana_saldo": ventana}
             for b in bancos_saldo_unique:
@@ -1095,7 +1095,7 @@ def exportar_saldos_retiros(
         df_p95   = df_p95[cols_hdr + cols_det]
 
         df_p95.to_excel(writer, sheet_name="P95_saldo_diario", index=False)
-        print(f"  + P95_saldo_diario  ({len(df_p95):,} filas — P95 trim. actual por banco)")
+        print(f"  + P95_saldo_diario  ({len(df_p95):,} filas -- P95 trim. actual por banco)")
 
     print(f"\nArchivo generado: {ruta_out}\n")
 
@@ -1123,8 +1123,8 @@ def graficar_ajuste_overlay(
 ) -> None:
     """
     Lee Ajuste_diario de saldos_retiros_bancos.xlsx y genera dos paneles:
-      1. peor_total diario — magnitud del ajuste a lo largo del tiempo
-      2. Stacked area por banco — qué bancos impulsan el ajuste
+      1. peor_total diario -- magnitud del ajuste a lo largo del tiempo
+      2. Stacked area por banco -- qué bancos impulsan el ajuste
 
     Exporta el gráfico a DIR_OUTPUT_DIAG / "overlay_ajuste.png".
     """
@@ -1132,7 +1132,7 @@ def graficar_ajuste_overlay(
         ruta_excel = dir_output / "saldos_retiros_bancos.xlsx"
 
     if not ruta_excel.exists():
-        print(f"  No se encontró {ruta_excel} — ejecuta exportar_saldos_retiros() primero")
+        print(f"  No se encontró {ruta_excel} -- ejecuta exportar_saldos_retiros() primero")
         return
 
     print("Leyendo Ajuste_diario...")
@@ -1150,10 +1150,10 @@ def graficar_ajuste_overlay(
     # Rellenar NaN con 0 para el área apilada
     df_stack = df[cols_activos].fillna(0)
 
-    # Detectar cierres trimestrales (cambio en peor_total — proxy de cierre)
+    # Detectar cierres trimestrales (cambio en peor_total -- proxy de cierre)
     todos_cierres_vis = _cierres_trimestrales(pd.DatetimeIndex(df["fecha"]))
 
-    # ── Layout ────────────────────────────────────────────────────────────────
+    # -- Layout ----------------------------------------------------------------
     fig, (ax1, ax2) = plt.subplots(
         2, 1, figsize=(16, 9), sharex=True,
         gridspec_kw={"height_ratios": [1.2, 1.8]},
@@ -1167,7 +1167,7 @@ def graficar_ajuste_overlay(
         ax.yaxis.set_tick_params(length=0)
         ax.grid(axis="y", color="#e1e0d9", linewidth=0.6, zorder=0)
 
-    # ── Panel 1: peor_total ───────────────────────────────────────────────────
+    # -- Panel 1: peor_total ---------------------------------------------------
     mask_valid = df["peor_total"].notna() & (df["peor_total"] > 0)
     ax1.plot(
         df.loc[mask_valid, "fecha"],
@@ -1195,7 +1195,7 @@ def graficar_ajuste_overlay(
             fontsize=8.5, color="#2a78d6", fontweight="bold",
         )
 
-    # ── Panel 2: stacked area por banco ──────────────────────────────────────
+    # -- Panel 2: stacked area por banco --------------------------------------
     fechas   = df["fecha"].values
     baseline = np.zeros(len(df))
 
@@ -1220,7 +1220,7 @@ def graficar_ajuste_overlay(
     )
     legend.get_frame().set_linewidth(0.6)
 
-    # ── Marcadores de cierre trimestral en ambos paneles ─────────────────────
+    # -- Marcadores de cierre trimestral en ambos paneles ---------------------
     for fc in todos_cierres_vis:
         for ax in (ax1, ax2):
             ax.axvline(fc, color="#c3c2b7", linewidth=0.7,
@@ -1231,7 +1231,7 @@ def graficar_ajuste_overlay(
                      str(fc.year), fontsize=7, color="#898781",
                      ha="center", va="bottom")
 
-    # ── Eje X ─────────────────────────────────────────────────────────────────
+    # -- Eje X -----------------------------------------------------------------
     import matplotlib.dates as mdates
     ax2.xaxis.set_major_locator(mdates.YearLocator())
     ax2.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
