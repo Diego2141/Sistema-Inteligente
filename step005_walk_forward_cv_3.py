@@ -241,9 +241,10 @@ CQR_ALPHA        = 0.10   # miscoverage objetivo: 1 - cobertura deseada (90% -> 
 # -- Overlay sobreencaje (step007) --------------------------------------------
 # Requiere haber ejecutado step007 para generar saldos_retiros_bancos.xlsx.
 # El ajuste diario (peor_total) se lee desde la tab "Ajuste_diario" de ese archivo.
-OVERLAY_SOBREENCAJE  = False
-RUTA_AJUSTE_OVERLAY  = BASE_SISTEMA / "2. Output" / "analisis_cc" / "saldos_retiros_bancos.xlsx"
-OVERLAY_VENTANA_DH   = 7   # dias habiles de la ventana de retiro (mismo valor que step007)
+OVERLAY_SOBREENCAJE      = False
+RUTA_AJUSTE_OVERLAY      = BASE_SISTEMA / "2. Output" / "analisis_cc" / "saldos_retiros_bancos.xlsx"
+OVERLAY_VENTANA_DH       = 7     # dias habiles de la ventana de retiro (mismo valor que step007)
+OVERLAY_TAU_REFERENCIA   = 0.05  # quantil usado como denominador del factor (ej: 0.01 o 0.05)
 
 
 # -- Fan chart TEST: número de snapshots por fold ------------------------------
@@ -2463,8 +2464,8 @@ def _aplicar_overlay_sobreencaje(
     Lee peor_total diario desde la tab 'Ajuste_diario' del Excel de step007
     y aplica un factor multiplicativo uniforme sobre toda la ventana de proyeccion.
 
-    f = peor_total / |sum(Q01 en ventana de OVERLAY_VENTANA_DH dias habiles
-                          antes del primer cierre trimestral proyectado)|
+    f = peor_total / |sum(Q[OVERLAY_TAU_REFERENCIA] en ventana de OVERLAY_VENTANA_DH
+                          dias habiles antes del primer cierre trimestral proyectado)|
     """
     if not OVERLAY_SOBREENCAJE:
         return preds
@@ -2523,7 +2524,7 @@ def _aplicar_overlay_sobreencaje(
             h_fb = h_t[np.abs(h_t - h_cierre).argmin()]
             mask_ventana = mask_origen & (h_arr == h_fb)
 
-        q01_acum = float(preds[0.01][mask_ventana].sum())
+        q01_acum = float(preds[OVERLAY_TAU_REFERENCIA][mask_ventana].sum())
         if q01_acum >= 0 or abs(q01_acum) < 1e-6:
             continue
 
@@ -2536,7 +2537,7 @@ def _aplicar_overlay_sobreencaje(
 
         logger.info(
             f"[OVERLAY] {fecha_t.date()} | cierre: {fecha_cierre.date()} "
-            f"h=[{h_inicio},{h_cierre}] | Q01_acum={q01_acum:+.0f} | "
+            f"h=[{h_inicio},{h_cierre}] | Q{int(OVERLAY_TAU_REFERENCIA*100):02d}_acum={q01_acum:+.0f} | "
             f"peor_total={peor_total:,.0f} | f={f:.3f}"
         )
 
