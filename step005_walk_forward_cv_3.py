@@ -241,10 +241,11 @@ CQR_ALPHA        = 0.10   # miscoverage objetivo: 1 - cobertura deseada (90% -> 
 # -- Overlay sobreencaje (step007) --------------------------------------------
 # Requiere haber ejecutado step007 para generar saldos_retiros_bancos.xlsx.
 # El ajuste diario (peor_total) se lee desde la tab "Ajuste_diario" de ese archivo.
-OVERLAY_SOBREENCAJE      = False
-RUTA_AJUSTE_OVERLAY      = BASE_SISTEMA / "2. Output" / "analisis_cc" / "saldos_retiros_bancos.xlsx"
-OVERLAY_VENTANA_DH       = 7     # dias habiles de la ventana de retiro (mismo valor que step007)
-OVERLAY_TAU_REFERENCIA   = 0.05  # quantil usado como denominador del factor (ej: 0.01 o 0.05)
+OVERLAY_SOBREENCAJE             = False
+RUTA_AJUSTE_OVERLAY             = BASE_SISTEMA / "2. Output" / "analisis_cc" / "saldos_retiros_bancos.xlsx"
+OVERLAY_VENTANA_DH              = 7   # dias habiles de la ventana de retiro (mismo valor que step007)
+OVERLAY_TAU_REFERENCIA          = 0.05  # quantil usado como denominador del factor
+OVERLAY_CONOCIMIENTO_ANTICIPADO = 2   # T+N: flujos conocidos con N dias habiles de antelacion
 
 
 # -- Fan chart TEST: número de snapshots por fold ------------------------------
@@ -2465,12 +2466,16 @@ def _aplicar_overlay_sobreencaje(
     Lee peor_total diario desde la tab 'Ajuste_diario' del Excel de step007
     y aplica un factor multiplicativo uniforme sobre toda la ventana de proyeccion.
 
-    peor_total actua como tope: los retiros ya realizados en la ventana de 7dh
-    antes del cierre se descuentan del cap (netting). Asi el factor se estabiliza
-    a medida que los retiros se materializan y el margen restante disminuye.
+    Logica T+N (OVERLAY_CONOCIMIENTO_ANTICIPADO = N):
+    - Los flujos de los proximos N dias habiles son conocidos con antelacion.
+    - Si h_cierre <= N: el cierre ya es completamente conocido -> se usa el
+      SIGUIENTE cierre trimestral (que aun tiene incertidumbre real).
+    - Para el cierre elegido: los dias conocidos (realizados + N dias adelante)
+      consumen el tope peor_total (netting). Solo el resto es incierto.
+    - Q[TAU]_acum se calcula sobre la porcion incierta: h en [N+1 .. h_cierre].
 
-    peor_restante = max(0, peor_total - retiros_ya_realizados_en_ventana)
-    f = peor_restante / |sum(Q[OVERLAY_TAU_REFERENCIA] en ventana)|
+    peor_restante = max(0, peor_total - retiros_conocidos_en_ventana)
+    f = peor_restante / |sum(Q[TAU] para h en [max(N+1,h_inicio)..h_cierre])|
     """
     if not OVERLAY_SOBREENCAJE:
         return preds
@@ -2490,6 +2495,7 @@ def _aplicar_overlay_sobreencaje(
         return preds
 
     preds_adj = {tau: arr.copy() for tau, arr in preds.items()}
+    N = OVERLAY_CONOCIMIENTO_ANTICIPADO
 
     for fecha_t in sorted(set(fechas_t)):
         disponibles = df_aj.index[df_aj.index <= fecha_t]
@@ -2501,8 +2507,9 @@ def _aplicar_overlay_sobreencaje(
 
         bh = pd.bdate_range(
             start=fecha_t + pd.offsets.BDay(1),
-            periods=OVERLAY_VENTANA_DH + 75,
+            periods=N + OVERLAY_VENTANA_DH + 75,
         )
+        bh_list = list(bh)
         df_bh = pd.DataFrame({"fecha": bh, "mes": bh.month, "anio": bh.year, "trim": bh.quarter})
         cierres_proy = (
             df_bh[df_bh["mes"].isin([3, 6, 9, 12])]
@@ -2511,44 +2518,62 @@ def _aplicar_overlay_sobreencaje(
         )
         if not cierres_proy:
             continue
-        fecha_cierre = cierres_proy[0]
 
-        bh_list = list(bh)
-        try:
-            h_cierre = bh_list.index(fecha_cierre) + 1
-        except ValueError:
-            diffs = [abs((d - fecha_cierre).days) for d in bh_list]
-            h_cierre = diffs.index(min(diffs)) + 1
+        # Primer cierre con horizonte incierto > N (si h_cierre <= N, ya es conocido)
+        fecha_cierre = None
+        h_cierre = None
+        for _cand in cierres_proy:
+            try:
+                _h = bh_list.index(_cand) + 1
+            except ValueError:
+                _diffs = [abs((d - _cand).days) for d in bh_list]
+                _h = _diffs.index(min(_diffs)) + 1
+            if _h > N:
+                fecha_cierre = _cand
+                h_cierre = _h
+                break
+
+        if fecha_cierre is None:
+            continue
 
         h_inicio = max(1, h_cierre - OVERLAY_VENTANA_DH + 1)
 
-        # -- Netting: descontar retiros ya realizados en la ventana de 7dh ------
-        # fecha_inicio_ventana_real = primer dia del periodo de 7dh antes del cierre
+        # -- Netting: dias conocidos = realizados hasta fecha_t + N dias hábiles
         fecha_inicio_ventana_real = fecha_cierre - pd.offsets.BDay(OVERLAY_VENTANA_DH - 1)
-        retiro_realizado = 0.0
-        if df_hist is not None and fecha_inicio_ventana_real <= fecha_t:
-            past_days = pd.bdate_range(start=fecha_inicio_ventana_real, end=fecha_t)
-            for _d in past_days:
+        fecha_conocida_hasta = min(
+            fecha_t + pd.offsets.BDay(N),
+            fecha_cierre,
+        )
+        retiro_conocido = 0.0
+        if df_hist is not None and fecha_inicio_ventana_real <= fecha_conocida_hasta:
+            known_days = pd.bdate_range(
+                start=fecha_inicio_ventana_real, end=fecha_conocida_hasta
+            )
+            for _d in known_days:
                 _d_prev = _d - pd.offsets.BDay(1)
                 _rows = df_hist[(df_hist["fecha_t"] == _d_prev) & (df_hist["h"] == 1)]
                 if not _rows.empty:
                     _flow = float(_rows["target"].values[0])
                     if _flow < 0:
-                        retiro_realizado += abs(_flow)
+                        retiro_conocido += abs(_flow)
 
-        peor_restante = max(0.0, peor_total - retiro_realizado)
+        peor_restante = max(0.0, peor_total - retiro_conocido)
         if peor_restante < 1e-6:
             logger.info(
                 f"[OVERLAY] {fecha_t.date()} | cap consumido "
-                f"(realizados={retiro_realizado:,.0f} >= peor={peor_total:,.0f}) -- sin ajuste"
+                f"(conocidos={retiro_conocido:,.0f} >= peor={peor_total:,.0f}) -- sin ajuste"
             )
             continue
 
+        # Q[TAU] sobre la porcion incierta: h > N (proximos N dias ya son conocidos)
+        h_inicio_incierto = max(h_inicio, N + 1)
         mask_origen  = (fechas_t == fecha_t)
-        mask_ventana = mask_origen & (h_arr >= h_inicio) & (h_arr <= h_cierre)
+        mask_ventana = mask_origen & (h_arr >= h_inicio_incierto) & (h_arr <= h_cierre)
         if not mask_ventana.any():
-            h_t = h_arr[mask_origen]
-            h_fb = h_t[np.abs(h_t - h_cierre).argmin()]
+            h_t_unc = h_arr[mask_origen & (h_arr > N)]
+            if len(h_t_unc) == 0:
+                continue
+            h_fb = h_t_unc[np.abs(h_t_unc - h_cierre).argmin()]
             mask_ventana = mask_origen & (h_arr == h_fb)
 
         q01_acum = float(preds[OVERLAY_TAU_REFERENCIA][mask_ventana].sum())
@@ -2564,8 +2589,9 @@ def _aplicar_overlay_sobreencaje(
 
         logger.info(
             f"[OVERLAY] {fecha_t.date()} | cierre: {fecha_cierre.date()} "
-            f"h=[{h_inicio},{h_cierre}] | Q{int(OVERLAY_TAU_REFERENCIA*100):02d}_acum={q01_acum:+.0f} | "
-            f"peor={peor_total:,.0f} | realiz={retiro_realizado:,.0f} | "
+            f"h=[{h_inicio_incierto},{h_cierre}] | "
+            f"Q{int(OVERLAY_TAU_REFERENCIA*100):02d}_acum={q01_acum:+.0f} | "
+            f"peor={peor_total:,.0f} | conocidos={retiro_conocido:,.0f} | "
             f"restante={peor_restante:,.0f} | f={f:.3f}"
         )
 

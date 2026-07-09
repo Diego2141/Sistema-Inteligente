@@ -74,10 +74,11 @@ DPI         = 72   # resolución reducida para evitar out-of-memory
 COLOR = "tomato"  # distingue XGBoost QT de XGBoost estándar (darkorange) y LightGBM (steelblue)
 
 # ── Overlay sobreencaje ───────────────────────────────────────────────────────
-OVERLAY_SOBREENCAJE    = False   # True = aplicar factor multiplicativo al fan chart
-RUTA_AJUSTE_OVERLAY    = BASE_SISTEMA / "2. Output" / "analisis_cc" / "saldos_retiros_bancos.xlsx"
-OVERLAY_VENTANA_DH     = 7      # dias habiles de la ventana de retiro
-OVERLAY_TAU_REFERENCIA = 0.05   # quantil usado como denominador del factor (0.01 o 0.05)
+OVERLAY_SOBREENCAJE             = False   # True = aplicar factor multiplicativo al fan chart
+RUTA_AJUSTE_OVERLAY             = BASE_SISTEMA / "2. Output" / "analisis_cc" / "saldos_retiros_bancos.xlsx"
+OVERLAY_VENTANA_DH              = 7      # dias habiles de la ventana de retiro
+OVERLAY_TAU_REFERENCIA          = 0.05   # quantil usado como denominador del factor
+OVERLAY_CONOCIMIENTO_ANTICIPADO = 2      # T+N: flujos conocidos con N dias habiles de antelacion
 
 
 # ── 1. Cargar modelos XGBoost QT ──────────────────────────────────────────────
@@ -402,10 +403,14 @@ def _aplicar_overlay_frame(res: "pd.DataFrame", fecha_origen: "pd.Timestamp",
     res: DataFrame con columnas q01, q05, q50, q95, q99 (y opcionalmente mean).
     Modifica en raw units (antes de /1e6).
 
-    peor_total actua como tope: los retiros ya realizados en la ventana de 7dh
-    antes del cierre se descuentan del cap (netting). A medida que los retiros
-    se materializan, el margen restante disminuye y el factor se estabiliza.
+    Logica T+N (OVERLAY_CONOCIMIENTO_ANTICIPADO = N):
+    - Si h_cierre <= N: el cierre es completamente conocido -> se usa el
+      SIGUIENTE cierre trimestral.
+    - Los dias conocidos (realizados + proximos N dias) consumen el cap peor_total.
+    - Q[TAU]_acum se calcula solo sobre la porcion incierta (h > N).
     """
+    N = OVERLAY_CONOCIMIENTO_ANTICIPADO
+
     disponibles = df_aj.index[df_aj.index <= fecha_origen]
     if len(disponibles) == 0:
         return res
@@ -413,12 +418,12 @@ def _aplicar_overlay_frame(res: "pd.DataFrame", fecha_origen: "pd.Timestamp",
     if peor_total <= 0:
         return res
 
-    # Primer cierre trimestral dentro del horizonte proyectado
     h_max = int(res["h"].max())
     bh = pd.bdate_range(
         start=fecha_origen + pd.offsets.BDay(1),
-        periods=OVERLAY_VENTANA_DH + h_max + 5,
+        periods=N + OVERLAY_VENTANA_DH + h_max + 5,
     )
+    bh_list = list(bh)
     df_bh = pd.DataFrame({"fecha": bh, "mes": bh.month, "anio": bh.year, "trim": bh.quarter})
     cierres_proy = (
         df_bh[df_bh["mes"].isin([3, 6, 9, 12])]
@@ -427,45 +432,61 @@ def _aplicar_overlay_frame(res: "pd.DataFrame", fecha_origen: "pd.Timestamp",
     )
     if not cierres_proy:
         return res
-    fecha_cierre = cierres_proy[0]
 
-    bh_list = list(bh)
-    try:
-        h_cierre = bh_list.index(fecha_cierre) + 1
-    except ValueError:
-        diffs = [abs((d - fecha_cierre).days) for d in bh_list]
-        h_cierre = diffs.index(min(diffs)) + 1
+    # Primer cierre con horizonte incierto > N
+    fecha_cierre = None
+    h_cierre = None
+    for _cand in cierres_proy:
+        try:
+            _h = bh_list.index(_cand) + 1
+        except ValueError:
+            _diffs = [abs((d - _cand).days) for d in bh_list]
+            _h = _diffs.index(min(_diffs)) + 1
+        if _h > N:
+            fecha_cierre = _cand
+            h_cierre = _h
+            break
+
+    if fecha_cierre is None:
+        return res
 
     h_inicio = max(1, h_cierre - OVERLAY_VENTANA_DH + 1)
 
-    # -- Netting: descontar retiros ya realizados en la ventana de 7dh ---------
+    # -- Netting: dias conocidos = realizados hasta fecha_origen + N dias habiles
     fecha_inicio_ventana_real = fecha_cierre - pd.offsets.BDay(OVERLAY_VENTANA_DH - 1)
-    retiro_realizado = 0.0
-    if df_base is not None and fecha_inicio_ventana_real <= fecha_origen:
-        past_days = pd.bdate_range(start=fecha_inicio_ventana_real, end=fecha_origen)
-        for _d in past_days:
+    fecha_conocida_hasta = min(
+        fecha_origen + pd.offsets.BDay(N),
+        fecha_cierre,
+    )
+    retiro_conocido = 0.0
+    if df_base is not None and fecha_inicio_ventana_real <= fecha_conocida_hasta:
+        known_days = pd.bdate_range(start=fecha_inicio_ventana_real, end=fecha_conocida_hasta)
+        for _d in known_days:
             _d_prev = _d - pd.offsets.BDay(1)
             _rows = df_base[(df_base["fecha_t"] == _d_prev) & (df_base["h"] == 1)]
             if not _rows.empty:
                 _flow = float(_rows["target"].values[0])
                 if _flow < 0:
-                    retiro_realizado += abs(_flow)
+                    retiro_conocido += abs(_flow)
 
-    peor_restante = max(0.0, peor_total - retiro_realizado)
+    peor_restante = max(0.0, peor_total - retiro_conocido)
     if peor_restante < 1e-6:
         print(f"  [OVERLAY] {fecha_origen.date()} | cap consumido "
-              f"(realizados={retiro_realizado:,.0f} >= peor={peor_total:,.0f}) -- sin ajuste")
+              f"(conocidos={retiro_conocido:,.0f} >= peor={peor_total:,.0f}) -- sin ajuste")
         return res
 
-    # Columna de referencia para el denominador
+    # Q[TAU] solo sobre la porcion incierta: h > N
+    h_inicio_incierto = max(h_inicio, N + 1)
     q_col = f"q{int(OVERLAY_TAU_REFERENCIA * 100):02d}"
     if q_col not in res.columns:
         return res
 
-    mask_ventana = (res["h"] >= h_inicio) & (res["h"] <= h_cierre)
+    mask_ventana = (res["h"] >= h_inicio_incierto) & (res["h"] <= h_cierre)
     if not mask_ventana.any():
-        h_arr = res["h"].values
-        h_fb = h_arr[np.abs(h_arr - h_cierre).argmin()]
+        h_arr_unc = res.loc[res["h"] > N, "h"].values
+        if len(h_arr_unc) == 0:
+            return res
+        h_fb = h_arr_unc[np.abs(h_arr_unc - h_cierre).argmin()]
         mask_ventana = (res["h"] == h_fb)
 
     q_acum = float(res.loc[mask_ventana, q_col].sum())
@@ -477,15 +498,14 @@ def _aplicar_overlay_frame(res: "pd.DataFrame", fecha_origen: "pd.Timestamp",
         return res
 
     res = res.copy()
-    q_cols = [c for c in res.columns if c.startswith("q")]
-    for col in q_cols:
+    for col in [c for c in res.columns if c.startswith("q")]:
         res[col] = res[col] * f
     if "mean" in res.columns:
         res["mean"] = res["mean"] * f
 
     print(f"  [OVERLAY] {fecha_origen.date()} | cierre: {fecha_cierre.date()} "
-          f"h=[{h_inicio},{h_cierre}] | {q_col}_acum={q_acum:+.0f} | "
-          f"peor={peor_total:,.0f} | realiz={retiro_realizado:,.0f} | "
+          f"h=[{h_inicio_incierto},{h_cierre}] | {q_col}_acum={q_acum:+.0f} | "
+          f"peor={peor_total:,.0f} | conocidos={retiro_conocido:,.0f} | "
           f"restante={peor_restante:,.0f} | f={f:.3f}")
     return res
 
