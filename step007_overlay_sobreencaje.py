@@ -75,6 +75,7 @@ OVERLAY_SOBREENCAJE_ACTIVO = False
 # ── Parámetros del overlay ────────────────────────────────────────────────────
 UMBRAL_ACTIVACION     = 0.50   # ratio |retiro_7dh| / saldo_P95_mes para activar
 N_TRIMESTRES_LOOKBACK = 4      # cierres para la tabla Señal (display); el worst_ratio usa todo el historial
+MIN_TRIMESTRES_ACTIVO = 2      # mín. trimestres con ratio > umbral para considerar el banco activo
 VENTANA_RETIRO_DH     = 7      # días hábiles de la ventana antes del cierre
 FACTOR_SEGURIDAD      = 0.00   # margen extra sobre peor_B  (0.00→0.10 = 0%→10%)
 PERCENTIL_SALDO       = 0.95   # percentil del saldo usado en el denominador del ratio y en peor_B
@@ -325,16 +326,19 @@ def detectar_bancos_activos(
     calendario: pd.DatetimeIndex,
     n_dh: int = VENTANA_RETIRO_DH,
     umbral: float = UMBRAL_ACTIVACION,
+    min_trimestres: int = MIN_TRIMESTRES_ACTIVO,
 ) -> dict[str, dict]:
     """
     Evalúa la estrategia de sobreencaje para cada banco.
 
     Retorna:
         {col_saldo: {"activa": bool, "alguna_vez_activa": bool,
+                     "n_trimestres_activos": int,
                      "ratios": {fecha_cierre: ratio}}}
 
-    "activa"           = True si ratio en el ÚLTIMO cierre > umbral.
-    "alguna_vez_activa"= True si ratio > umbral en AL MENOS UNO de los cierres.
+    "activa"            = True si ratio en el ÚLTIMO cierre > umbral.
+    "alguna_vez_activa" = True si ratio > umbral en AL MENOS min_trimestres cierres
+                          (patrón repetido, no evento aislado).
     """
     resultado: dict[str, dict] = {}
     for col in bancos_saldo:
@@ -345,10 +349,15 @@ def detectar_bancos_activos(
             r = _ratio_banco_cierre(df_saldo, df_flujos, col, fc, calendario, n_dh)
             if r is not None:
                 ratios[fc] = r
-        activa           = bool(ratios.get(max(ratios), 0) > umbral) if ratios else False
-        alguna_vez_activa = any(r > umbral for r in ratios.values())
-        resultado[col] = {"activa": activa, "alguna_vez_activa": alguna_vez_activa,
-                          "ratios": ratios}
+        n_activos         = sum(1 for r in ratios.values() if r > umbral)
+        activa            = bool(ratios.get(max(ratios), 0) > umbral) if ratios else False
+        alguna_vez_activa = n_activos >= min_trimestres
+        resultado[col] = {
+            "activa":              activa,
+            "alguna_vez_activa":   alguna_vez_activa,
+            "n_trimestres_activos": n_activos,
+            "ratios":              ratios,
+        }
     return resultado
 
 
@@ -747,13 +756,14 @@ def _diagnostico(
             if info["alguna_vez_activa"] else 0.0
         )
         filas_resumen.append({
-            "banco":               b,
-            "activa_ultimo_trim":  info["activa"],
-            "alguna_vez_activa":   info["alguna_vez_activa"],
-            "worst_ratio":         round(worst_r, 4) if worst_r is not None else None,
+            "banco":                 b,
+            "activa_ultimo_trim":    info["activa"],
+            "alguna_vez_activa":     info["alguna_vez_activa"],
+            "n_trimestres_activos":  info["n_trimestres_activos"],
+            "worst_ratio":           round(worst_r, 4) if worst_r is not None else None,
             "p95_saldo_trim_actual": round(p95_sal, 1) if p95_sal is not None else None,
-            "factor_seg":          FACTOR_SEGURIDAD,
-            "peor_B":              round(pb, 1),
+            "factor_seg":            FACTOR_SEGURIDAD,
+            "peor_B":                round(pb, 1),
         })
 
     # Fila total
@@ -774,6 +784,7 @@ def _diagnostico(
         {"parametro": "OVERLAY_SOBREENCAJE_ACTIVO", "valor": str(OVERLAY_SOBREENCAJE_ACTIVO)},
         {"parametro": "UMBRAL_ACTIVACION",          "valor": f"{UMBRAL_ACTIVACION:.0%}"},
         {"parametro": "N_TRIMESTRES_LOOKBACK",      "valor": str(N_TRIMESTRES_LOOKBACK)},
+        {"parametro": "MIN_TRIMESTRES_ACTIVO",      "valor": str(MIN_TRIMESTRES_ACTIVO)},
         {"parametro": "VENTANA_RETIRO_DH",          "valor": str(VENTANA_RETIRO_DH)},
         {"parametro": "FACTOR_SEGURIDAD",           "valor": f"{FACTOR_SEGURIDAD:.0%}"},
         {"parametro": "OUTLIER_ZSCORE",             "valor": str(OUTLIER_ZSCORE)},
