@@ -436,12 +436,15 @@ def _aplicar_overlay_frame(res: "pd.DataFrame", fecha_origen: "pd.Timestamp",
     # Primer cierre con horizonte incierto > N
     fecha_cierre = None
     h_cierre = None
+    _primer_h = None
     for _cand in cierres_proy:
         try:
             _h = bh_list.index(_cand) + 1
         except ValueError:
             _diffs = [abs((d - _cand).days) for d in bh_list]
             _h = _diffs.index(min(_diffs)) + 1
+        if _primer_h is None:
+            _primer_h = _h
         if _h > N:
             fecha_cierre = _cand
             h_cierre = _h
@@ -449,6 +452,26 @@ def _aplicar_overlay_frame(res: "pd.DataFrame", fecha_origen: "pd.Timestamp",
 
     if fecha_cierre is None:
         return res
+
+    res = res.copy()
+
+    # Si el primer cierre fue saltado (h <= N), reemplazar h=1..N con valor realizado
+    _primer_cierre_saltado = (_primer_h is not None) and (_primer_h <= N)
+    if _primer_cierre_saltado and df_base is not None:
+        for _h_known in range(1, N + 1):
+            _rrows = df_base[
+                (df_base["fecha_t"] == fecha_origen) & (df_base["h"] == _h_known)
+            ]
+            if not _rrows.empty:
+                _val_real = float(_rrows["target"].values[0])
+                _mask_h = res["h"] == _h_known
+                if _mask_h.any():
+                    for col in [c for c in res.columns if c.startswith("q")]:
+                        res.loc[_mask_h, col] = _val_real
+                    if "mean" in res.columns:
+                        res.loc[_mask_h, "mean"] = _val_real
+        print(f"  [OVERLAY] {fecha_origen.date()} | primer cierre h={_primer_h} <= N={N}: "
+              f"h=1..{N} reemplazados con valor realizado")
 
     h_inicio = max(1, h_cierre - OVERLAY_VENTANA_DH + 1)
 
@@ -497,7 +520,6 @@ def _aplicar_overlay_frame(res: "pd.DataFrame", fecha_origen: "pd.Timestamp",
     if f <= 1.0:
         return res
 
-    res = res.copy()
     for col in [c for c in res.columns if c.startswith("q")]:
         res[col] = res[col] * f
     if "mean" in res.columns:

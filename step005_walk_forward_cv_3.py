@@ -2522,12 +2522,15 @@ def _aplicar_overlay_sobreencaje(
         # Primer cierre con horizonte incierto > N (si h_cierre <= N, ya es conocido)
         fecha_cierre = None
         h_cierre = None
+        _primer_h = None   # h del primer cierre del horizonte (para detectar salto)
         for _cand in cierres_proy:
             try:
                 _h = bh_list.index(_cand) + 1
             except ValueError:
                 _diffs = [abs((d - _cand).days) for d in bh_list]
                 _h = _diffs.index(min(_diffs)) + 1
+            if _primer_h is None:
+                _primer_h = _h
             if _h > N:
                 fecha_cierre = _cand
                 h_cierre = _h
@@ -2535,6 +2538,27 @@ def _aplicar_overlay_sobreencaje(
 
         if fecha_cierre is None:
             continue
+
+        mask_origen = (fechas_t == fecha_t)
+
+        # Si el primer cierre fue saltado (h <= N), reemplazar h=1..N con valores
+        # realizados: esos flujos son hechos conocidos, no proyecciones inciertas.
+        _primer_cierre_saltado = (_primer_h is not None) and (_primer_h <= N)
+        if _primer_cierre_saltado and df_hist is not None:
+            for _h_known in range(1, N + 1):
+                _rrows = df_hist[
+                    (df_hist["fecha_t"] == fecha_t) & (df_hist["h"] == _h_known)
+                ]
+                if not _rrows.empty:
+                    _val_real = float(_rrows["target"].values[0])
+                    _mask_h = mask_origen & (h_arr == _h_known)
+                    if _mask_h.any():
+                        for tau in preds_adj:
+                            preds_adj[tau][_mask_h] = _val_real
+            logger.info(
+                f"[OVERLAY] {fecha_t.date()} | primer cierre h={_primer_h} <= N={N}: "
+                f"h=1..{N} reemplazados con valor realizado; factor desde próximo cierre"
+            )
 
         h_inicio = max(1, h_cierre - OVERLAY_VENTANA_DH + 1)
 
@@ -2567,7 +2591,6 @@ def _aplicar_overlay_sobreencaje(
 
         # Q[TAU] sobre la porcion incierta: h > N (proximos N dias ya son conocidos)
         h_inicio_incierto = max(h_inicio, N + 1)
-        mask_origen  = (fechas_t == fecha_t)
         mask_ventana = mask_origen & (h_arr >= h_inicio_incierto) & (h_arr <= h_cierre)
         if not mask_ventana.any():
             h_t_unc = h_arr[mask_origen & (h_arr > N)]
