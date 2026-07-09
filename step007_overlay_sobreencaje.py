@@ -783,7 +783,7 @@ def _diagnostico(
     print(f"  RESUMEN — peor retiro potencial por banco activo")
     print(f"{'─'*72}")
     for b in bancos_activos:
-        pb = _peor_B(df_saldo, det, b, cierres_n)
+        pb = _peor_B(df_saldo, det, b, cierres_hist, fecha_ref=fecha_ref)
         print(f"  {b:<35}  {pb:>14,.1f}")
     if bancos_activos:
         print(f"  {'─'*35}  {'─'*14}")
