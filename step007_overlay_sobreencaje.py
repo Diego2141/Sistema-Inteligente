@@ -956,7 +956,13 @@ def exportar_saldos_retiros(
             df_banco["retiro_acum_cierre"] = retiro_cierre
 
             df_banco.to_excel(writer, sheet_name=sheet, index=False)
-            print(f"  + {sheet:<20}  ({len(df_banco):,} filas)")
+            n_saldo_ok  = df_banco["saldo"].notna().sum()
+            n_total     = len(df_banco)
+            pct_ok      = n_saldo_ok / n_total * 100 if n_total else 0
+            aviso = "  *** SIN DATOS ***" if n_saldo_ok == 0 else (
+                f"  *** DATOS ESCASOS ({pct_ok:.0f}%) ***" if pct_ok < 20 else ""
+            )
+            print(f"  + {sheet:<25}  saldo válido: {n_saldo_ok:,}/{n_total:,} ({pct_ok:.0f}%){aviso}")
 
         # ── Última pestaña: Señal ─────────────────────────────────────────────
         # Filas: bancos | Columnas: cierre trimestral → ratio y activación
