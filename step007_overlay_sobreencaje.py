@@ -75,7 +75,7 @@ OVERLAY_SOBREENCAJE_ACTIVO = False
 # ── Parámetros del overlay ────────────────────────────────────────────────────
 UMBRAL_ACTIVACION     = 0.50   # ratio |retiro_7dh| / saldo_P95_mes para activar
 N_TRIMESTRES_LOOKBACK = 4      # cierres para la tabla Señal (display); el worst_ratio usa todo el historial
-MIN_TRIMESTRES_ACTIVO = 2      # mín. trimestres con ratio > umbral para considerar el banco activo
+MIN_TRIMESTRES_ACTIVO = 1      # mín. trimestres (dentro del lookback) con ratio > umbral para activar
 VENTANA_RETIRO_DH     = 7      # días hábiles de la ventana antes del cierre
 FACTOR_SEGURIDAD      = 0.00   # margen extra sobre peor_B  (0.00→0.10 = 0%→10%)
 PERCENTIL_SALDO       = 0.95   # percentil del saldo usado en el denominador del ratio y en peor_B
@@ -324,6 +324,7 @@ def detectar_bancos_activos(
     bancos_saldo: list[str],
     cierres: list[pd.Timestamp],
     calendario: pd.DatetimeIndex,
+    cierres_lookback: list[pd.Timestamp] | None = None,
     n_dh: int = VENTANA_RETIRO_DH,
     umbral: float = UMBRAL_ACTIVACION,
     min_trimestres: int = MIN_TRIMESTRES_ACTIVO,
@@ -331,15 +332,17 @@ def detectar_bancos_activos(
     """
     Evalúa la estrategia de sobreencaje para cada banco.
 
-    Retorna:
-        {col_saldo: {"activa": bool, "alguna_vez_activa": bool,
-                     "n_trimestres_activos": int,
-                     "ratios": {fecha_cierre: ratio}}}
+    cierres          : historial completo → se computan todos los ratios (para worst_ratio).
+    cierres_lookback : ventana de activación (últimos N_TRIMESTRES_LOOKBACK).
+                       Si None se usa cierres[-N_TRIMESTRES_LOOKBACK:].
 
-    "activa"            = True si ratio en el ÚLTIMO cierre > umbral.
-    "alguna_vez_activa" = True si ratio > umbral en AL MENOS min_trimestres cierres
-                          (patrón repetido, no evento aislado).
+    "activa"            = True si ratio en el ÚLTIMO cierre del lookback > umbral.
+    "alguna_vez_activa" = True si ratio > umbral en >= min_trimestres del lookback.
     """
+    if cierres_lookback is None:
+        cierres_lookback = cierres[-N_TRIMESTRES_LOOKBACK:]
+    lb_set = set(cierres_lookback)
+
     resultado: dict[str, dict] = {}
     for col in bancos_saldo:
         if col not in df_saldo.columns:
@@ -349,14 +352,18 @@ def detectar_bancos_activos(
             r = _ratio_banco_cierre(df_saldo, df_flujos, col, fc, calendario, n_dh)
             if r is not None:
                 ratios[fc] = r
-        n_activos         = sum(1 for r in ratios.values() if r > umbral)
-        activa            = bool(ratios.get(max(ratios), 0) > umbral) if ratios else False
+
+        # Activación restringida al lookback (últimos N trimestres)
+        ratios_lb  = {fc: r for fc, r in ratios.items() if fc in lb_set}
+        n_activos  = sum(1 for r in ratios_lb.values() if r > umbral)
+        activa     = bool(ratios_lb.get(max(ratios_lb), 0) > umbral) if ratios_lb else False
         alguna_vez_activa = n_activos >= min_trimestres
+
         resultado[col] = {
-            "activa":              activa,
-            "alguna_vez_activa":   alguna_vez_activa,
+            "activa":               activa,
+            "alguna_vez_activa":    alguna_vez_activa,
             "n_trimestres_activos": n_activos,
-            "ratios":              ratios,
+            "ratios":               ratios,
         }
     return resultado
 
@@ -504,7 +511,8 @@ def aplicar_overlay_preds(
 
     df_saldo, df_flujos, bancos_saldo, cierres, calendario = resultado
 
-    det = detectar_bancos_activos(df_saldo, df_flujos, bancos_saldo, cierres, calendario)
+    det = detectar_bancos_activos(df_saldo, df_flujos, bancos_saldo, cierres, calendario,
+                                  cierres_lookback=cierres[-N_TRIMESTRES_LOOKBACK:])
     bancos_activos = [b for b, info in det.items() if info["alguna_vez_activa"]]
 
     if not bancos_activos:
@@ -700,7 +708,8 @@ def _diagnostico(
     cierres_hist   = [fc for fc in todos_cierres if fc <= min(fecha_ref, fecha_max_data)]
     cierres_n     = cierres_hist[-N_TRIMESTRES_LOOKBACK:]   # últimos N para el overlay
 
-    det = detectar_bancos_activos(df_saldo, df_flujos, bancos_saldo, cierres_hist, calendario)
+    det = detectar_bancos_activos(df_saldo, df_flujos, bancos_saldo, cierres_hist, calendario,
+                                  cierres_lookback=cierres_n)
 
     # Tabla pivot: banco × cierre → ratio
     filas_ratios: list[dict] = []
@@ -903,7 +912,8 @@ def exportar_saldos_retiros(
 
     # Ratios históricos para todos los cierres (usar lista única)
     det = detectar_bancos_activos(
-        df_saldo, df_flujos, bancos_saldo_unique, cierres_hist, calendario
+        df_saldo, df_flujos, bancos_saldo_unique, cierres_hist, calendario,
+        cierres_lookback=cierres_n,
     )
 
     # ── Exportar ──────────────────────────────────────────────────────────────
@@ -996,9 +1006,11 @@ def exportar_saldos_retiros(
                     cache_det_t  = None
                     cache_activos = []
                 else:
+                    lb_t = list(cierres_t[-N_TRIMESTRES_LOOKBACK:])
                     cache_det_t = detectar_bancos_activos(
                         df_saldo, df_flujos, bancos_saldo_unique,
                         list(cierres_t), calendario,
+                        cierres_lookback=lb_t,
                     )
                     cache_activos = [
                         b for b, info in cache_det_t.items() if info["alguna_vez_activa"]
