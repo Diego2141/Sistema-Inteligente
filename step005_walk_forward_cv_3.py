@@ -2874,6 +2874,8 @@ def evaluar_banco(banco: str):
             logger.error("  [REPLOT] Ejecuta primero con SOLO_REGENERAR_PLOTS=False")
             return None
 
+    all_preds_overlay = []   # acumula predicciones finales (con overlay) para exportar
+
     for fold in folds:
         t_fold = time.time()
         logger.info(f"\n  -- Fold {fold['fold']}/{len(folds)} ----------------------")
@@ -2995,6 +2997,19 @@ def evaluar_banco(banco: str):
         if OVERLAY_SOBREENCAJE:
             preds_test = _aplicar_overlay_sobreencaje(preds_test, h_test, fechas_t_test, df)
 
+        # -- Guardar predicciones finales (con todos los ajustes aplicados) ----
+        _preds_df = pd.DataFrame({
+            "banco"  : banco,
+            "fold"   : fold["fold"],
+            "fecha_t": pd.DatetimeIndex(fechas_t_test),
+            "h"      : h_test,
+            "target" : y_test.values,
+        })
+        for _tau, _arr in preds_test.items():
+            _col = "mean" if _tau == "mean" else f"q{int(_tau * 100):02d}"
+            _preds_df[_col] = _arr
+        all_preds_overlay.append(_preds_df)
+
         if not SOLO_REGENERAR_PLOTS:
             row_test = calcular_metricas_fold(preds_test, y_test.values, fold, "test")
             row_val  = calcular_metricas_fold(preds_val,  y_val.values,  fold, "val")
@@ -3109,6 +3124,13 @@ def evaluar_banco(banco: str):
 
         del X_train, y_train, X_val, y_val, X_test, y_test
         gc.collect()
+
+    # -- Exportar predicciones finales a parquet (input para orquestador/video) --
+    if all_preds_overlay:
+        df_preds_all = pd.concat(all_preds_overlay, ignore_index=True)
+        ruta_preds = DIR_MODO / f"preds_overlay_{banco}_{fecha_hoy}.parquet"
+        df_preds_all.to_parquet(ruta_preds, index=False)
+        logger.info(f"  [{banco}] Predicciones finales guardadas: {ruta_preds.name}")
 
     if SOLO_REGENERAR_PLOTS:
         logger.info(f"\n  [REPLOT] Fan charts regenerados para {banco}. "

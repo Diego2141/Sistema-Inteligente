@@ -80,6 +80,12 @@ OVERLAY_VENTANA_DH              = 7      # dias habiles de la ventana de retiro
 OVERLAY_TAU_REFERENCIA          = 0.05   # quantil usado como denominador del factor
 OVERLAY_CONOCIMIENTO_ANTICIPADO = 2      # T+N: flujos conocidos con N dias habiles de antelacion
 
+# Si True, el video lee las predicciones ya ajustadas que exportó step005 (parquet)
+# en lugar de predecir desde cero. Requiere haber corrido step005 con OVERLAY_SOBREENCAJE=True.
+# Dejar en None para auto-descubrir el parquet más reciente en DIR_PREDS_OVERLAY.
+USAR_PREDS_OVERLAY = False
+DIR_PREDS_OVERLAY  = BASE_SISTEMA / "2. Output" / "step005_wfcv_v3"
+
 
 # ── 1. Cargar modelos XGBoost QT ──────────────────────────────────────────────
 def cargar_modelos(banco: str, dir_modelos: Path):
@@ -372,6 +378,29 @@ def predecir_fecha(df, fecha_origen, medianas, cols_num, cols_feat, modelos):
 
 # ── 3b. Overlay sobreencaje ───────────────────────────────────────────────────
 _df_ajuste_cache: dict = {}   # cache para no recargar el Excel en cada frame
+_preds_overlay_cache: dict = {}  # cache del parquet de predicciones de step005
+
+
+def _cargar_preds_overlay(banco: str) -> "pd.DataFrame | None":
+    """Carga el parquet de predicciones finales exportado por step005 (mas reciente)."""
+    if banco in _preds_overlay_cache:
+        return _preds_overlay_cache[banco]
+    # Buscar modelo/carpeta dinamicamente (xgb_qt_exp_*, lgbm_exp_*, etc.)
+    candidatos = sorted(DIR_PREDS_OVERLAY.glob(f"*/preds_overlay_{banco}_*.parquet"))
+    if not candidatos:
+        print(f"  [OVERLAY] No se encontro preds_overlay_{banco}_*.parquet en {DIR_PREDS_OVERLAY}")
+        _preds_overlay_cache[banco] = None
+        return None
+    ruta = candidatos[-1]  # el más reciente por nombre (fecha en sufijo)
+    try:
+        df_preds = pd.read_parquet(ruta)
+        df_preds["fecha_t"] = pd.to_datetime(df_preds["fecha_t"])
+        _preds_overlay_cache[banco] = df_preds
+        print(f"  [OVERLAY] Predicciones cargadas desde: {ruta.name}  ({len(df_preds):,} filas)")
+    except Exception as e:
+        print(f"  [OVERLAY] Error leyendo parquet: {e}")
+        _preds_overlay_cache[banco] = None
+    return _preds_overlay_cache[banco]
 
 def _cargar_ajuste_overlay() -> "pd.DataFrame | None":
     """Carga el Excel de step007 una sola vez y lo guarda en cache."""
@@ -540,12 +569,15 @@ def precomputar(df, medianas, cols_num, cols_feat, modelos, fechas_validas,
     folds_manifest  = (meta or {}).get("folds_manifest", []) if MODO_HISTORICO else []
     usar_historico  = MODO_HISTORICO and bool(folds_manifest)
 
-    df_ajuste = _cargar_ajuste_overlay() if OVERLAY_SOBREENCAJE else None
+    df_ajuste = _cargar_ajuste_overlay() if OVERLAY_SOBREENCAJE and not USAR_PREDS_OVERLAY else None
+    df_preds_ov = _cargar_preds_overlay(banco) if USAR_PREDS_OVERLAY else None
 
     if usar_historico:
         print(f"\nPre-computando {total} fechas [MODO HISTORICO - fold por fecha]...")
     else:
         print(f"\nPre-computando {total} fechas [modo produccion - ultimo fold]...")
+    if USAR_PREDS_OVERLAY and df_preds_ov is not None:
+        print("  [OVERLAY] Usando predicciones pre-ajustadas de step005 (parquet)")
 
     frames          = []
     fold_activo_num = None
@@ -553,6 +585,47 @@ def precomputar(df, medianas, cols_num, cols_feat, modelos, fechas_validas,
     for i, f in enumerate(fechas_sel, 1):
         fecha_origen = pd.Timestamp(f)
 
+        # -- Modo parquet: leer predicciones ya ajustadas desde step005 ----------
+        if USAR_PREDS_OVERLAY and df_preds_ov is not None:
+            _rows = df_preds_ov[df_preds_ov["fecha_t"] == fecha_origen].sort_values("h")
+            if _rows.empty:
+                if i % 5 == 0 or i == total:
+                    print(f"  {i}/{total}  {fecha_origen.date()}  [sin datos en parquet]")
+                continue
+            res = _rows.reset_index(drop=True)
+            hs   = res["h"].values
+            real = res["target"].values / 1e6
+            mask = ~np.isnan(real)
+            h_max_r = int(res.loc[mask, "h"].max()) if mask.any() else 0
+
+            cum_q01 = np.cumsum(res["q01"].values / 1e6)
+            cum_q05 = np.cumsum(res["q05"].values / 1e6)
+            cum_q50 = np.cumsum(res["q50"].values / 1e6)
+            cum_q95 = np.cumsum(res["q95"].values / 1e6)
+            cum_q99 = np.cumsum(res["q99"].values / 1e6)
+            cum_r   = np.where(mask, np.nancumsum(np.where(mask, real, 0)), np.nan)
+            cum_r[~mask] = np.nan
+
+            frame_data = {
+                "fecha": fecha_origen,
+                "hs": hs, "real": real, "mask": mask, "h_max_r": h_max_r,
+                "q01": res["q01"].values / 1e6,
+                "q05": res["q05"].values / 1e6,
+                "q50": res["q50"].values / 1e6,
+                "q95": res["q95"].values / 1e6,
+                "q99": res["q99"].values / 1e6,
+                "cum_q01": cum_q01, "cum_q05": cum_q05, "cum_q50": cum_q50,
+                "cum_q95": cum_q95, "cum_q99": cum_q99, "cum_r": cum_r,
+            }
+            if "mean" in res.columns:
+                frame_data["mean"]     = res["mean"].values / 1e6
+                frame_data["cum_mean"] = np.cumsum(res["mean"].values / 1e6)
+            frames.append(frame_data)
+            if i % 5 == 0 or i == total:
+                print(f"  {i}/{total}  {fecha_origen.date()}  [parquet]")
+            continue
+
+        # -- Modo normal: predecir con modelos ------------------------------------
         if usar_historico:
             fold_info = seleccionar_fold(fecha_origen, folds_manifest)
             if fold_info is None:
