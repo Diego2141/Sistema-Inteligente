@@ -73,6 +73,12 @@ DPI         = 72   # resolución reducida para evitar out-of-memory
 
 COLOR = "tomato"  # distingue XGBoost QT de XGBoost estándar (darkorange) y LightGBM (steelblue)
 
+# ── Overlay sobreencaje ───────────────────────────────────────────────────────
+OVERLAY_SOBREENCAJE    = False   # True = aplicar factor multiplicativo al fan chart
+RUTA_AJUSTE_OVERLAY    = BASE_SISTEMA / "2. Output" / "analisis_cc" / "saldos_retiros_bancos.xlsx"
+OVERLAY_VENTANA_DH     = 7      # dias habiles de la ventana de retiro
+OVERLAY_TAU_REFERENCIA = 0.05   # quantil usado como denominador del factor (0.01 o 0.05)
+
 
 # ── 1. Cargar modelos XGBoost QT ──────────────────────────────────────────────
 def cargar_modelos(banco: str, dir_modelos: Path):
@@ -363,6 +369,102 @@ def predecir_fecha(df, fecha_origen, medianas, cols_num, cols_feat, modelos):
     return res
 
 
+# ── 3b. Overlay sobreencaje ───────────────────────────────────────────────────
+_df_ajuste_cache: dict = {}   # cache para no recargar el Excel en cada frame
+
+def _cargar_ajuste_overlay() -> "pd.DataFrame | None":
+    """Carga el Excel de step007 una sola vez y lo guarda en cache."""
+    if "df" in _df_ajuste_cache:
+        return _df_ajuste_cache["df"]
+    try:
+        df_aj = pd.read_excel(
+            RUTA_AJUSTE_OVERLAY, sheet_name="Ajuste_diario",
+            index_col=0, parse_dates=True,
+        )
+        df_aj.index = pd.DatetimeIndex(df_aj.index)
+        if "peor_total" not in df_aj.columns:
+            print("  [OVERLAY] Columna peor_total no encontrada en Ajuste_diario")
+            _df_ajuste_cache["df"] = None
+        else:
+            _df_ajuste_cache["df"] = df_aj.sort_index()
+            print(f"  [OVERLAY] Ajuste_diario cargado: {len(df_aj)} filas")
+    except Exception as e:
+        print(f"  [OVERLAY] Error leyendo Excel: {e}")
+        _df_ajuste_cache["df"] = None
+    return _df_ajuste_cache["df"]
+
+
+def _aplicar_overlay_frame(res: "pd.DataFrame", fecha_origen: "pd.Timestamp",
+                           df_aj: "pd.DataFrame") -> "pd.DataFrame":
+    """
+    Aplica el factor multiplicativo de sobreencaje a un frame de predicciones.
+    res: DataFrame con columnas q01, q05, q50, q95, q99 (y opcionalmente mean).
+    Modifica en raw units (antes de /1e6).
+    """
+    disponibles = df_aj.index[df_aj.index <= fecha_origen]
+    if len(disponibles) == 0:
+        return res
+    peor_total = float(df_aj.loc[disponibles[-1], "peor_total"])
+    if peor_total <= 0:
+        return res
+
+    # Primer cierre trimestral dentro del horizonte proyectado
+    h_max = int(res["h"].max())
+    bh = pd.bdate_range(
+        start=fecha_origen + pd.offsets.BDay(1),
+        periods=OVERLAY_VENTANA_DH + h_max + 5,
+    )
+    df_bh = pd.DataFrame({"fecha": bh, "mes": bh.month, "anio": bh.year, "trim": bh.quarter})
+    cierres_proy = (
+        df_bh[df_bh["mes"].isin([3, 6, 9, 12])]
+        .groupby(["anio", "trim"])["fecha"].max()
+        .sort_values().tolist()
+    )
+    if not cierres_proy:
+        return res
+    fecha_cierre = cierres_proy[0]
+
+    bh_list = list(bh)
+    try:
+        h_cierre = bh_list.index(fecha_cierre) + 1
+    except ValueError:
+        diffs = [abs((d - fecha_cierre).days) for d in bh_list]
+        h_cierre = diffs.index(min(diffs)) + 1
+
+    h_inicio = max(1, h_cierre - OVERLAY_VENTANA_DH + 1)
+
+    # Columna de referencia para el denominador
+    q_col = f"q{int(OVERLAY_TAU_REFERENCIA * 100):02d}"
+    if q_col not in res.columns:
+        return res
+
+    mask_ventana = (res["h"] >= h_inicio) & (res["h"] <= h_cierre)
+    if not mask_ventana.any():
+        h_arr = res["h"].values
+        h_fb = h_arr[np.abs(h_arr - h_cierre).argmin()]
+        mask_ventana = (res["h"] == h_fb)
+
+    q_acum = float(res.loc[mask_ventana, q_col].sum())
+    if q_acum >= 0 or abs(q_acum) < 1e-6:
+        return res
+
+    f = peor_total / abs(q_acum)
+    if f <= 1.0:
+        return res
+
+    res = res.copy()
+    q_cols = [c for c in res.columns if c.startswith("q")]
+    for col in q_cols:
+        res[col] = res[col] * f
+    if "mean" in res.columns:
+        res["mean"] = res["mean"] * f
+
+    print(f"  [OVERLAY] {fecha_origen.date()} | cierre: {fecha_cierre.date()} "
+          f"h=[{h_inicio},{h_cierre}] | {q_col}_acum={q_acum:+.0f} | "
+          f"peor_total={peor_total:,.0f} | f={f:.3f}")
+    return res
+
+
 # ── 4. Pre-computar todos los resultados ──────────────────────────────────────
 def precomputar(df, medianas, cols_num, cols_feat, modelos, fechas_validas,
                 meta=None, dir_modelos=None, banco=None, modelos_s4=None):
@@ -371,10 +473,12 @@ def precomputar(df, medianas, cols_num, cols_feat, modelos, fechas_validas,
     folds_manifest  = (meta or {}).get("folds_manifest", []) if MODO_HISTORICO else []
     usar_historico  = MODO_HISTORICO and bool(folds_manifest)
 
+    df_ajuste = _cargar_ajuste_overlay() if OVERLAY_SOBREENCAJE else None
+
     if usar_historico:
-        print(f"\nPre-computando {total} fechas [MODO HISTÓRICO — fold por fecha]...")
+        print(f"\nPre-computando {total} fechas [MODO HISTORICO - fold por fecha]...")
     else:
-        print(f"\nPre-computando {total} fechas [modo producción — último fold]...")
+        print(f"\nPre-computando {total} fechas [modo produccion - ultimo fold]...")
 
     frames          = []
     fold_activo_num = None
@@ -408,6 +512,8 @@ def precomputar(df, medianas, cols_num, cols_feat, modelos, fechas_validas,
 
         res  = predecir_fecha(df_frame, fecha_origen, medianas_frame,
                               cols_num, cols_feat, modelos_frame)
+        if OVERLAY_SOBREENCAJE and df_ajuste is not None:
+            res = _aplicar_overlay_frame(res, fecha_origen, df_ajuste)
         hs   = res["h"].values
         real = res["target"].values / 1e6
         mask = ~np.isnan(real)
