@@ -3,42 +3,42 @@
 step005_walk_forward_cv_3.py
 Walk-forward CV con ventana EXPANDABLE o RODANTE y evaluación TEST out-of-sample.
 
-═══════════════════════════════════════════════════════════════════════════════
+===============================================================================
 NOVEDADES RESPECTO A v2
-═══════════════════════════════════════════════════════════════════════════════
+===============================================================================
 
 1. Toggle EXPANDING (True/False)
-   ─────────────────────────────
-   EXPANDING = True  → ventana CRECIENTE: train_start fijo en el origen,
+   -----------------------------
+   EXPANDING = True  -> ventana CRECIENTE: train_start fijo en el origen,
                         train_end crece PASO_AÑOS cada fold.
-   EXPANDING = False → ventana RODANTE   (idéntico a v2): train_start y
+   EXPANDING = False -> ventana RODANTE   (idéntico a v2): train_start y
                         train_end avanzan juntos; tamaño fijo = VENTANA_TRAIN_AÑOS.
 
    En modo EXPANDING, VENTANA_TRAIN_AÑOS es el tamaño MÍNIMO inicial.
    Cada fold siguiente tiene un año (o PASO_AÑOS) más de historia.
 
    Comparación de enfoques:
-     Expanding → más datos en folds tardíos; mejor si el proceso es estacionario.
-     Rolling   → se adapta a regímenes recientes; mejor si hay quiebres estructurales.
+     Expanding -> más datos en folds tardíos; mejor si el proceso es estacionario.
+     Rolling   -> se adapta a regímenes recientes; mejor si hay quiebres estructurales.
 
 2. Fan charts TEST out-of-sample (nuevo)
-   ──────────────────────────────────────
+   --------------------------------------
    Por cada fold se generan hasta 4 snapshots del fan chart en el período TEST,
    con origen separado ~3 meses entre sí. Cada snapshot muestra:
-     · Bandas Q01-Q99 (muy suave) y Q05-Q95 (media) → incertidumbre
-     · Línea Q50 → mediana predicha
-     · Puntos realizados: verde si caen dentro de Q05-Q95, rojo si fuera
-     · Coverage empírico anotado en el título de cada panel
+     . Bandas Q01-Q99 (muy suave) y Q05-Q95 (media) -> incertidumbre
+     . Línea Q50 -> mediana predicha
+     . Puntos realizados: verde si caen dentro de Q05-Q95, rojo si fuera
+     . Coverage empírico anotado en el título de cada panel
 
 3. Separación VAL / TEST
-   ──────────────────────
+   ----------------------
    Idéntica a v2: VAL solo para Optuna, TEST solo para métricas OOS.
 
-═══════════════════════════════════════════════════════════════════════════════
-Anti-leakage — idéntico a v1 y v2
-═══════════════════════════════════════════════════════════════════════════════
+===============================================================================
+Anti-leakage -- idéntico a v1 y v2
+===============================================================================
   #1 EMBARGO 90dh post-TRAIN
-  #2 GARCH por fold: ω/α/β estimados solo en TRAIN, propagados a VAL+TEST
+  #2 GARCH por fold: omega/alpha/beta estimados solo en TRAIN, propagados a VAL+TEST
   #3 Medianas fold: imputación calculada en TRAIN, aplicada a VAL+TEST
 """
 
@@ -90,49 +90,49 @@ logger = logging.getLogger(__name__)
 
 
 ###############################################################################
-# PARTE 0 — Configuración
+# PARTE 0 -- Configuración
 ###############################################################################
 
 BASE_SISTEMA = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente")
 RUTA_MATRIZ  = BASE_SISTEMA / "1. Data" / "Clean" / "matriz_features.parquet"
 DIR_OUTPUT   = BASE_SISTEMA / "2. Output" / "step005_wfcv_v3"
 
-# ── Tipo de ventana ───────────────────────────────────────────────────────────
-# True  → EXPANDING: train_start fijo, train_end crece cada fold
-# False → ROLLING  : ventana fija que desliza (idéntico a v2)
+# -- Tipo de ventana -----------------------------------------------------------
+# True  -> EXPANDING: train_start fijo, train_end crece cada fold
+# False -> ROLLING  : ventana fija que desliza (idéntico a v2)
 EXPANDING = True
 
-# ── Recorte de inicio del train ───────────────────────────────────────────────
-# True  → el train nunca empieza antes de TRAIN_INICIO_CUTOFF (nueva estrategia 2020)
-# False → el train empieza desde el primer dato disponible
+# -- Recorte de inicio del train -----------------------------------------------
+# True  -> el train nunca empieza antes de TRAIN_INICIO_CUTOFF (nueva estrategia 2020)
+# False -> el train empieza desde el primer dato disponible
 RECORTAR_INICIO_TRAIN = True
 TRAIN_INICIO_CUTOFF   = "2020-01-01"
 
-# ── Tamaños de ventana ────────────────────────────────────────────────────────
+# -- Tamaños de ventana --------------------------------------------------------
 # EXPANDING=True : VENTANA_TRAIN_AÑOS es el mínimo inicial; crece PASO_AÑOS/fold
 # EXPANDING=False: VENTANA_TRAIN_AÑOS es el tamaño fijo (igual a v2)
 VENTANA_TRAIN_AÑOS  = 3      # años de TRAIN iniciales / fijos (mínimo desde 2020)
-VENTANA_VAL_AÑOS    = 0.5    # años de VAL (solo Optuna) — 6 meses, igual que step004
+VENTANA_VAL_AÑOS    = 0.5    # años de VAL (solo Optuna) -- 6 meses, igual que step004
 VENTANA_TEST_AÑOS   = 1      # años de TEST (solo métricas OOS)
 PASO_AÑOS           = 1      # desplazamiento / crecimiento entre folds
 
-# ── Anti-leakage: purga + burn-in ────────────────────────────────────────────
+# -- Anti-leakage: purga + burn-in --------------------------------------------
 # H_MAX_DIAS_HAB   : horizonte máximo de predicción (h_max en step001)
 # PURGE_DIAS_HAB   : días hábiles excluidos entre TRAIN-end y VAL-start.
 #                    Cubre: (a) solapamiento de etiquetas Y (h_max dh) y
-#                           (b) feature lookback (MA22 = 22 dh) — 75 ≥ 22 → redundante.
+#                           (b) feature lookback (MA22 = 22 dh) -- 75 >= 22 -> redundante.
 # PURGE_VAL_TEST   : análogo entre VAL-end y TEST-start (labels Optuna no cruzan TEST)
 # BURN_IN_DIAS_HAB : excluye los primeros días de TRAIN donde MA22 aún no maduró
 H_MAX_DIAS_HAB   = 75   # igual que h_max en step001
-PURGE_DIAS_HAB   = H_MAX_DIAS_HAB   # purga TRAIN → VAL
-PURGE_VAL_TEST   = H_MAX_DIAS_HAB   # purga VAL   → TEST
+PURGE_DIAS_HAB   = H_MAX_DIAS_HAB   # purga TRAIN -> VAL
+PURGE_VAL_TEST   = H_MAX_DIAS_HAB   # purga VAL   -> TEST
 BURN_IN_DIAS_HAB = 22               # warm-up MA22 al inicio de TRAIN
 
-# ── Diagnóstico de features (PARTE 7-bis) ────────────────────────────────────
-# True  → mide gain(train) + block-perm(val) + SHAP(val) por fold y consolida
-# False → sin diagnóstico extra (comportamiento original)
+# -- Diagnóstico de features (PARTE 7-bis) ------------------------------------
+# True  -> mide gain(train) + block-perm(val) + SHAP(val) por fold y consolida
+# False -> sin diagnóstico extra (comportamiento original)
 DIAGNOSTICO_FEATURES  = True
-# h va de 2 a H_MAX_DIAS_HAB=75 → n_h = 74 filas por fecha_t.
+# h va de 2 a H_MAX_DIAS_HAB=75 -> n_h = 74 filas por fecha_t.
 # block_size debe ser múltiplo de n_h para que cada bloque = exactamente 1 fecha_t
 # y la permutación solo intercambie fechas completas (unidad temporal correcta).
 # Con block_size < n_h se mezclan h-values de distintos horizontes dentro del
@@ -143,7 +143,7 @@ DIAG_PERM_MAX_SAMPLES = None  # ver _diag_block_perm_promedio; None = todo VAL
 DIAG_SHAP_MAX_SAMPLES = 800   # muestras para SHAP por cuantil
 
 # Pares cíclicos sin/cos que deben permutarse SIMULTÁNEAMENTE (mismo índice de shuffle).
-# Distribuimos el delta combinado D como D/√2 en cada componente para que la norma
+# Distribuimos el delta combinado D como D/sqrt2 en cada componente para que la norma
 # euclidiana en aux_comparar_features.py reconstruya exactamente D.
 _CICL_BASES_PERM = [
     "mes", "dias_sem",
@@ -156,119 +156,119 @@ _CICL_PARES_PERM = {
     for s in ("sin", "cos")
 }
 
-# ── Modelo ────────────────────────────────────────────────────────────────────
+# -- Modelo --------------------------------------------------------------------
 QUANTILES        = [0.01, 0.05, 0.50, 0.95, 0.99]
 S_MIN_FACTOR     = 0.01
-S_MAX_FACTOR     = 1.00   # targets en escala raw (MM USD), no estandarizados → rango amplio
+S_MAX_FACTOR     = 1.00   # targets en escala raw (MM USD), no estandarizados -> rango amplio
 
-# ── Trials Optuna ─────────────────────────────────────────────────────────────
-# True  → número de trials varía por cuantil (TRIALS_POR_TAU)
-# False → número fijo para todos los cuantiles (TRIALS_FLAT)
+# -- Trials Optuna -------------------------------------------------------------
+# True  -> número de trials varía por cuantil (TRIALS_POR_TAU)
+# False -> número fijo para todos los cuantiles (TRIALS_FLAT)
 ADAPTIVE_TRIALS  = True
 
 TRIALS_FLAT      = 60        # usado cuando ADAPTIVE_TRIALS = False
 
 TRIALS_POR_TAU   = {         # usado cuando ADAPTIVE_TRIALS = True
     # Llaves = round(tau, 1) para QUANTILES = [0.01, 0.05, 0.50, 0.95, 0.99]
-    0.0: 110,   # τ=0.01 → colas extremas, más difíciles de calibrar
-    0.1: 110,   # τ=0.05
-    0.5:  90,   # τ=0.50 → cuantil central, converge más rápido
-    0.9: 110,   # τ=0.95
-    1.0: 110,   # τ=0.99 → colas extremas
+    0.0: 110,   # tau=0.01 -> colas extremas, más difíciles de calibrar
+    0.1: 110,   # tau=0.05
+    0.5:  90,   # tau=0.50 -> cuantil central, converge más rápido
+    0.9: 110,   # tau=0.95
+    1.0: 110,   # tau=0.99 -> colas extremas
 }
 
-# ── Opciones de salida ────────────────────────────────────────────────────────
+# -- Opciones de salida --------------------------------------------------------
 BANCOS_A_EVALUAR          = ["SISTEMA"]
 GUARDAR_MODELO_FINAL      = True
-# True  → guarda modelos de TODOS los folds (permite fan chart histórico sin lookahead)
-# False → solo guarda el último fold (comportamiento anterior)
+# True  -> guarda modelos de TODOS los folds (permite fan chart histórico sin lookahead)
+# False -> solo guarda el último fold (comportamiento anterior)
 GUARDAR_MODELOS_TODOS_FOLDS = True
 
-# True  → omite Optuna/entrenamiento, carga modelos del disco y solo regenera los plots
-# False → entrenamiento completo (comportamiento normal)
+# True  -> omite Optuna/entrenamiento, carga modelos del disco y solo regenera los plots
+# False -> entrenamiento completo (comportamiento normal)
 SOLO_REGENERAR_PLOTS = False
 COLS_EXCLUIR              = {
     "fecha_t", "banco", "target",
     # T10Y y EMBI_PERU son series I(0): T10Y es nivel de tasa; EMBI es diferencial de tasas.
-    # Para I(0) el FFD tiene d_opt≈0 → T10Y_frac≈T10Y y EMBI_PERU_frac≈EMBI_PERU (redundantes).
-    # Todas muestran gain≈1.0/perm≈0 en val → overfitting por correlación espuria en train.
+    # Para I(0) el FFD tiene d_opt~=0 -> T10Y_frac~=T10Y y EMBI_PERU_frac~=EMBI_PERU (redundantes).
+    # Todas muestran gain~=1.0/perm~=0 en val -> overfitting por correlación espuria en train.
     # Se mantienen: delta_EMBI (shocks de corto plazo), garch_vol_embi (volatilidad del spread).
     "T10Y", "T10Y_frac", "EMBI_PERU", "EMBI_PERU_frac",
 }
 
-# ── Límite de folds ───────────────────────────────────────────────────────────
-# None → usa todos los folds generados
-# N    → usa solo los primeros N folds (los más antiguos); deja el resto como OOS
+# -- Límite de folds -----------------------------------------------------------
+# None -> usa todos los folds generados
+# N    -> usa solo los primeros N folds (los más antiguos); deja el resto como OOS
 # Expanding=True: 9 folds (fold 9 incluye test 2023+)
 # Expanding=False (rolling): 8 folds
 N_MAX_FOLDS = 9 if EXPANDING else 8
 
-# ── Selector de modelo ────────────────────────────────────────────────────────
+# -- Selector de modelo --------------------------------------------------------
 MODELO_CV = "xgb"
 # Opciones: "xgb" | "lgbm" | "xgb_qt"
 assert MODELO_CV in ("xgb", "lgbm", "xgb_qt"), \
     f"MODELO_CV debe ser 'xgb', 'lgbm' o 'xgb_qt', recibido: {MODELO_CV!r}"
 
-# ── Parámetro s (suavizado Pinball-Arctan) ────────────────────────────────────
-# True  → s fijo en S_FACTOR_FIJO × std_y (recomendado por el paper 2406.02293)
+# -- Parámetro s (suavizado Pinball-Arctan) ------------------------------------
+# True  -> s fijo en S_FACTOR_FIJO × std_y (recomendado por el paper 2406.02293)
 #          Optuna no busca s; libera trials para otros hiperparámetros
-# False → Optuna busca s en [S_MIN_FACTOR, S_MAX_FACTOR] × std_y
+# False -> Optuna busca s en [S_MIN_FACTOR, S_MAX_FACTOR] × std_y
 S_FIJO         = False
 S_FACTOR_FIJO  = 0.05   # equivale a s=0.05 en datos estandarizados (centro del rango paper)
 
-# ── Calibración post-hoc (shift aditivo estimado en VAL) ─────────────────────
-# True  → después de predecir, calcula el sesgo sistemático en VAL y lo corrige
+# -- Calibración post-hoc (shift aditivo estimado en VAL) ---------------------
+# True  -> después de predecir, calcula el sesgo sistemático en VAL y lo corrige
 #         en TEST: todas las predicciones se desplazan por el percentil P del
-#         residuo (actual − Q50_pred) en VAL.
-#         P=50 → elimina sesgo (mediana de errores)
-#         P<50 → introduce sesgo negativo (conservador para riesgo de liquidez)
-#         P=25 → desplaza hacia abajo con sesgo negativo moderado
-# False → sin calibración (comportamiento original)
+#         residuo (actual - Q50_pred) en VAL.
+#         P=50 -> elimina sesgo (mediana de errores)
+#         P<50 -> introduce sesgo negativo (conservador para riesgo de liquidez)
+#         P=25 -> desplaza hacia abajo con sesgo negativo moderado
+# False -> sin calibración (comportamiento original)
 CALIBRACION_POSTHOC   = False
 CALIBRACION_PERCENTIL = 25    # percentil del residuo VAL usado como shift
 # Límite del shift como fracción de std_y: previene correcciones exageradas
 # que distorsionan el eje Y cuando el modelo tiene sesgo grande.
-# None → sin límite (el valor original antes de esta corrección)
-CALIBRACION_MAX_SHIFT_FACTOR = 0.5   # e.g. 0.5 → shift ≤ ±0.5×std_y
+# None -> sin límite (el valor original antes de esta corrección)
+CALIBRACION_MAX_SHIFT_FACTOR = 0.5   # e.g. 0.5 -> shift <= ±0.5×std_y
 
-# ── Mondrian CQR (Conformalized Quantile Regression por horizonte h) ──────────
-# True  → calibra el intervalo [CQR_TAU_LO, CQR_TAU_HI] usando scores de
+# -- Mondrian CQR (Conformalized Quantile Regression por horizonte h) ----------
+# True  -> calibra el intervalo [CQR_TAU_LO, CQR_TAU_HI] usando scores de
 #          conformidad en VAL (modelo solo-train, OOS honesto) y aplica
 #          la corrección simétrica q_hat_h a TEST (modelo retrenado train+val).
 #          Sin leakage: scores vienen de modelos (solo-train), preds_test de
 #          modelos_final (retrain). Mondrian = q_hat separado por cada h.
-# False → sin calibración CQR (comportamiento original)
+# False -> sin calibración CQR (comportamiento original)
 CALIBRACION_CQR  = False
 CQR_TAU_LO       = 0.05   # cuantil inferior del intervalo a calibrar
 CQR_TAU_HI       = 0.95   # cuantil superior del intervalo a calibrar
-CQR_ALPHA        = 0.10   # miscoverage objetivo: 1 − cobertura deseada (90% → 0.10)
+CQR_ALPHA        = 0.10   # miscoverage objetivo: 1 - cobertura deseada (90% -> 0.10)
 
-# ── Overlay sobreencaje BBVA (step007_overlay_sobreencaje.py) ─────────────────
-# True  → aplica el overlay comportamental de retiros trimestrales DESPUÉS de
+# -- Overlay sobreencaje BBVA (step007_overlay_sobreencaje.py) -----------------
+# True  -> aplica el overlay comportamental de retiros trimestrales DESPUÉS de
 #          CQR. Usa datos de saldo CC+OVN por banco para detectar si algún banco
 #          activó la estrategia de sobreencaje y ajusta TODOS los cuantiles
 #          multiplicativamente en los horizontes de cierre trimestral.
 #          Requiere step007_overlay_sobreencaje.py en el mismo directorio y
 #          que OVERLAY_SOBREENCAJE_ACTIVO=True en ese módulo.
-# False → sin overlay (comportamiento original)
+# False -> sin overlay (comportamiento original)
 OVERLAY_SOBREENCAJE = False
 
 
-# ── Fan chart TEST: número de snapshots por fold ──────────────────────────────
+# -- Fan chart TEST: número de snapshots por fold ------------------------------
 FANCHART_N_SNAPSHOTS = 4   # 1 cada ~3 meses para TEST de 1 año
 
-# ── Diagnóstico de features (PARTE 7-bis) ─────────────────────────────────────
-# True  → corre gain / block-perm / SHAP por fold y genera los gráficos
-# False → omite el diagnóstico (más rápido)
+# -- Diagnóstico de features (PARTE 7-bis) -------------------------------------
+# True  -> corre gain / block-perm / SHAP por fold y genera los gráficos
+# False -> omite el diagnóstico (más rápido)
 DIAGNOSTICO_FEATURES  = True
 DIAG_BLOCK_SIZE       = H_MAX_DIAS_HAB - 1   # = 74 = n_h (h: 2..75); 1 bloque = 1 fecha_t
 DIAG_N_REPEATS        = 3     # repeticiones por feature para estabilizar la estimación
 DIAG_SHAP_MAX_SAMPLES = 800   # máximo de filas VAL para SHAP (None = todas)
 
-# ── Comparación con Step004 en fan charts ─────────────────────────────────────
-# True  → superpone predicciones del modelo step004 (línea naranja discontinua)
+# -- Comparación con Step004 en fan charts -------------------------------------
+# True  -> superpone predicciones del modelo step004 (línea naranja discontinua)
 #          para comparar visualmente con step005 fold-by-fold
-# False → solo muestra predicciones step005 (comportamiento normal)
+# False -> solo muestra predicciones step005 (comportamiento normal)
 COMPARAR_CON_STEP004 = False
 # Directorio donde están los modelos step004 (eval = entrenado solo hasta TRAIN)
 _STEP004_SUFIJO = {
@@ -281,7 +281,7 @@ _s4_carpeta, _s4_subcarpeta, _s4_prefijo = _STEP004_SUFIJO.get(
 )
 DIR_MODELOS_STEP004 = BASE_SISTEMA / "2. Output" / _s4_carpeta / _s4_subcarpeta
 
-# ── Folds manuales — comparación directa con step004 ─────────────────────────
+# -- Folds manuales -- comparación directa con step004 -------------------------
 # Lista de folds con fechas exactas, añadidos a (o reemplazando) los folds auto.
 # Permite replicar el split de step004 sin embargo entre TRAIN y VAL.
 # Descomentar el ejemplo para activar el fold equivalente a step004:
@@ -289,19 +289,19 @@ FOLDS_MANUALES: list[dict] = []
 # FOLDS_MANUALES = [
 #     {
 #         "train_start": "2015-01-02",   # inicio real de los datos
-#         "train_end"  : "2022-06-30",   # mismo corte que step004 (CORTE_VAL − 1d)
+#         "train_end"  : "2022-06-30",   # mismo corte que step004 (CORTE_VAL - 1d)
 #         "val_start"  : "2022-07-01",   # sin embargo, igual que step004
-#         "val_end"    : "2023-01-02",   # CORTE_TEST − 1d
+#         "val_end"    : "2023-01-02",   # CORTE_TEST - 1d
 #         "test_start" : "2023-01-03",   # mismo CORTE_TEST que step004
 #         "test_end"   : "2024-06-30",   # hasta donde haya datos
 #     }
 # ]
 
-# True  → corre SOLO los folds manuales (omite los generados automáticamente)
-# False → añade los folds manuales al final de los generados
+# True  -> corre SOLO los folds manuales (omite los generados automáticamente)
+# False -> añade los folds manuales al final de los generados
 SOLO_FOLDS_MANUALES = False
 
-# ── Rutas de salida ───────────────────────────────────────────────────────────
+# -- Rutas de salida -----------------------------------------------------------
 _modo           = "expanding" if EXPANDING else "rolling"
 _ventanas       = f"{VENTANA_TRAIN_AÑOS}{VENTANA_VAL_AÑOS}{VENTANA_TEST_AÑOS}"
 DIR_MODO        = DIR_OUTPUT / f"{MODELO_CV}_{_modo}_{_ventanas}"
@@ -323,7 +323,7 @@ def get_n_trials(tau: float) -> int:
 
 
 ###############################################################################
-# PARTE 1 — Métricas
+# PARTE 1 -- Métricas
 ###############################################################################
 
 def pinball_loss(y_true, y_pred, tau):
@@ -355,16 +355,16 @@ def crps_approx(y_true, preds):
 
 
 ###############################################################################
-# PARTE 2 — GARCH por fold
+# PARTE 2 -- GARCH por fold
 ###############################################################################
 
 # Número de workers paralelos (uno por cuantil) y threads XGBoost por worker.
-# Windows/macOS usan spawn en ProcessPoolExecutor → re-importa el módulo completo
+# Windows/macOS usan spawn en ProcessPoolExecutor -> re-importa el módulo completo
 # (~500 MB/proceso) y serializa los arrays de datos por pickle, lo que provoca
 # MemoryError con datasets grandes.  Solución: ThreadPoolExecutor en Windows/macOS.
 # XGBoost libera el GIL durante el entrenamiento (C++ interno), por lo que el
 # paralelismo real se preserva con threads sin copiar objetos entre procesos.
-# Linux usa ProcessPoolExecutor con fork (copy-on-write) → overhead mínimo.
+# Linux usa ProcessPoolExecutor con fork (copy-on-write) -> overhead mínimo.
 _N_QUANTILES   = len([0.01, 0.05, 0.50, 0.95, 0.99])  # = 5
 _spawn_ctx     = sys.platform in ("win32", "darwin")
 _N_QUANTILES_PARALLEL = _N_QUANTILES          # threads no tienen límite de spawn
@@ -372,7 +372,7 @@ _XGB_NTHREAD = max(2, (os.cpu_count() or 10) // _N_QUANTILES_PARALLEL)
 # Clase de executor según plataforma
 _ExecutorCls = ThreadPoolExecutor if _spawn_ctx else ProcessPoolExecutor
 
-# Cache de parámetros GARCH por fecha de corte de TRAIN — evita re-estimación en el
+# Cache de parámetros GARCH por fecha de corte de TRAIN -- evita re-estimación en el
 # mismo fold y para el guardado de metadata (antes se estimaba 2-3 veces por fold).
 _garch_params_cache: dict[str, dict] = {}
 
@@ -582,7 +582,7 @@ def _extraer_garch_params_fold(df, train_end):
 
 
 ###############################################################################
-# PARTE 3 — Generación de folds  (EXPANDING o ROLLING según toggle)
+# PARTE 3 -- Generación de folds  (EXPANDING o ROLLING según toggle)
 ###############################################################################
 
 def generar_folds(
@@ -596,16 +596,16 @@ def generar_folds(
     expanding,
 ):
     """
-    EXPANDING=True  → train_start fijo en f_min; train_end crece paso_años/fold.
-    EXPANDING=False → ventana rodante fija.
+    EXPANDING=True  -> train_start fijo en f_min; train_end crece paso_años/fold.
+    EXPANDING=False -> ventana rodante fija.
 
     Estructura por fold (López de Prado §12):
-      TRAIN → [purge_dias_hab] → VAL (Optuna) → [purge_val_test] → TEST (métricas OOS)
+      TRAIN -> [purge_dias_hab] -> VAL (Optuna) -> [purge_val_test] -> TEST (métricas OOS)
 
     purge_dias_hab cubre tanto solapamiento de etiquetas Y (h_max dh) como
-    el warm-up de features de lookback (MA22 ≤ 22 dh ≤ h_max).
+    el warm-up de features de lookback (MA22 <= 22 dh <= h_max).
 
-    Genera folds mientras test_end ≤ última fecha disponible.
+    Genera folds mientras test_end <= última fecha disponible.
     """
     folds   = []
     f_min   = fechas_disponibles.min()
@@ -711,18 +711,18 @@ def resolver_folds_manuales(
 
 
 ###############################################################################
-# PARTE 4 — Modelos: objetivos, optimización, entrenamiento
+# PARTE 4 -- Modelos: objetivos, optimización, entrenamiento
 ###############################################################################
 
 def make_quantile_objective(tau, s, std_y):
     # _scale ajusta el lambda efectivo de XGBoost según la escala del target
-    # (target no estandarizado: std_y~80,000 → _scale~1e9).
+    # (target no estandarizado: std_y~80,000 -> _scale~1e9).
     # Se aplica a grad; hess ya lo incorpora algebraicamente en su forma simplificada.
     _scale = np.pi * (s ** 2 + std_y ** 2) ** 2 / (2.0 * s ** 3)
     def objective(y_pred, dtrain):
         # Clamp predicciones divergentes: en trials Optuna con malos
         # hiperparámetros las predicciones XGBoost (float32) pueden llegar
-        # a ±inf, produciendo u=±inf → u²=inf → overflow en el hessiano.
+        # a ±inf, produciendo u=±inf -> u²=inf -> overflow en el hessiano.
         y_pred = np.clip(y_pred, -1e15, 1e15)
         u      = dtrain.get_label() - y_pred
         s2u2   = s ** 2 + u ** 2          # siempre > 0, sin overflow en float64
@@ -803,7 +803,7 @@ def _objective_optuna(trial, X_tr, y_tr, X_va, y_va, std_y):
 
 
 def optimizar_hiperparametros(X_tr, y_tr, X_va, y_va, std_y, n_trials, fold_num):
-    logger.info(f"    Optuna fold {fold_num} ({n_trials} trials, τ=0.50 en VAL)...")
+    logger.info(f"    Optuna fold {fold_num} ({n_trials} trials, tau=0.50 en VAL)...")
     study = optuna.create_study(
         direction="minimize",
         sampler=optuna.samplers.TPESampler(seed=42 + fold_num),
@@ -848,7 +848,7 @@ def entrenar_quantiles(X_tr, y_tr, best_params, quantiles, std_y):
 def predecir_y_corregir(modelos, X):
     dmat      = xgb.DMatrix(X)
     preds_raw = {tau: m.predict(dmat) for tau, m in modelos.items()}
-    # "mean" key is not a quantile — exclude from crossing correction
+    # "mean" key is not a quantile -- exclude from crossing correction
     mean_pred = preds_raw.pop("mean", None)
     taus      = sorted(preds_raw)
     matrix    = np.sort(np.column_stack([preds_raw[t] for t in taus]), axis=1)
@@ -858,7 +858,7 @@ def predecir_y_corregir(modelos, X):
     return result
 
 
-# ── LightGBM ──────────────────────────────────────────────────────────────────
+# -- LightGBM ------------------------------------------------------------------
 
 def _objetivo_optuna_lgbm(trial, X_tr, y_tr, X_va, y_va):
     if not _LGBM_OK:
@@ -920,7 +920,7 @@ def predecir_lgbm(modelos, X):
     return {t: matrix[:, i] for i, t in enumerate(taus)}
 
 
-# ── XGBoost QT ────────────────────────────────────────────────────────────────
+# -- XGBoost QT ----------------------------------------------------------------
 
 def _objetivo_optuna_xgb_qt_tau(trial, tau, X_tr, y_tr, X_va, y_va, std_y):
     s = (std_y * S_FACTOR_FIJO if S_FIJO
@@ -959,7 +959,7 @@ def _worker_optuna_tau(args):
     """
     tau, X_tr_np, y_tr_np, X_va_np, y_va_np, col_names, std_y, n_trials, fold_num = args
 
-    # DMatrix creado una vez — se reutiliza en cada trial (no se recrea 110×)
+    # DMatrix creado una vez -- se reutiliza en cada trial (no se recrea 110×)
     dtrain = xgb.DMatrix(X_tr_np, label=y_tr_np, feature_names=col_names)
     dval   = xgb.DMatrix(X_va_np, label=y_va_np, feature_names=col_names)
 
@@ -1014,8 +1014,8 @@ def _entrenar_fold_xgb_qt(X_tr, y_tr, X_va, y_va, std_y, n_trials, fold_num):
     """
     Entrena un modelo por cuantil con Optuna independiente para cada uno.
     Los estudios corren en paralelo con ProcessPoolExecutor (un proceso por
-    cuantil, GIL independiente) → paralelismo real en múltiples núcleos.
-    Cada XGBoost usa _XGB_NTHREAD threads → sin over-subscription de CPU.
+    cuantil, GIL independiente) -> paralelismo real en múltiples núcleos.
+    Cada XGBoost usa _XGB_NTHREAD threads -> sin over-subscription de CPU.
     Se pasan numpy arrays al worker para reducir overhead de pickle.
     """
     col_names = list(X_tr.columns)
@@ -1038,11 +1038,11 @@ def _entrenar_fold_xgb_qt(X_tr, y_tr, X_va, y_va, std_y, n_trials, fold_num):
             tau, model, bp, best_val = fut.result()
             modelos[tau]     = model
             best_by_tau[tau] = bp
-            logger.info(f"    [xgb_qt] τ={tau:.2f} fold {fold_num}: "
+            logger.info(f"    [xgb_qt] tau={tau:.2f} fold {fold_num}: "
                         f"pinball/VAL={best_val:.4f}  s={bp.get('s', std_y*S_FACTOR_FIJO):.3e}  "
                         f"n_est={bp['n_estimators']}")
 
-    # Mean model — reg:squarederror con los mejores HP de Q50
+    # Mean model -- reg:squarederror con los mejores HP de Q50
     bp_mean = best_by_tau.get(0.50, list(best_by_tau.values())[0])
     params_mean = {k: v for k, v in bp_mean.items() if k not in ("s", "n_estimators")}
     params_mean.update({"objective": "reg:squarederror",
@@ -1068,7 +1068,7 @@ def _retrain_train_val_qt(X_tr, y_tr, X_va, y_va, best_by_tau, std_y, fold_num):
     leakage directo. Se usa el n_estimators encontrado por Optuna, que fue
     seleccionado con early stopping activo sobre val durante la búsqueda.
 
-    s viene de best_by_tau[tau] — calibrado por Optuna, no derivado de std_y.
+    s viene de best_by_tau[tau] -- calibrado por Optuna, no derivado de std_y.
     std_y se mantiene de y_train para consistencia con el objetivo original.
     preds_val NO usa este modelo; se evalúa con el modelo solo-train para
     mantener val como estimación out-of-sample honesta.
@@ -1104,7 +1104,7 @@ def _retrain_train_val_qt(X_tr, y_tr, X_va, y_va, best_by_tau, std_y, fold_num):
     return modelos_tv
 
 
-# ── Dispatchers ───────────────────────────────────────────────────────────────
+# -- Dispatchers ---------------------------------------------------------------
 
 def entrenar_fold(X_tr, y_tr, X_va, y_va, std_y, n_trials, fold_num):
     if MODELO_CV == "xgb":
@@ -1127,7 +1127,7 @@ def predecir_fold(modelos, X):
 
 
 ###############################################################################
-# PARTE 5 — Preparación de datos  (devuelve también fechas_t para TEST)
+# PARTE 5 -- Preparación de datos  (devuelve también fechas_t para TEST)
 ###############################################################################
 
 def get_feature_cols(df):
@@ -1143,17 +1143,17 @@ def preparar_fold_data(df, fold, cols_feat):
       h_train, h_val, h_test, fechas_t_test
 
     fechas_t_test: array de pd.Timestamp con la fecha de origen de cada fila
-    de TEST — necesario para construir los fan charts por snapshot.
+    de TEST -- necesario para construir los fan charts por snapshot.
     """
     train_start = fold["train_start"]
     train_end   = fold["train_end"]
     val_start   = fold["val_start"]
-    val_end     = fold["val_end"]      # límite real de VAL — evita incluir el purge en X_val/y_val
+    val_end     = fold["val_end"]      # límite real de VAL -- evita incluir el purge en X_val/y_val
     test_start  = fold["test_start"]
     test_end    = fold["test_end"]
 
     mask_train = (df["fecha_t"] >= train_start) & (df["fecha_t"] <= train_end)
-    # df_fold_all incluye el purge period (val_end → test_start) para que GARCH y FFD
+    # df_fold_all incluye el purge period (val_end -> test_start) para que GARCH y FFD
     # operen sobre una serie continua sin saltos. El purge se excluye de df_val abajo.
     mask_fold_val = (df["fecha_t"] >= val_start) & (df["fecha_t"] < test_start)
     mask_test  = (df["fecha_t"] >= test_start)  & (df["fecha_t"] <= test_end)
@@ -1176,7 +1176,7 @@ def preparar_fold_data(df, fold, cols_feat):
         burn_cutoff = fold.get("burn_cutoff",
                                train_start + pd.offsets.BusinessDay(BURN_IN_DIAS_HAB))
         df_train = df_train[df_train["fecha_t"] >= burn_cutoff]
-    # df_val usa val_end como límite superior — excluye el purge period de X_val/y_val
+    # df_val usa val_end como límite superior -- excluye el purge period de X_val/y_val
     # para que Optuna no vea targets cuyo fecha_th cae dentro del período TEST.
     df_val   = df_fold_all[(df_fold_all["fecha_t"] >= val_start) &
                            (df_fold_all["fecha_t"] <= val_end)]
@@ -1218,7 +1218,7 @@ def preparar_fold_data(df, fold, cols_feat):
 
 
 ###############################################################################
-# PARTE 6 — Métricas
+# PARTE 6 -- Métricas
 ###############################################################################
 
 def calcular_metricas_fold(preds, y_true, fold, periodo="test"):
@@ -1267,7 +1267,7 @@ def calcular_metricas_por_h(preds, y_true, h_arr, fold_num):
 
 
 ###############################################################################
-# PARTE 7 — Visualización
+# PARTE 7 -- Visualización
 ###############################################################################
 
 def graficar_metricas_wfcv(df_test_m, banco):
@@ -1278,17 +1278,17 @@ def graficar_metricas_wfcv(df_test_m, banco):
 
     fig, axes = plt.subplots(1, 4, figsize=(18, 4))
     fig.suptitle(
-        f"Walk-forward CV v3 [{modo}] — {banco}  [métricas TEST out-of-sample]\n"
+        f"Walk-forward CV v3 [{modo}] -- {banco}  [métricas TEST out-of-sample]\n"
         f"TRAIN {VENTANA_TRAIN_AÑOS}yr{'(min)' if EXPANDING else ''} / "
         f"VAL {VENTANA_VAL_AÑOS}yr (Optuna) / TEST {VENTANA_TEST_AÑOS}yr / "
         f"paso {PASO_AÑOS}yr / purge {PURGE_DIAS_HAB}dh / burn-in {BURN_IN_DIAS_HAB}dh",
         fontweight="bold", fontsize=10,
     )
     metricas_config = [
-        ("pinball_q50", "Pinball Q50 — TEST OOS",   "steelblue",  None),
-        ("coverage_90", "Coverage 90% — TEST OOS",  "seagreen",   0.90),
-        ("winkler_90",  "Winkler score — TEST",     "darkorange", None),
-        ("crps_approx", "CRPS aprox. — TEST",       "crimson",    None),
+        ("pinball_q50", "Pinball Q50 -- TEST OOS",   "steelblue",  None),
+        ("coverage_90", "Coverage 90% -- TEST OOS",  "seagreen",   0.90),
+        ("winkler_90",  "Winkler score -- TEST",     "darkorange", None),
+        ("crps_approx", "CRPS aprox. -- TEST",       "crimson",    None),
     ]
     for ax, (col, titulo, color, hline) in zip(axes, metricas_config):
         if col not in df_test_m.columns:
@@ -1327,7 +1327,7 @@ def graficar_comparacion_val_test(df_val_m, df_test_m, banco):
     folds = df_test_m["fold"].values
     fig, axes = plt.subplots(1, 2, figsize=(12, 4))
     fig.suptitle(
-        f"VAL (Optuna, sesgo) vs TEST (OOS real) — {banco} "
+        f"VAL (Optuna, sesgo) vs TEST (OOS real) -- {banco} "
         f"[{'EXPANDING' if EXPANDING else 'ROLLING'}]",
         fontweight="bold", fontsize=11,
     )
@@ -1346,7 +1346,7 @@ def graficar_comparacion_val_test(df_val_m, df_test_m, banco):
             ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:.1%}"))
         diff = float(np.mean(v_val - v_test))
         ax.set_title(titulo, fontsize=10, fontweight="bold")
-        ax.set_xlabel(f"Fold  (sesgo promedio VAL−TEST: {diff:+.4f})", fontsize=9)
+        ax.set_xlabel(f"Fold  (sesgo promedio VAL-TEST: {diff:+.4f})", fontsize=9)
         ax.set_xticks(folds)
         ax.legend(fontsize=9)
         ax.grid(True, alpha=0.25)
@@ -1369,7 +1369,7 @@ def graficar_fanchart_acum_test_fold(
     """
     Fan chart de flujo neto ACUMULADO (cumsum sobre h) para un fold TEST.
     Mismas fechas de origen que graficar_fanchart_test_fold; cada cuantil
-    se acumula con np.cumsum → banda de incertidumbre del total acumulado.
+    se acumula con np.cumsum -> banda de incertidumbre del total acumulado.
     """
     fechas_unicas = pd.DatetimeIndex(sorted(set(fechas_t_test)))
     if len(fechas_unicas) == 0:
@@ -1398,8 +1398,8 @@ def graficar_fanchart_acum_test_fold(
     axes_flat = np.array(axes).flatten()
 
     fig.suptitle(
-        f"Fan chart ACUMULADO TEST OOS — Fold {fold['fold']} — {banco} [{modo}]\n"
-        f"TEST: {fold['test_start'].date()} → {fold['test_end'].date()}  |  "
+        f"Fan chart ACUMULADO TEST OOS -- Fold {fold['fold']} -- {banco} [{modo}]\n"
+        f"TEST: {fold['test_start'].date()} -> {fold['test_end'].date()}  |  "
         f"TRAIN hasta: {fold['train_end'].date()}",
         fontweight="bold", fontsize=11,
     )
@@ -1514,8 +1514,8 @@ def graficar_fanchart_acum_punto_test_fold(
     axes_flat = np.array(axes).flatten()
 
     fig.suptitle(
-        f"Acumulado TEST OOS — Realizado vs Media vs Mediana — Fold {fold['fold']} — {banco} [{modo}]\n"
-        f"TEST: {fold['test_start'].date()} → {fold['test_end'].date()}  |  "
+        f"Acumulado TEST OOS -- Realizado vs Media vs Mediana -- Fold {fold['fold']} -- {banco} [{modo}]\n"
+        f"TEST: {fold['test_start'].date()} -> {fold['test_end'].date()}  |  "
         f"TRAIN hasta: {fold['train_end'].date()}",
         fontweight="bold", fontsize=11,
     )
@@ -1607,8 +1607,8 @@ def graficar_fanchart_acum_punto_q05_test_fold(
     axes_flat = np.array(axes).flatten()
 
     fig.suptitle(
-        f"Acumulado TEST OOS — Realizado / Media / Mediana / Q05-acum — Fold {fold['fold']} — {banco} [{modo}]\n"
-        f"TEST: {fold['test_start'].date()} → {fold['test_end'].date()}  |  "
+        f"Acumulado TEST OOS -- Realizado / Media / Mediana / Q05-acum -- Fold {fold['fold']} -- {banco} [{modo}]\n"
+        f"TEST: {fold['test_start'].date()} -> {fold['test_end'].date()}  |  "
         f"TRAIN hasta: {fold['train_end'].date()}",
         fontweight="bold", fontsize=11,
     )
@@ -1649,7 +1649,7 @@ def graficar_fanchart_acum_punto_q05_test_fold(
                     zorder=4, label="Media acum.")
         if med_stress_cum is not None:
             ax.plot(h_s, med_stress_cum / 1e6, color="darkorange", lw=1.8,
-                    ls=":", zorder=2, label="Mediana acum. − riesgo P5 día h")
+                    ls=":", zorder=2, label="Mediana acum. - riesgo P5 día h")
 
         ax.axhline(0, color="black", lw=0.5, alpha=0.3, ls="--")
         ax.set_title(f"Origen: {t0.strftime('%Y-%m-%d')}", fontsize=9, fontweight="bold")
@@ -1684,7 +1684,7 @@ def graficar_cobertura_por_h(df_por_h, banco, sufijo="test"):
     ax.set_yticklabels([f"Fold {i}" for i in pivot.index], fontsize=8)
     ax.set_xlabel("Horizonte h (días hábiles)", fontsize=9)
     ax.set_title(
-        f"Coverage 90% por fold y horizonte — {banco} [{sufijo.upper()} OOS] "
+        f"Coverage 90% por fold y horizonte -- {banco} [{sufijo.upper()} OOS] "
         f"[{'EXPANDING' if EXPANDING else 'ROLLING'}]\n"
         "(verde=bien calibrado ~90%, rojo=sub/sobre-cobertura)",
         fontsize=10,
@@ -1726,7 +1726,7 @@ def graficar_hiperparametros_wfcv(df_test_m, banco):
                              gridspec_kw={"hspace": 0.55, "wspace": 0.35})
     axes_flat = np.array(axes).flatten()
     fig.suptitle(
-        f"Estabilidad HP — Walk-forward CV v3 [{' EXPANDING' if EXPANDING else 'ROLLING'}] — {banco}\n"
+        f"Estabilidad HP -- Walk-forward CV v3 [{' EXPANDING' if EXPANDING else 'ROLLING'}] -- {banco}\n"
         f"TRAIN {VENTANA_TRAIN_AÑOS}yr / VAL {VENTANA_VAL_AÑOS}yr / TEST {VENTANA_TEST_AÑOS}yr  "
         f"({len(folds)} folds)",
         fontweight="bold", fontsize=11,
@@ -1738,7 +1738,7 @@ def graficar_hiperparametros_wfcv(df_test_m, banco):
         ax.axhline(mu, color=color, lw=1.0, ls="--", alpha=0.5, label=f"media={mu:.4g}")
         if sig > 0:
             ax.axhspan(mu - sig, mu + sig, alpha=0.08, color=color,
-                       label=f"±1σ ({sig:.4g})")
+                       label=f"±1sigma ({sig:.4g})")
         if len(folds) >= 3:
             z    = np.polyfit(folds, vals if scale == "linear"
                               else np.log(np.maximum(vals, 1e-12)), 1)
@@ -1800,11 +1800,11 @@ def graficar_importancia_por_fold(
     """
     Genera dos gráficos a partir de la lista de importancias por fold:
 
-    1. Heatmap (Features × Folds) — ganancia normalizada por fold.
+    1. Heatmap (Features × Folds) -- ganancia normalizada por fold.
        Verde intenso = feature dominante en ese fold; blanco/amarillo = marginal.
        Útil para detectar features consistentes vs. régimen-dependientes.
 
-    2. Rank-stability (Top-10) — muestra cómo cambia el ranking de las features
+    2. Rank-stability (Top-10) -- muestra cómo cambia el ranking de las features
        más importantes entre folds.  Línea plana = feature robusto;
        línea con saltos grandes = feature régimen-dependiente.
 
@@ -1813,7 +1813,7 @@ def graficar_importancia_por_fold(
     if not importancias_folds:
         return
 
-    # ── Pivot: filas = feature, columnas = fold ───────────────────────────────
+    # -- Pivot: filas = feature, columnas = fold -------------------------------
     registros = []
     for item in importancias_folds:
         fold_id = item["fold"]
@@ -1847,7 +1847,7 @@ def graficar_importancia_por_fold(
     modo   = "EXPANDING" if EXPANDING else "ROLLING"
     folds  = sorted(pivot_norm.columns.tolist())
 
-    # ── Gráfico 1: Heatmap ────────────────────────────────────────────────────
+    # -- Gráfico 1: Heatmap ----------------------------------------------------
     top_feats_h = pivot_norm.iloc[:TOP_N]
     fig_h, ax_h = plt.subplots(
         figsize=(max(8, len(folds) * 1.2), max(6, TOP_N * 0.45))
@@ -1867,8 +1867,8 @@ def graficar_importancia_por_fold(
     ax_h.set_xlabel("Fold", fontsize=10)
     ax_h.set_ylabel("Feature", fontsize=10)
     ax_h.set_title(
-        f"Importancia de features por fold — {banco} [{modo}]\n"
-        f"Top {TOP_N} features · ganancia XGBoost normalizada por fold "
+        f"Importancia de features por fold -- {banco} [{modo}]\n"
+        f"Top {TOP_N} features . ganancia XGBoost normalizada por fold "
         f"(TRAIN {VENTANA_TRAIN_AÑOS}yr / VAL {VENTANA_VAL_AÑOS}yr / TEST {VENTANA_TEST_AÑOS}yr)",
         fontweight="bold", fontsize=11,
     )
@@ -1890,7 +1890,7 @@ def graficar_importancia_por_fold(
     plt.close(fig_h)
     logger.info(f"  Heatmap importancia: {nombre_h.name}")
 
-    # ── Gráfico 2: Rank-stability ─────────────────────────────────────────────
+    # -- Gráfico 2: Rank-stability ---------------------------------------------
     TOP_RANK   = min(10, len(pivot_norm))
     top_feats_r = pivot_norm.iloc[:TOP_RANK].index.tolist()
 
@@ -1918,8 +1918,8 @@ def graficar_importancia_por_fold(
     ax_r.set_xlabel("Fold", fontsize=10)
     ax_r.set_ylabel("Ranking (1 = mayor ganancia)", fontsize=10)
     ax_r.set_title(
-        f"Estabilidad de ranking — Top {TOP_RANK} features — {banco} [{modo}]\n"
-        f"Línea plana = feature robusto · saltos grandes = régimen-dependiente",
+        f"Estabilidad de ranking -- Top {TOP_RANK} features -- {banco} [{modo}]\n"
+        f"Línea plana = feature robusto . saltos grandes = régimen-dependiente",
         fontweight="bold", fontsize=10,
     )
     ax_r.legend(fontsize=8, bbox_to_anchor=(1.01, 1), loc="upper left", framealpha=0.85)
@@ -1930,7 +1930,7 @@ def graficar_importancia_por_fold(
     plt.close(fig_r)
     logger.info(f"  Ranking importancia: {nombre_r.name}")
 
-    # ── CSV importancias brutas ────────────────────────────────────────────────
+    # -- CSV importancias brutas ------------------------------------------------
     df_csv = pivot_raw.copy().reset_index()
     df_csv.columns.name = None
     ruta_csv = DIR_MODO / f"wfcv_v3_importancias_{banco}.csv"
@@ -1946,16 +1946,16 @@ def graficar_fanchart_test_fold(
     fold: dict,
     banco: str,
     preds_overlay: dict | None = None,   # step004 predictions para comparación
-    dir_out: Path | None = None,         # carpeta de salida; None → DIR_FANCHARTS
+    dir_out: Path | None = None,         # carpeta de salida; None -> DIR_FANCHARTS
 ):
     """
     Fan chart TEST out-of-sample para un fold.
 
     Selecciona hasta FANCHART_N_SNAPSHOTS fechas de origen separadas ~3 meses
     dentro del período TEST. Para cada fecha muestra:
-      · Bandas Q01-Q99 (muy transparente) y Q05-Q95 (media)
-      · Línea Q50 (mediana predicha)
-      · Puntos realizados: verde = dentro de Q05-Q95 / rojo = fuera
+      . Bandas Q01-Q99 (muy transparente) y Q05-Q95 (media)
+      . Línea Q50 (mediana predicha)
+      . Puntos realizados: verde = dentro de Q05-Q95 / rojo = fuera
 
     Ayuda a detectar si el modelo sobre/sub-estima en horizontes cortos o largos,
     y en qué trimestres del período TEST falla la cobertura.
@@ -1988,10 +1988,10 @@ def graficar_fanchart_test_fold(
     fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 7, nrows * 5), sharey=False)
     axes_flat = np.array(axes).flatten()
 
-    s4_tag = "  |  🟠 naranja = Step004 (GARCH global, lookahead)" if preds_overlay is not None else ""
+    s4_tag = "  |  [naranja] naranja = Step004 (GARCH global, lookahead)" if preds_overlay is not None else ""
     fig.suptitle(
-        f"Fan chart TEST OOS — Fold {fold['fold']} — {banco} [{modo}]\n"
-        f"TEST: {fold['test_start'].date()} → {fold['test_end'].date()}  |  "
+        f"Fan chart TEST OOS -- Fold {fold['fold']} -- {banco} [{modo}]\n"
+        f"TEST: {fold['test_start'].date()} -> {fold['test_end'].date()}  |  "
         f"TRAIN hasta: {fold['train_end'].date()}{s4_tag}",
         fontweight="bold", fontsize=11,
     )
@@ -2017,7 +2017,7 @@ def graficar_fanchart_test_fold(
             p_s4 = {tau: arr[mask][order] for tau, arr in preds_overlay.items()
                     if tau != "mean"}
 
-        # Bandas de incertidumbre — step005 (azul)
+        # Bandas de incertidumbre -- step005 (azul)
         if {0.01, 0.99}.issubset(p_s):
             ax.fill_between(h_s, p_s[0.01] / 1e6, p_s[0.99] / 1e6,
                             alpha=0.12, color="steelblue", label="Q01-Q99 (CV)")
@@ -2033,7 +2033,7 @@ def graficar_fanchart_test_fold(
             ax.plot(h_s, p_s["mean"] / 1e6, color="navy", lw=2.2,
                     zorder=4, label="Media (CV)")
 
-        # Overlay step004 — naranja discontinuo
+        # Overlay step004 -- naranja discontinuo
         if p_s4 is not None:
             if {0.05, 0.95}.issubset(p_s4):
                 ax.fill_between(h_s, p_s4[0.05] / 1e6, p_s4[0.95] / 1e6,
@@ -2081,7 +2081,7 @@ def graficar_fanchart_test_fold(
 
 
 ###############################################################################
-# PARTE 7-bis — Diagnóstico de features (gain / block-perm / SHAP)
+# PARTE 7-bis -- Diagnóstico de features (gain / block-perm / SHAP)
 ###############################################################################
 
 def _diag_predict_un_modelo(model, X):
@@ -2112,7 +2112,7 @@ def _diag_gain_promedio(modelos, cols_feat):
 
 def _consolidar_cicl_df(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Consolida columnas sin/cos → _cyc con norma euclidiana sqrt(I_sin²+I_cos²).
+    Consolida columnas sin/cos -> _cyc con norma euclidiana sqrt(I_sin²+I_cos²).
     Opera sobre DataFrame folds × features (una fila por fold).
     Reutiliza _CICL_PARES_PERM definido junto a los constants de diagnóstico.
     """
@@ -2139,8 +2139,8 @@ def _diag_block_perm_un_cuantil(model, X, y, tau, block_size, n_repeats, rng):
     base = pinball_loss(y, _diag_predict_un_modelo(model, X), tau)
     block_starts = np.arange(0, n, block_size)
 
-    # Identificar pares sin/cos presentes en X → permutación simultánea
-    grupos_cicl = {}              # nombre_cyc → [col_sin, col_cos]
+    # Identificar pares sin/cos presentes en X -> permutación simultánea
+    grupos_cicl = {}              # nombre_cyc -> [col_sin, col_cos]
     for c in X.columns:
         if c in _CICL_PARES_PERM:
             grupos_cicl.setdefault(_CICL_PARES_PERM[c], []).append(c)
@@ -2148,7 +2148,7 @@ def _diag_block_perm_un_cuantil(model, X, y, tau, block_size, n_repeats, rng):
 
     imp = {}
 
-    # ── Features sueltas: permutación individual (comportamiento original) ──
+    # -- Features sueltas: permutación individual (comportamiento original) --
     for c in X.columns:
         if c in feat_en_par:
             continue
@@ -2161,9 +2161,9 @@ def _diag_block_perm_un_cuantil(model, X, y, tau, block_size, n_repeats, rng):
             deltas.append(pinball_loss(y, _diag_predict_un_modelo(model, Xp), tau) - base)
         imp[c] = float(np.mean(deltas))
 
-    # ── Pares sin/cos: UN solo shuffle por repetición → delta combinado real ──
-    # Se distribuye como D/√n_comp en cada componente para que la norma euclidiana
-    # en aux_comparar_features.py reconstruya exactamente D = √(I_sin²+I_cos²).
+    # -- Pares sin/cos: UN solo shuffle por repetición -> delta combinado real --
+    # Se distribuye como D/sqrtn_comp en cada componente para que la norma euclidiana
+    # en aux_comparar_features.py reconstruya exactamente D = sqrt(I_sin²+I_cos²).
     for cyc_name, cols in grupos_cicl.items():
         orig_vals = {c: X[c].values.copy() for c in cols}
         deltas = []
@@ -2221,7 +2221,7 @@ def _diag_block_perm_promedio(modelos, X_val, y_val, cols_feat, fold_num):
 def _diag_shap_promedio(modelos, X_val, cols_feat, fold_num):
     X = X_val.reset_index(drop=True)[cols_feat]
 
-    # Submuestreo estratificado por h — mismo criterio que block-perm para
+    # Submuestreo estratificado por h -- mismo criterio que block-perm para
     # que ambas métricas evalúen la misma distribución de horizontes.
     if len(X) > DIAG_SHAP_MAX_SAMPLES:
         if "h" in X.columns:
@@ -2237,7 +2237,7 @@ def _diag_shap_promedio(modelos, X_val, cols_feat, fold_num):
         else:
             X = X.sample(DIAG_SHAP_MAX_SAMPLES, random_state=42 + fold_num)
 
-    # h es variable estructural del problema (siempre conocida) — excluirla
+    # h es variable estructural del problema (siempre conocida) -- excluirla
     # del ranking SHAP evita que desplace features reales del top_n.
     cols_shap = [c for c in cols_feat if c != "h"]
     dmat = xgb.DMatrix(X.values, feature_names=cols_feat)
@@ -2249,7 +2249,7 @@ def _diag_shap_promedio(modelos, X_val, cols_feat, fold_num):
             continue
         try:
             # pred_contribs=True devuelve SHAP values nativos de XGBoost
-            # shape: (n_samples, n_features + 1); última col = bias → se descarta
+            # shape: (n_samples, n_features + 1); última col = bias -> se descarta
             sv = model.predict(dmat, pred_contribs=True)[:, :-1]
             # sv tiene columnas en el mismo orden que cols_feat
             h_idx   = list(cols_feat).index("h") if "h" in cols_feat else None
@@ -2259,7 +2259,7 @@ def _diag_shap_promedio(modelos, X_val, cols_feat, fold_num):
             acum = acum.add(s.fillna(0.0), fill_value=0.0)
             n += 1
         except Exception as e:
-            logger.warning(f"      [diag] SHAP τ={tau} falló: {e}")
+            logger.warning(f"      [diag] SHAP tau={tau} falló: {e}")
     if n == 0:
         return pd.Series(np.nan, index=cols_shap)
     return acum / n
@@ -2312,9 +2312,9 @@ def _plot_gain_perm_shap(matrices, orden_top, folds, banco):
     ax.set_yticklabels(orden_top, fontsize=8)
     ax.invert_yaxis()
     ax.set_xlabel("Importancia normalizada", fontsize=10)
-    nota = "" if _SHAP_OK else "  ⚠ SHAP no disponible"
-    ax.set_title(f"gain / perm / SHAP — {banco}{nota}\n"
-                 f"convergencia gain≈perm≈SHAP → feature genuinamente útil",
+    nota = "" if _SHAP_OK else "  [!] SHAP no disponible"
+    ax.set_title(f"gain / perm / SHAP -- {banco}{nota}\n"
+                 f"convergencia gain~=perm~=SHAP -> feature genuinamente útil",
                  fontweight="bold", fontsize=9)
     ax.legend(fontsize=9)
     ax.grid(True, axis="x", alpha=0.25)
@@ -2337,7 +2337,7 @@ def consolidar_diagnostico(diag_por_fold, cols_feat, banco, top_n=25):
     }
     matrices = {s: _diag_matriz(diag_por_fold, s, cols_feat) for s in senales}
 
-    # Consolidar pares sin/cos → _cyc (norma euclidiana) en las 3 señales
+    # Consolidar pares sin/cos -> _cyc (norma euclidiana) en las 3 señales
     matrices = {s: _consolidar_cicl_df(m) for s, m in matrices.items()}
     cols_feat_cyc = matrices["gain_train"].columns.tolist()
 
@@ -2387,8 +2387,8 @@ def consolidar_diagnostico(diag_por_fold, cols_feat, banco, top_n=25):
         ax.set_xticks(range(len(folds)))
         ax.set_xticklabels([f"F{f}" for f in folds], fontsize=9)
         ax.set_xlabel("Fold", fontsize=10)
-        ax.set_title(f"Diagnóstico VAL — {senales[s]} — {banco}\n"
-                     f"Top {len(orden_top)} features · normalizado por fold "
+        ax.set_title(f"Diagnóstico VAL -- {senales[s]} -- {banco}\n"
+                     f"Top {len(orden_top)} features . normalizado por fold "
                      f"(solo diagnóstico, NO depuración)", fontweight="bold", fontsize=10)
         plt.tight_layout()
         ruta = DIR_PLOTS / f"diag_heatmap_{s}_{banco}.png"
@@ -2410,8 +2410,8 @@ def consolidar_diagnostico(diag_por_fold, cols_feat, banco, top_n=25):
         ax.set_xticks(folds)
         ax.set_xticklabels([f"Fold {f}" for f in folds], fontsize=9)
         ax.set_ylabel("Ranking perm(VAL)  (1 = más importante)", fontsize=10)
-        ax.set_title(f"Estabilidad de ranking — Block-Permutation VAL — {banco}\n"
-                     f"Línea plana = feature robusto · saltos = régimen-dependiente",
+        ax.set_title(f"Estabilidad de ranking -- Block-Permutation VAL -- {banco}\n"
+                     f"Línea plana = feature robusto . saltos = régimen-dependiente",
                      fontweight="bold", fontsize=10)
         ax.legend(fontsize=8, bbox_to_anchor=(1.01, 1), loc="upper left", framealpha=0.85)
         ax.grid(True, alpha=0.25)
@@ -2439,8 +2439,8 @@ def consolidar_diagnostico(diag_por_fold, cols_feat, banco, top_n=25):
         ax.set_yticklabels(orden_top, fontsize=8)
         ax.invert_yaxis()
         ax.set_xlabel("Importancia normalizada", fontsize=10)
-        ax.set_title(f"gain(TRAIN) vs perm(VAL) — {banco}\n"
-                     f"gain alto + perm bajo → sospecha de sobreajuste",
+        ax.set_title(f"gain(TRAIN) vs perm(VAL) -- {banco}\n"
+                     f"gain alto + perm bajo -> sospecha de sobreajuste",
                      fontweight="bold", fontsize=9)
         ax.legend(fontsize=9)
         ax.grid(True, axis="x", alpha=0.25)
@@ -2453,12 +2453,12 @@ def consolidar_diagnostico(diag_por_fold, cols_feat, banco, top_n=25):
     # Gráfico 3 barras: gain / perm / SHAP
     _plot_gain_perm_shap(matrices, orden_top, folds, banco)
 
-    logger.info(f"    [diag] Consolidación completa — {len(folds)} folds, "
+    logger.info(f"    [diag] Consolidación completa -- {len(folds)} folds, "
                 f"{len(cols_feat)} features")
 
 
 ###############################################################################
-# PARTE 8 — Pipeline principal
+# PARTE 8 -- Pipeline principal
 ###############################################################################
 
 def _cargar_metadata_disco(banco: str) -> dict:
@@ -2498,7 +2498,7 @@ def _cargar_modelos_fold_disco(fold_info: dict, banco: str) -> dict:
         else:
             b = xgb.Booster(); b.load_model(str(ruta)); modelos[tau] = b
 
-    # Mean model (opcional — solo existe si fue entrenado con la nueva versión)
+    # Mean model (opcional -- solo existe si fue entrenado con la nueva versión)
     ruta_mean = DIR_MODELOS / f"{sfx}_{banco}_fold{fold_num:02d}_mean_{fecha}{ext}"
     if ruta_mean.exists():
         b = xgb.Booster(); b.load_model(str(ruta_mean)); modelos["mean"] = b
@@ -2564,7 +2564,7 @@ def aplicar_mondrian_cqr(preds_val, y_val, h_val, preds_test, h_test):
         [Q_lo_pred - q_hat_h,  Q_hi_pred + q_hat_h]
     """
     if CQR_TAU_LO not in preds_val or CQR_TAU_HI not in preds_val:
-        logger.warning("    [CQR] Cuantiles CQR_TAU_LO/HI no encontrados en preds_val — omitiendo")
+        logger.warning("    [CQR] Cuantiles CQR_TAU_LO/HI no encontrados en preds_val -- omitiendo")
         return preds_test
 
     lo_val = preds_val[CQR_TAU_LO]
@@ -2584,7 +2584,7 @@ def aplicar_mondrian_cqr(preds_val, y_val, h_val, preds_test, h_test):
         q_hat_h[int(h)] = float(np.quantile(scores, nivel))
 
     if not q_hat_h:
-        logger.warning("    [CQR] Sin horizontes con suficientes datos — omitiendo")
+        logger.warning("    [CQR] Sin horizontes con suficientes datos -- omitiendo")
         return preds_test
 
     adj = np.array([q_hat_h.get(int(h), 0.0) for h in h_test])
@@ -2597,7 +2597,7 @@ def aplicar_mondrian_cqr(preds_val, y_val, h_val, preds_test, h_test):
 
     _sample_h = sorted(q_hat_h)
     _log_vals = "  ".join(
-        f"h={h}→{q_hat_h[h]:,.0f}" for h in _sample_h[::max(1, len(_sample_h)//4)]
+        f"h={h}->{q_hat_h[h]:,.0f}" for h in _sample_h[::max(1, len(_sample_h)//4)]
     )
     logger.info(
         f"    [CQR] Mondrian q_hat por h (alpha={CQR_ALPHA}, "
@@ -2609,7 +2609,7 @@ def aplicar_mondrian_cqr(preds_val, y_val, h_val, preds_test, h_test):
 def evaluar_banco(banco: str):
     modo = "EXPANDING" if EXPANDING else "ROLLING"
     logger.info(f"\n{'='*65}")
-    logger.info(f"BANCO: {banco}  — Walk-Forward CV v3  [{modo}]  [TEST OOS]")
+    logger.info(f"BANCO: {banco}  -- Walk-Forward CV v3  [{modo}]  [TEST OOS]")
     logger.info(f"{'='*65}")
     logger.info(
         f"  TRAIN {VENTANA_TRAIN_AÑOS}yr{'(min)' if EXPANDING else ''} | "
@@ -2620,7 +2620,7 @@ def evaluar_banco(banco: str):
     if ADAPTIVE_TRIALS:
         _tau_trials = {tau: get_n_trials(tau) for tau in QUANTILES}
         logger.info(f"  Trials por cuantil: " +
-                    " | ".join(f"τ={t:.2f}→{n}" for t, n in _tau_trials.items()))
+                    " | ".join(f"tau={t:.2f}->{n}" for t, n in _tau_trials.items()))
 
     t_inicio = time.time()
 
@@ -2629,18 +2629,18 @@ def evaluar_banco(banco: str):
     df = df.sort_values(["fecha_t", "h"]).reset_index(drop=True)
 
     if df.empty or df["target"].notna().sum() < 500:
-        logger.warning(f"  [{banco}] Datos insuficientes — omitiendo")
+        logger.warning(f"  [{banco}] Datos insuficientes -- omitiendo")
         return None
 
     cols_feat = get_feature_cols(df)
     fechas    = pd.DatetimeIndex(df["fecha_t"].unique())
     logger.info(f"  [{banco}] {len(df):,} filas | {len(cols_feat)} features | "
-                f"rango: {fechas.min().date()} → {fechas.max().date()}")
+                f"rango: {fechas.min().date()} -> {fechas.max().date()}")
 
     # Cargar modelos step004 para comparación (opcional)
     modelos_s4 = _cargar_modelos_step004(banco) if COMPARAR_CON_STEP004 else None
     if COMPARAR_CON_STEP004 and modelos_s4 is None:
-        logger.warning("  [S4] No se pudo cargar step004 — comparación desactivada")
+        logger.warning("  [S4] No se pudo cargar step004 -- comparación desactivada")
 
     folds = generar_folds(
         fechas_disponibles=fechas,
@@ -2658,7 +2658,7 @@ def evaluar_banco(banco: str):
 
     if N_MAX_FOLDS is not None and len(folds) > N_MAX_FOLDS:
         logger.info(f"  [{banco}] Limitando a {N_MAX_FOLDS} folds "
-                    f"(de {len(folds)} disponibles) — "
+                    f"(de {len(folds)} disponibles) -- "
                     f"datos desde {folds[N_MAX_FOLDS]['test_start'].date()} quedan OOS")
         folds = folds[:N_MAX_FOLDS]
 
@@ -2668,7 +2668,7 @@ def evaluar_banco(banco: str):
         folds_man = resolver_folds_manuales(FOLDS_MANUALES, fechas, n_previos)
         if SOLO_FOLDS_MANUALES:
             folds = folds_man
-            logger.info(f"  [{banco}] Modo SOLO_FOLDS_MANUALES — "
+            logger.info(f"  [{banco}] Modo SOLO_FOLDS_MANUALES -- "
                         f"{len(folds_man)} fold(s) manual(es) en lugar de los automáticos")
         else:
             folds = folds + folds_man
@@ -2679,10 +2679,10 @@ def evaluar_banco(banco: str):
         n_train_yr = round(f["n_train_fechas"] / 252, 1)
         tag = " [MANUAL]" if f.get("_manual") else ""
         logger.info(
-            f"    Fold {f['fold']:2d}{tag} | TRAIN {f['train_start'].date()} → "
+            f"    Fold {f['fold']:2d}{tag} | TRAIN {f['train_start'].date()} -> "
             f"{f['train_end'].date()} ({n_train_yr}yr, {f['n_train_fechas']}dh) | "
-            f"VAL  {f['val_start'].date()} → {f['val_end'].date()} | "
-            f"TEST {f['test_start'].date()} → {f['test_end'].date()}"
+            f"VAL  {f['val_start'].date()} -> {f['val_end'].date()} | "
+            f"TEST {f['test_start'].date()} -> {f['test_end'].date()}"
         )
 
     resultados_test   = []
@@ -2696,7 +2696,7 @@ def evaluar_banco(banco: str):
     folds_manifest    = []   # registro de todos los folds para fan chart histórico
     fecha_hoy         = pd.Timestamp.today().strftime("%Y%m%d")
 
-    # ── Modo regenerar plots: carga metadata del disco para obtener fecha_hoy ───
+    # -- Modo regenerar plots: carga metadata del disco para obtener fecha_hoy ---
     _meta_disco = None
     if SOLO_REGENERAR_PLOTS:
         try:
@@ -2704,7 +2704,7 @@ def evaluar_banco(banco: str):
             folds_manifest = _meta_disco.get("folds_manifest", [])
             # Indexar por fold_num para acceso rápido
             _fm_idx = {fi["fold"]: fi for fi in folds_manifest}
-            logger.info(f"  [REPLOT] {len(folds_manifest)} folds en manifest — "
+            logger.info(f"  [REPLOT] {len(folds_manifest)} folds en manifest -- "
                         f"solo se regenerarán los fan charts")
         except FileNotFoundError as _e_meta:
             logger.error(f"  [REPLOT] {_e_meta}")
@@ -2713,7 +2713,7 @@ def evaluar_banco(banco: str):
 
     for fold in folds:
         t_fold = time.time()
-        logger.info(f"\n  ── Fold {fold['fold']}/{len(folds)} ──────────────────────")
+        logger.info(f"\n  -- Fold {fold['fold']}/{len(folds)} ----------------------")
 
         try:
             (X_train, y_train,
@@ -2722,43 +2722,43 @@ def evaluar_banco(banco: str):
              h_train, h_val, h_test,
              fechas_t_test) = preparar_fold_data(df, fold, cols_feat)
         except Exception as e:
-            logger.warning(f"  Fold {fold['fold']}: error preparando datos — {e}")
+            logger.warning(f"  Fold {fold['fold']}: error preparando datos -- {e}")
             continue
 
         if len(X_train) < 200 or len(X_val) < 20 or len(X_test) < 20:
-            logger.warning(f"  Fold {fold['fold']}: datos insuficientes — omitiendo")
+            logger.warning(f"  Fold {fold['fold']}: datos insuficientes -- omitiendo")
             continue
 
         std_y = float(y_train.std())
         if std_y < 1.0:
-            logger.warning(f"    Fold {fold['fold']}: std_y={std_y:.4f} anormalmente bajo — "
+            logger.warning(f"    Fold {fold['fold']}: std_y={std_y:.4f} anormalmente bajo -- "
                            f"forzado a 1.0 para evitar división por cero en objetivo GARCH")
             std_y = 1.0
         logger.info(f"    X_train={len(X_train):,} | X_val={len(X_val):,} | "
                     f"X_test={len(X_test):,} | std_y={std_y:,.0f}")
 
         if SOLO_REGENERAR_PLOTS:
-            # ── Modo replot: carga modelos del disco, salta Optuna ───────────
+            # -- Modo replot: carga modelos del disco, salta Optuna -----------
             fold_num  = fold["fold"]
             fold_info = _fm_idx.get(fold_num)
             if fold_info is None:
-                logger.warning(f"  [REPLOT] Fold {fold_num} no está en el manifest — omitiendo")
+                logger.warning(f"  [REPLOT] Fold {fold_num} no está en el manifest -- omitiendo")
                 continue
             try:
                 modelos = _cargar_modelos_fold_disco(fold_info, banco)
             except FileNotFoundError as _e_load:
-                logger.warning(f"  [REPLOT] {_e_load} — omitiendo fold {fold_num}")
+                logger.warning(f"  [REPLOT] {_e_load} -- omitiendo fold {fold_num}")
                 continue
             best_params = {}
             modelos_final = modelos   # en modo replot no hay retrain
         else:
-            # ── Modo normal: Optuna + entrenamiento ─────────────────────────
+            # -- Modo normal: Optuna + entrenamiento -------------------------
             modelos, best_params = entrenar_fold(
                 X_train, y_train, X_val, y_val, std_y,
                 get_n_trials(0.5), fold["fold"]
             )
 
-            # ── Retrain final sobre train+val (HPs fijos de Optuna) ─────────
+            # -- Retrain final sobre train+val (HPs fijos de Optuna) ---------
             # modelos_final se usa para preds_test; modelos (solo-train) para
             # preds_val y métricas de diagnóstico (val out-of-sample honesto).
             if MODELO_CV == "xgb_qt":
@@ -2788,9 +2788,9 @@ def evaluar_banco(banco: str):
                     logger.warning(f"    [diag] Fold {fold['fold']} falló: {_e_diag}")
 
         preds_test = predecir_fold(modelos_final, X_test)  # modelo train+val
-        preds_val  = predecir_fold(modelos,       X_val)   # modelo solo-train → val honesto
+        preds_val  = predecir_fold(modelos,       X_val)   # modelo solo-train -> val honesto
 
-        # ── Calibración post-hoc (por horizonte h) ───────────────────────────
+        # -- Calibración post-hoc (por horizonte h) ---------------------------
         # Shift calculado por separado para cada h en VAL y aplicado solo a
         # filas del mismo h en TEST/VAL. Evita que residuos de horizontes
         # largos (mayor varianza) contaminen el percentil de horizontes cortos.
@@ -2813,20 +2813,20 @@ def evaluar_banco(banco: str):
             logger.info(
                 f"    [CALIBRACION] P{CALIBRACION_PERCENTIL} por-h "
                 f"(cap=±{_cap:,.0f} = ±{CALIBRACION_MAX_SHIFT_FACTOR}×std_y): "
-                f"h=1→{_shifts_h.get(1,0):,.0f}  "
-                f"h=38→{_shifts_h.get(38,0):,.0f}  "
-                f"h=75→{_shifts_h.get(75,0):,.0f}"
+                f"h=1->{_shifts_h.get(1,0):,.0f}  "
+                f"h=38->{_shifts_h.get(38,0):,.0f}  "
+                f"h=75->{_shifts_h.get(75,0):,.0f}"
             )
 
-        # ── Mondrian CQR ─────────────────────────────────────────────────────
-        # Scores en preds_val (solo-train, OOS) → q_hat_h → ajuste en preds_test
+        # -- Mondrian CQR -----------------------------------------------------
+        # Scores en preds_val (solo-train, OOS) -> q_hat_h -> ajuste en preds_test
         # (retrain train+val). Sin leakage: cada modelo predice datos que nunca vio.
         if CALIBRACION_CQR:
             preds_test = aplicar_mondrian_cqr(
                 preds_val, y_val, h_val, preds_test, h_test
             )
 
-        # ── Overlay sobreencaje (step007) ─────────────────────────────────────
+        # -- Overlay sobreencaje (step007) -------------------------------------
         # Se aplica por fecha de origen: para cada fecha_t única en el test,
         # recalcula el factor con los cierres históricos anteriores a esa fecha.
         # Se usa test_start como referencia de fold para el backtest histórico.
@@ -2842,7 +2842,7 @@ def evaluar_banco(banco: str):
             except Exception as _e_ov:
                 logger.warning(f"    [OVERLAY] Error aplicando overlay: {_e_ov}")
         elif OVERLAY_SOBREENCAJE and not _OVERLAY_OK:
-            logger.warning("    [OVERLAY] step007_overlay_sobreencaje.py no encontrado — omitiendo")
+            logger.warning("    [OVERLAY] step007_overlay_sobreencaje.py no encontrado -- omitiendo")
 
         if not SOLO_REGENERAR_PLOTS:
             row_test = calcular_metricas_fold(preds_test, y_test.values, fold, "test")
@@ -2899,7 +2899,7 @@ def evaluar_banco(banco: str):
                 f"({row_test['tiempo_min']} min)"
             )
 
-        # Fan charts TEST — folds manuales van a carpeta separada
+        # Fan charts TEST -- folds manuales van a carpeta separada
         preds_s4  = predecir_y_corregir(modelos_s4, X_test) if modelos_s4 is not None else None
         _fanchart_dir = DIR_FANCHARTS_MANUALES if fold.get("_manual") else None
         graficar_fanchart_test_fold(
@@ -2924,7 +2924,7 @@ def evaluar_banco(banco: str):
         params_ultimo  = best_params
 
         if not SOLO_REGENERAR_PLOTS:
-            # ── Guardar modelo del fold + manifest ───────────────────────────
+            # -- Guardar modelo del fold + manifest ---------------------------
             sfx = "lgbm_wfcv_v3" if MODELO_CV == "lgbm" else f"{MODELO_CV}_wfcv_v3"
             ext = ".txt" if MODELO_CV == "lgbm" else ".json"
             fold_num = fold["fold"]
@@ -2933,7 +2933,7 @@ def evaluar_banco(banco: str):
             try:
                 garch_fold = _extraer_garch_params_fold(df, fold["train_end"])
             except Exception as _eg:
-                logger.warning(f"  Fold {fold_num}: no se pudo extraer GARCH — {_eg}")
+                logger.warning(f"  Fold {fold_num}: no se pudo extraer GARCH -- {_eg}")
 
             if GUARDAR_MODELOS_TODOS_FOLDS:
                 for tau, model in modelos_final.items():
@@ -3032,7 +3032,7 @@ def evaluar_banco(banco: str):
         metadata = {
             "banco": banco, "modelo": f"{MODELO_CV}_wfcv_v3",
             "fecha_entrenamiento": pd.Timestamp.today().strftime("%Y-%m-%d"),
-            "version": "v3 — expanding/rolling + TEST OOS",
+            "version": "v3 -- expanding/rolling + TEST OOS",
             "config": {
                 "expanding"          : EXPANDING,
                 "ventana_train_años" : VENTANA_TRAIN_AÑOS,
@@ -3050,7 +3050,7 @@ def evaluar_banco(banco: str):
                 "purga_train_val"  : f"{PURGE_DIAS_HAB} dh post-TRAIN (cubre h_max={H_MAX_DIAS_HAB} + MA22)",
                 "purga_val_test"   : f"{PURGE_VAL_TEST} dh post-VAL",
                 "burn_in"          : f"{BURN_IN_DIAS_HAB} dh inicio TRAIN excluidos (MA22 warm-up)",
-                "garch_por_fold"   : "ω/α/β estimados en TRAIN, propagados a VAL+TEST",
+                "garch_por_fold"   : "omega/alpha/beta estimados en TRAIN, propagados a VAL+TEST",
                 "medianas_por_fold": "calculadas en TRAIN, aplicadas a VAL+TEST",
                 "val_test_sep"     : "VAL=Optuna only / TEST=métricas OOS only",
             },
@@ -3065,7 +3065,7 @@ def evaluar_banco(banco: str):
                 "series"    : garch_params_prod,
                 "uso"       : (
                     "Usar omega/alpha/beta para propagar GARCH desde train_end "
-                    "en producción — garantiza consistencia entrenamiento-predicción"
+                    "en producción -- garantiza consistencia entrenamiento-predicción"
                 ),
             },
             "n_folds": len(folds), "quantiles": QUANTILES,
@@ -3078,9 +3078,9 @@ def evaluar_banco(banco: str):
             json.dump(metadata, fh, indent=2, ensure_ascii=False)
 
     t_total = time.time() - t_inicio
-    logger.info(f"\n  {'─'*60}")
-    logger.info(f"  RESUMEN — {banco}  [{modo}]  [TEST OOS]")
-    logger.info(f"  {'─'*60}")
+    logger.info(f"\n  {'-'*60}")
+    logger.info(f"  RESUMEN -- {banco}  [{modo}]  [TEST OOS]")
+    logger.info(f"  {'-'*60}")
     cols_d  = ["fold", "train_start", "train_end", "test_start", "test_end",
                "pinball_q50", "coverage_90", "winkler_90", "crps_approx"]
     cols_ok = [c for c in cols_d if c in df_test_m.columns]
@@ -3094,9 +3094,9 @@ def evaluar_banco(banco: str):
 
     if "coverage_90" in df_val_m.columns and "coverage_90" in df_test_m.columns:
         sesgo = df_val_m["coverage_90"].mean() - df_test_m["coverage_90"].mean()
-        logger.info(f"\n  Sesgo VAL−TEST coverage: {sesgo:+.2%}")
+        logger.info(f"\n  Sesgo VAL-TEST coverage: {sesgo:+.2%}")
 
-    logger.info(f"\n  ✓ Completado en {t_total/60:.1f} min  ({len(folds)} folds)")
+    logger.info(f"\n  [OK] Completado en {t_total/60:.1f} min  ({len(folds)} folds)")
     return df_test_m
 
 
@@ -3107,7 +3107,7 @@ def evaluar_banco(banco: str):
 def main():
     modo = "EXPANDING" if EXPANDING else "ROLLING"
     logger.info("=" * 65)
-    logger.info(f"STEP005 v3 — Walk-Forward CV [{modo}] + TEST OOS  [{MODELO_CV.upper()}]")
+    logger.info(f"STEP005 v3 -- Walk-Forward CV [{modo}] + TEST OOS  [{MODELO_CV.upper()}]")
     logger.info("=" * 65)
     logger.info(f"  EXPANDING={EXPANDING}  TRAIN_min={VENTANA_TRAIN_AÑOS}yr  "
                 f"VAL={VENTANA_VAL_AÑOS}yr  TEST={VENTANA_TEST_AÑOS}yr  "
@@ -3129,7 +3129,7 @@ def main():
 
     if todos:
         logger.info("\n" + "=" * 65)
-        logger.info(f"RESUMEN GLOBAL — TEST OOS  [{modo}]")
+        logger.info(f"RESUMEN GLOBAL -- TEST OOS  [{modo}]")
         logger.info("=" * 65)
         for banco, df_m in todos:
             avg_cov = df_m["coverage_90"].mean() if "coverage_90" in df_m.columns else float("nan")
@@ -3137,7 +3137,7 @@ def main():
             logger.info(f"  {banco:15s}: {len(df_m)} folds | "
                         f"coverage_90_avg={avg_cov:.1%} | pinball_Q50_avg={avg_pb:,.0f}")
 
-    logger.info(f"\n✓ Total: {(time.time()-t0)/60:.1f} min  →  {DIR_MODO}")
+    logger.info(f"\n[OK] Total: {(time.time()-t0)/60:.1f} min  ->  {DIR_MODO}")
 
 
 if __name__ == "__main__":
