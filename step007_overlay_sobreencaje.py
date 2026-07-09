@@ -598,19 +598,23 @@ def aplicar_overlay_preds(
     fechas_t : array-like de pd.Timestamp con la fecha de origen de cada fila,
                shape (N,).  Permite multiples origenes (walk-forward CV).
 
-    Logica
-    ------
-    Para cada fila i:
-      fecha_pred = fechas_t[i] + h_arr[i] dias habiles
-      Si fecha_pred es cierre trimestral:
-          f = peor_total(fechas_t[i]) / |Q01[i]|
-          Si f > 1: todos los cuantiles y la media se multiplican por f
+    Logica por cada fecha_t unica
+    ------------------------------
+    1. Identificar el primer cierre trimestral dentro del horizonte de 75dh.
+    2. Definir la ventana de retiro: los ultimos VENTANA_RETIRO_DH (7) dias
+       habiles hasta el cierre, inclusive:
+           h_inicio = h_cierre - VENTANA_RETIRO_DH + 1
+           h_cierre = posicion del cierre en bdate_range(fecha_t, 75dh)
+    3. Calcular peor_total (retiro acumulado potencial de 7dh).
+    4. Calcular Q01_acum_7dh = suma de Q01 en esos mismos 7 horizontes.
+       (Misma escala que peor_total: ambos son retiros acumulados en 7dh.)
+    5. f = peor_total / |Q01_acum_7dh|   (si Q01_acum < 0 y f > 1)
+    6. Aplicar f UNIFORMEMENTE a todos los horizontes de esa fecha_t.
 
     Cache
     -----
-    La deteccion de bancos (det) se cachea por trimestre (cambia solo cuando
-    el conjunto de cierres historicos crece).  El peor_total se recomputa por
-    fecha_t (la ventana P95 de saldo crece dia a dia).
+    La deteccion de bancos (det) se cachea por trimestre.
+    El peor_total se recomputa por fecha_t (ventana P95 crece diariamente).
     """
     if not OVERLAY_SOBREENCAJE_ACTIVO:
         return preds
@@ -619,33 +623,43 @@ def aplicar_overlay_preds(
     if len(fechas_t) == 0 or 0.01 not in preds:
         return preds
 
-    # Cargar datos usando la fecha maxima disponible (cobertura historica completa)
+    # Cargar datos una sola vez usando la fecha maxima disponible
     fecha_max = fechas_t.max()
     resultado = _preparar_datos(ruta_saldo, ruta_tabla, fecha_max)
     if resultado is None:
         return preds
 
-    df_saldo, df_flujos, bancos_saldo, _cierres_hasta_max, calendario = resultado
-    todos_cierres   = _cierres_trimestrales(calendario)
-    set_cierres_cal = set(todos_cierres)
+    df_saldo, df_flujos, bancos_saldo, _unused, calendario = resultado
+    todos_cierres = _cierres_trimestrales(calendario)
 
     preds_adj = {tau: arr.copy() for tau, arr in preds.items()}
+    _det_cache: dict[tuple, tuple[dict, list]] = {}  # cache trimestral
 
-    # Cache: cierres_key -> (det, lista_activos)
-    _det_cache: dict[tuple, tuple[dict, list]] = {}
-
-    for i, (fecha_t, h) in enumerate(zip(fechas_t, h_arr)):
-        # Fecha predicha = fecha_t + h dias habiles
-        fecha_pred = fecha_t + pd.offsets.BDay(int(h))
-
-        # Solo actuar si la fecha predicha cae exactamente en un cierre trimestral
-        if fecha_pred not in set_cierres_cal:
-            continue
-
+    for fecha_t in sorted(set(fechas_t)):
         # Cierres historicos visibles desde fecha_t (sin leakage)
         cierres_hist = [fc for fc in todos_cierres if fc < fecha_t]
         if len(cierres_hist) < 2:
             continue
+
+        # Primer cierre trimestral dentro del horizonte de proyeccion (75dh)
+        # 75dh ~ 3.4 meses > 1 trimestre -> siempre existe al menos uno
+        bh_futuro = pd.bdate_range(
+            start=fecha_t + pd.offsets.BDay(1), periods=VENTANA_RETIRO_DH + 75
+        )
+        cierres_proy = _cierres_trimestrales(pd.DatetimeIndex(bh_futuro))
+        fecha_cierre = cierres_proy[0]
+
+        # h del cierre (1-indexed) en el bdate_range estandar
+        bh_lista = list(bh_futuro)
+        try:
+            h_cierre = bh_lista.index(fecha_cierre) + 1
+        except ValueError:
+            # Mismatch por feriado: usar el dia mas cercano
+            diffs = [abs((d - fecha_cierre).days) for d in bh_lista]
+            h_cierre = diffs.index(min(diffs)) + 1
+
+        # Ventana de retiro: VENTANA_RETIRO_DH dias habiles antes del cierre (inclusive)
+        h_inicio = max(1, h_cierre - VENTANA_RETIRO_DH + 1)
 
         # Deteccion de bancos activos (cache trimestral)
         cierres_key = tuple(cierres_hist)
@@ -665,7 +679,7 @@ def aplicar_overlay_preds(
         if not activos_t:
             continue
 
-        # peor_total: ventana P95 crece diariamente -> recomputar por fecha_t
+        # peor_total: retiro acumulado en 7dh (ventana P95 crece diariamente)
         peor_total = sum(
             _peor_B(df_saldo, det_t, b, list(cierres_hist), fecha_ref=fecha_t)
             for b in activos_t
@@ -673,19 +687,31 @@ def aplicar_overlay_preds(
         if peor_total <= 0:
             continue
 
-        # Factor multiplicativo basado en Q01
-        q01_val = float(preds[0.01][i])
-        f = _factor_overlay(peor_total, q01_val)
+        # Filas de esta fecha_t en el array
+        mask_origen = (fechas_t == fecha_t)
+
+        # Q01 acumulado en los mismos 7dh de la ventana de retiro proyectada
+        # (misma escala que peor_total: ambos son retiros acumulados en 7dh)
+        mask_ventana = mask_origen & (h_arr >= h_inicio) & (h_arr <= h_cierre)
+        if not mask_ventana.any():
+            # Fallback: h mas cercano al cierre disponible
+            h_origen = h_arr[mask_origen]
+            h_fb = h_origen[np.abs(h_origen - h_cierre).argmin()]
+            mask_ventana = mask_origen & (h_arr == h_fb)
+
+        q01_acum_7dh = float(preds[0.01][mask_ventana].sum())
+        f = _factor_overlay(peor_total, q01_acum_7dh)
         if f <= 1.0:
             continue
 
-        # Aplica a TODOS los cuantiles y la media
+        # Aplicar f UNIFORMEMENTE a TODOS los horizontes de esta fecha_t
         for tau in preds_adj:
-            preds_adj[tau][i] *= f
+            preds_adj[tau][mask_origen] *= f
 
         logger.info(
-            f"[OVERLAY] fecha_t={fecha_t.date()} h={int(h):3d} ({fecha_pred.date()}) | "
-            f"peor_total={peor_total:,.0f} | Q01={q01_val:+.1f} -> {q01_val*f:+.1f} | f={f:.3f}"
+            f"[OVERLAY] {fecha_t.date()} | cierre: {fecha_cierre.date()} "
+            f"h=[{h_inicio},{h_cierre}] | "
+            f"Q01_acum_7dh={q01_acum_7dh:+.0f} | peor_total={peor_total:,.0f} | f={f:.3f}"
         )
 
     return preds_adj

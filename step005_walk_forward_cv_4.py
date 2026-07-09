@@ -62,6 +62,13 @@ import matplotlib.ticker as mticker
 from scipy.optimize import minimize
 
 try:
+    from step007_overlay_sobreencaje import aplicar_overlay_preds, OVERLAY_SOBREENCAJE_ACTIVO
+    _OVERLAY_OK = True
+except ImportError:
+    _OVERLAY_OK = False
+    OVERLAY_SOBREENCAJE_ACTIVO = False
+
+try:
     import lightgbm as lgb
     _LGBM_OK = True
 except ImportError:
@@ -2546,6 +2553,13 @@ def evaluar_banco(banco: str):
         else:
             preds_test = preds_test_raw
             preds_val  = preds_val_raw
+
+        # ── Overlay sobreencaje (step007) ────────────────────────────────────
+        # Aplica un factor multiplicativo uniforme en toda la ventana de
+        # proyeccion cuando se detecta estrategia de sobreencaje activa.
+        # Controlado por OVERLAY_SOBREENCAJE_ACTIVO en step007.
+        if _OVERLAY_OK and OVERLAY_SOBREENCAJE_ACTIVO:
+            preds_test = aplicar_overlay_preds(preds_test, h_test, fechas_t_test)
 
         if not SOLO_REGENERAR_PLOTS:
             row_test = calcular_metricas_fold(preds_test, y_test.values, fold, "test")
