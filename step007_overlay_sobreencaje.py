@@ -290,7 +290,8 @@ def _ratio_banco_cierre(
     n_dh: int,
 ) -> float | None:
     """
-    ratio = |retiro acumulado en ventana n_dh dh| / saldo_P95 del mes del cierre.
+    ratio = |retiro_neto_acumulado en ventana n_dh dh| / saldo_P95 del mes del cierre.
+    Retorna None si el flujo neto es positivo (ingreso) — la estrategia solo aplica a retiros.
     """
     mask_mes = (
         (df_saldo.index.year  == fecha_cierre.year) &
@@ -310,6 +311,9 @@ def _ratio_banco_cierre(
     if disponibles.empty:
         return None
     retiro = float(df_flujos.loc[disponibles, col_saldo].sum(skipna=True))
+    # Solo cuenta retiro neto (saldo baja). Si hubo ingreso neto, no aplica la estrategia.
+    if retiro >= 0:
+        return None
     return abs(retiro) / saldo_max
 
 
