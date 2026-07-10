@@ -2507,6 +2507,14 @@ def _aplicar_overlay_sobreencaje(
         if peor_total <= 0:
             continue
 
+        # Si fecha_t es el propio cierre trimestral (último día hábil del trimestre),
+        # el horizonte de ese trimestre ya venció → no hay overlay.
+        # Se detecta comprobando que el siguiente día hábil ya pertenece a otro mes.
+        if fecha_t.month in [3, 6, 9, 12]:
+            _prox_bday = fecha_t + pd.offsets.BDay(1)
+            if _prox_bday.month != fecha_t.month:
+                continue  # fecha_t == cierre trimestral → sin overlay
+
         bh = pd.bdate_range(
             start=fecha_t + pd.offsets.BDay(1),
             periods=N + OVERLAY_VENTANA_DH + 75,
