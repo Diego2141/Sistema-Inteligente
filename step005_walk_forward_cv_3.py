@@ -246,7 +246,10 @@ RUTA_AJUSTE_OVERLAY             = BASE_SISTEMA / "2. Output" / "analisis_cc" / "
 OVERLAY_VENTANA_DH              = 7   # dias habiles de la ventana de retiro (mismo valor que step007)
 OVERLAY_TAU_REFERENCIA          = 0.05  # quantil usado como denominador del factor
 OVERLAY_CONOCIMIENTO_ANTICIPADO = 2   # T+N: flujos conocidos con N dias habiles de antelacion
-OVERLAY_MAX_FACTOR              = 3.0  # tope del factor f; None = sin tope
+# Solo activar overlay si el cierre esta dentro de este horizonte (bdays).
+# Mas alla de este umbral, las predicciones del modelo son poco fiables para
+# comparar con peor_total (problema estructural del salto T+2 al proximo trimestre).
+OVERLAY_MAX_H_CIERRE            = 40  # ~8 semanas antes del cierre
 
 
 # -- Fan chart TEST: número de snapshots por fold ------------------------------
@@ -2567,8 +2570,15 @@ def _aplicar_overlay_sobreencaje(
             )
             continue
 
+        # Fix 1 (horizonte): no aplicar si el cierre esta demasiado lejos.
+        # Mas alla de OVERLAY_MAX_H_CIERRE dias, las predicciones del modelo son
+        # poco confiables para comparar contra peor_total.
+        if h_cierre > OVERLAY_MAX_H_CIERRE:
+            continue
+
         # Q[TAU] sobre la porcion incierta: h > N (proximos N dias ya son conocidos)
         h_inicio_incierto = max(h_inicio, N + 1)
+        n_inciertos = max(1, h_cierre - h_inicio_incierto + 1)
         mask_ventana = mask_origen & (h_arr >= h_inicio_incierto) & (h_arr <= h_cierre)
         if not mask_ventana.any():
             h_t_unc = h_arr[mask_origen & (h_arr > N)]
@@ -2576,30 +2586,28 @@ def _aplicar_overlay_sobreencaje(
                 continue
             h_fb = h_t_unc[np.abs(h_t_unc - h_cierre).argmin()]
             mask_ventana = mask_origen & (h_arr == h_fb)
+            n_inciertos = 1
 
         q01_acum = float(preds[OVERLAY_TAU_REFERENCIA][mask_ventana].sum())
         if q01_acum >= 0 or abs(q01_acum) < 1e-6:
             continue
 
-        f = peor_restante / abs(q01_acum)
+        # Fix 2 (consistencia dimensional): peor_total cubre VDH dias; si solo
+        # quedan n_inciertos < VDH dias, normalizar al mismo denominador de 7 dias.
+        # f = peor_restante * n_inciertos / (VDH * |Q[TAU]_acum|)
+        f = (peor_restante * n_inciertos) / (OVERLAY_VENTANA_DH * abs(q01_acum))
         if f <= 1.0:
             continue
-
-        f_raw = f
-        if OVERLAY_MAX_FACTOR is not None and f > OVERLAY_MAX_FACTOR:
-            f = OVERLAY_MAX_FACTOR
 
         for tau in preds_adj:
             preds_adj[tau][mask_origen] *= f
 
         logger.info(
             f"[OVERLAY] {fecha_t.date()} | cierre: {fecha_cierre.date()} "
-            f"h=[{h_inicio_incierto},{h_cierre}] | "
+            f"h=[{h_inicio_incierto},{h_cierre}] n_inc={n_inciertos} | "
             f"Q{int(OVERLAY_TAU_REFERENCIA*100):02d}_acum={q01_acum:+.0f} | "
             f"peor={peor_total:,.0f} | conocidos={retiro_conocido:,.0f} | "
             f"restante={peor_restante:,.0f} | f={f:.3f}"
-            + (f" [raw={f_raw:.1f} -> tope={OVERLAY_MAX_FACTOR}]"
-               if f_raw > f else "")
         )
 
     return preds_adj

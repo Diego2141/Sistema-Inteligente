@@ -79,7 +79,7 @@ RUTA_AJUSTE_OVERLAY             = BASE_SISTEMA / "2. Output" / "analisis_cc" / "
 OVERLAY_VENTANA_DH              = 7      # dias habiles de la ventana de retiro
 OVERLAY_TAU_REFERENCIA          = 0.05   # quantil usado como denominador del factor
 OVERLAY_CONOCIMIENTO_ANTICIPADO = 2      # T+N: flujos conocidos con N dias habiles de antelacion
-OVERLAY_MAX_FACTOR              = 3.0   # tope del factor f; None = sin tope
+OVERLAY_MAX_H_CIERRE            = 40    # max horizonte (bdays) para activar overlay
 
 # Si True, el video lee las predicciones ya ajustadas que exportó step005 (parquet)
 # en lugar de predecir desde cero. Requiere haber corrido step005 con OVERLAY_SOBREENCAJE=True.
@@ -506,8 +506,13 @@ def _aplicar_overlay_frame(res: "pd.DataFrame", fecha_origen: "pd.Timestamp",
               f"(conocidos={retiro_conocido:,.0f} >= peor={peor_total:,.0f}) -- sin ajuste")
         return res
 
+    # Fix 1: no aplicar si el cierre esta demasiado lejos del horizonte fiable
+    if h_cierre > OVERLAY_MAX_H_CIERRE:
+        return res
+
     # Q[TAU] solo sobre la porcion incierta: h > N
     h_inicio_incierto = max(h_inicio, N + 1)
+    n_inciertos = max(1, h_cierre - h_inicio_incierto + 1)
     q_col = f"q{int(OVERLAY_TAU_REFERENCIA * 100):02d}"
     if q_col not in res.columns:
         return res
@@ -519,30 +524,28 @@ def _aplicar_overlay_frame(res: "pd.DataFrame", fecha_origen: "pd.Timestamp",
             return res
         h_fb = h_arr_unc[np.abs(h_arr_unc - h_cierre).argmin()]
         mask_ventana = (res["h"] == h_fb)
+        n_inciertos = 1
 
     q_acum = float(res.loc[mask_ventana, q_col].sum())
     if q_acum >= 0 or abs(q_acum) < 1e-6:
         return res
 
-    f = peor_restante / abs(q_acum)
+    # Fix 2: normalizar al mismo denominador de 7 dias (consistencia dimensional)
+    # f = peor_restante * n_inciertos / (VDH * |Q[TAU]_acum|)
+    f = (peor_restante * n_inciertos) / (OVERLAY_VENTANA_DH * abs(q_acum))
     if f <= 1.0:
         return res
-
-    f_raw = f
-    if OVERLAY_MAX_FACTOR is not None and f > OVERLAY_MAX_FACTOR:
-        f = OVERLAY_MAX_FACTOR
 
     for col in [c for c in res.columns if c.startswith("q")]:
         res[col] = res[col] * f
     if "mean" in res.columns:
         res["mean"] = res["mean"] * f
 
-    tope_msg = (f" [raw={f_raw:.1f} -> tope={OVERLAY_MAX_FACTOR}]"
-                if f_raw > f else "")
     print(f"  [OVERLAY] {fecha_origen.date()} | cierre: {fecha_cierre.date()} "
-          f"h=[{h_inicio_incierto},{h_cierre}] | {q_col}_acum={q_acum:+.0f} | "
+          f"h=[{h_inicio_incierto},{h_cierre}] n_inc={n_inciertos} | "
+          f"{q_col}_acum={q_acum:+.0f} | "
           f"peor={peor_total:,.0f} | conocidos={retiro_conocido:,.0f} | "
-          f"restante={peor_restante:,.0f} | f={f:.3f}{tope_msg}")
+          f"restante={peor_restante:,.0f} | f={f:.3f}")
     return res
 
 
