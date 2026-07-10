@@ -73,18 +73,13 @@ DPI         = 72   # resolución reducida para evitar out-of-memory
 
 COLOR = "tomato"  # distingue XGBoost QT de XGBoost estándar (darkorange) y LightGBM (steelblue)
 
-# ── Overlay sobreencaje ───────────────────────────────────────────────────────
-OVERLAY_SOBREENCAJE             = False   # True = aplicar factor multiplicativo al fan chart
-RUTA_AJUSTE_OVERLAY             = BASE_SISTEMA / "2. Output" / "analisis_cc" / "saldos_retiros_bancos.xlsx"
-OVERLAY_VENTANA_DH              = 7      # dias habiles de la ventana de retiro
-OVERLAY_TAU_REFERENCIA          = 0.05   # quantil usado como denominador del factor
-OVERLAY_CONOCIMIENTO_ANTICIPADO = 2      # T+N: flujos conocidos con N dias habiles de antelacion
-
-# Si True, el video lee las predicciones ya ajustadas que exportó step005 (parquet)
-# en lugar de predecir desde cero. Requiere haber corrido step005 con OVERLAY_SOBREENCAJE=True.
-# Dejar en None para auto-descubrir el parquet más reciente en DIR_PREDS_OVERLAY.
-USAR_PREDS_OVERLAY = False
-DIR_PREDS_OVERLAY  = BASE_SISTEMA / "2. Output" / "step005_wfcv_v3"
+# ── Fuente de predicciones (step005 parquets) ─────────────────────────────────
+# step005 exporta dos parquets por banco:
+#   preds_base_{banco}_{fecha}.parquet    <- predicciones del modelo puro
+#   preds_overlay_{banco}_{fecha}.parquet <- con overlay sobreencaje aplicado
+# El video lee el parquet seleccionado; no aplica overlay propio.
+MOSTRAR_OVERLAY   = False   # False = base; True = con overlay sobreencaje
+DIR_PREDS_STEP005 = BASE_SISTEMA / "2. Output" / "step005_wfcv_v3"
 
 
 # ── 1. Cargar modelos XGBoost QT ──────────────────────────────────────────────
@@ -377,171 +372,31 @@ def predecir_fecha(df, fecha_origen, medianas, cols_num, cols_feat, modelos):
 
 
 # ── 3b. Overlay sobreencaje ───────────────────────────────────────────────────
-_df_ajuste_cache: dict = {}   # cache para no recargar el Excel en cada frame
-_preds_overlay_cache: dict = {}  # cache del parquet de predicciones de step005
+_preds_cache: dict = {}  # {banco: {"base": df|None, "overlay": df|None}}
 
 
-def _cargar_preds_overlay(banco: str) -> "pd.DataFrame | None":
-    """Carga el parquet de predicciones finales exportado por step005 (mas reciente)."""
-    if banco in _preds_overlay_cache:
-        return _preds_overlay_cache[banco]
-    # Buscar modelo/carpeta dinamicamente (xgb_qt_exp_*, lgbm_exp_*, etc.)
-    candidatos = sorted(DIR_PREDS_OVERLAY.glob(f"*/preds_overlay_{banco}_*.parquet"))
-    if not candidatos:
-        print(f"  [OVERLAY] No se encontro preds_overlay_{banco}_*.parquet en {DIR_PREDS_OVERLAY}")
-        _preds_overlay_cache[banco] = None
-        return None
-    ruta = candidatos[-1]  # el más reciente por nombre (fecha en sufijo)
-    try:
-        df_preds = pd.read_parquet(ruta)
-        df_preds["fecha_t"] = pd.to_datetime(df_preds["fecha_t"])
-        _preds_overlay_cache[banco] = df_preds
-        print(f"  [OVERLAY] Predicciones cargadas desde: {ruta.name}  ({len(df_preds):,} filas)")
-    except Exception as e:
-        print(f"  [OVERLAY] Error leyendo parquet: {e}")
-        _preds_overlay_cache[banco] = None
-    return _preds_overlay_cache[banco]
+def _cargar_preds_step005(banco: str) -> dict:
+    """Carga base y overlay parquets de step005. Retorna {"base": df|None, "overlay": df|None}."""
+    if banco in _preds_cache:
+        return _preds_cache[banco]
 
-def _cargar_ajuste_overlay() -> "pd.DataFrame | None":
-    """Carga el Excel de step007 una sola vez y lo guarda en cache."""
-    if "df" in _df_ajuste_cache:
-        return _df_ajuste_cache["df"]
-    try:
-        df_aj = pd.read_excel(
-            RUTA_AJUSTE_OVERLAY, sheet_name="Ajuste_diario",
-            index_col=0, parse_dates=True,
-        )
-        df_aj.index = pd.DatetimeIndex(df_aj.index)
-        if "peor_total" not in df_aj.columns:
-            print("  [OVERLAY] Columna peor_total no encontrada en Ajuste_diario")
-            _df_ajuste_cache["df"] = None
-        else:
-            _df_ajuste_cache["df"] = df_aj.sort_index()
-            print(f"  [OVERLAY] Ajuste_diario cargado: {len(df_aj)} filas")
-    except Exception as e:
-        print(f"  [OVERLAY] Error leyendo Excel: {e}")
-        _df_ajuste_cache["df"] = None
-    return _df_ajuste_cache["df"]
-
-
-def _aplicar_overlay_frame(res: "pd.DataFrame", fecha_origen: "pd.Timestamp",
-                           df_aj: "pd.DataFrame",
-                           df_base: "pd.DataFrame | None" = None) -> "pd.DataFrame":
-    """
-    Aplica el factor multiplicativo de sobreencaje a un frame de predicciones.
-    res: DataFrame con columnas q01, q05, q50, q95, q99 (y opcionalmente mean).
-    Modifica en raw units (antes de /1e6).
-
-    Logica T+N (OVERLAY_CONOCIMIENTO_ANTICIPADO = N):
-    - Si h_cierre <= N: el cierre es completamente conocido -> se usa el
-      SIGUIENTE cierre trimestral.
-    - Los dias conocidos (realizados + proximos N dias) consumen el cap peor_total.
-    - Q[TAU]_acum se calcula solo sobre la porcion incierta (h > N).
-    """
-    N = OVERLAY_CONOCIMIENTO_ANTICIPADO
-
-    disponibles = df_aj.index[df_aj.index <= fecha_origen]
-    if len(disponibles) == 0:
-        return res
-    peor_total = float(df_aj.loc[disponibles[-1], "peor_total"])
-    if peor_total <= 0:
-        return res
-
-    h_max = int(res["h"].max())
-    bh = pd.bdate_range(
-        start=fecha_origen + pd.offsets.BDay(1),
-        periods=N + OVERLAY_VENTANA_DH + h_max + 5,
-    )
-    bh_list = list(bh)
-    df_bh = pd.DataFrame({"fecha": bh, "mes": bh.month, "anio": bh.year, "trim": bh.quarter})
-    cierres_proy = (
-        df_bh[df_bh["mes"].isin([3, 6, 9, 12])]
-        .groupby(["anio", "trim"])["fecha"].max()
-        .sort_values().tolist()
-    )
-    if not cierres_proy:
-        return res
-
-    # Primer cierre con horizonte incierto > N
-    fecha_cierre = None
-    h_cierre = None
-    for _cand in cierres_proy:
+    result = {"base": None, "overlay": None}
+    for tipo in ("base", "overlay"):
+        candidatos = sorted(DIR_PREDS_STEP005.glob(f"*/preds_{tipo}_{banco}_*.parquet"))
+        if not candidatos:
+            print(f"  [STEP005] No se encontro preds_{tipo}_{banco}_*.parquet en {DIR_PREDS_STEP005}")
+            continue
+        ruta = candidatos[-1]
         try:
-            _h = bh_list.index(_cand) + 1
-        except ValueError:
-            _diffs = [abs((d - _cand).days) for d in bh_list]
-            _h = _diffs.index(min(_diffs)) + 1
-        if _h > N:
-            fecha_cierre = _cand
-            h_cierre = _h
-            break
+            df = pd.read_parquet(ruta)
+            df["fecha_t"] = pd.to_datetime(df["fecha_t"])
+            result[tipo] = df
+            print(f"  [STEP005] {tipo:7s}: {ruta.name}  ({len(df):,} filas)")
+        except Exception as e:
+            print(f"  [STEP005] Error leyendo {ruta.name}: {e}")
 
-    if fecha_cierre is None:
-        return res
-
-    res = res.copy()
-    h_inicio = max(1, h_cierre - OVERLAY_VENTANA_DH + 1)
-
-    # -- Netting: dias conocidos = realizados hasta fecha_origen + N dias habiles
-    fecha_inicio_ventana_real = fecha_cierre - pd.offsets.BDay(OVERLAY_VENTANA_DH - 1)
-    fecha_conocida_hasta = min(
-        fecha_origen + pd.offsets.BDay(N),
-        fecha_cierre,
-    )
-    retiro_conocido = 0.0
-    if df_base is not None and fecha_inicio_ventana_real <= fecha_conocida_hasta:
-        known_days = pd.bdate_range(start=fecha_inicio_ventana_real, end=fecha_conocida_hasta)
-        for _d in known_days:
-            _d_prev = _d - pd.offsets.BDay(1)
-            _rows = df_base[(df_base["fecha_t"] == _d_prev) & (df_base["h"] == 1)]
-            if not _rows.empty:
-                _flow = float(_rows["target"].values[0])
-                if _flow < 0:
-                    retiro_conocido += abs(_flow)
-
-    peor_restante = max(0.0, peor_total - retiro_conocido)
-    if peor_restante < 1e-6:
-        print(f"  [OVERLAY] {fecha_origen.date()} | cap consumido "
-              f"(conocidos={retiro_conocido:,.0f} >= peor={peor_total:,.0f}) -- sin ajuste")
-        return res
-
-    # Q[TAU] solo sobre la porcion incierta: h > N
-    h_inicio_incierto = max(h_inicio, N + 1)
-    n_inciertos = max(1, h_cierre - h_inicio_incierto + 1)
-    q_col = f"q{int(OVERLAY_TAU_REFERENCIA * 100):02d}"
-    if q_col not in res.columns:
-        return res
-
-    mask_ventana = (res["h"] >= h_inicio_incierto) & (res["h"] <= h_cierre)
-    if not mask_ventana.any():
-        h_arr_unc = res.loc[res["h"] > N, "h"].values
-        if len(h_arr_unc) == 0:
-            return res
-        h_fb = h_arr_unc[np.abs(h_arr_unc - h_cierre).argmin()]
-        mask_ventana = (res["h"] == h_fb)
-        n_inciertos = 1
-
-    q_acum = float(res.loc[mask_ventana, q_col].sum())
-    if q_acum >= 0 or abs(q_acum) < 1e-6:
-        return res
-
-    # Fix 2: normalizar al mismo denominador de 7 dias (consistencia dimensional)
-    # f = peor_restante * n_inciertos / (VDH * |Q[TAU]_acum|)
-    f = (peor_restante * n_inciertos) / (OVERLAY_VENTANA_DH * abs(q_acum))
-    if f <= 1.0:
-        return res
-
-    for col in [c for c in res.columns if c.startswith("q")]:
-        res[col] = res[col] * f
-    if "mean" in res.columns:
-        res["mean"] = res["mean"] * f
-
-    print(f"  [OVERLAY] {fecha_origen.date()} | cierre: {fecha_cierre.date()} "
-          f"h=[{h_inicio_incierto},{h_cierre}] n_inc={n_inciertos} | "
-          f"{q_col}_acum={q_acum:+.0f} | "
-          f"peor={peor_total:,.0f} | conocidos={retiro_conocido:,.0f} | "
-          f"restante={peor_restante:,.0f} | f={f:.3f}")
-    return res
+    _preds_cache[banco] = result
+    return result
 
 
 # ── 4. Pre-computar todos los resultados ──────────────────────────────────────
@@ -552,15 +407,18 @@ def precomputar(df, medianas, cols_num, cols_feat, modelos, fechas_validas,
     folds_manifest  = (meta or {}).get("folds_manifest", []) if MODO_HISTORICO else []
     usar_historico  = MODO_HISTORICO and bool(folds_manifest)
 
-    df_ajuste = _cargar_ajuste_overlay() if OVERLAY_SOBREENCAJE and not USAR_PREDS_OVERLAY else None
-    df_preds_ov = _cargar_preds_overlay(banco) if USAR_PREDS_OVERLAY else None
+    preds_step005 = _cargar_preds_step005(banco)
+    tipo_preds    = "overlay" if MOSTRAR_OVERLAY else "base"
+    df_preds_ov   = preds_step005[tipo_preds]
 
     if usar_historico:
         print(f"\nPre-computando {total} fechas [MODO HISTORICO - fold por fecha]...")
     else:
         print(f"\nPre-computando {total} fechas [modo produccion - ultimo fold]...")
-    if USAR_PREDS_OVERLAY and df_preds_ov is not None:
-        print("  [OVERLAY] Usando predicciones pre-ajustadas de step005 (parquet)")
+    if df_preds_ov is not None:
+        print(f"  [STEP005] Usando predicciones '{tipo_preds}' de step005 (parquet)")
+    else:
+        print(f"  [STEP005] Parquet '{tipo_preds}' no disponible — usando prediccion en tiempo real")
 
     frames          = []
     fold_activo_num = None
@@ -568,8 +426,8 @@ def precomputar(df, medianas, cols_num, cols_feat, modelos, fechas_validas,
     for i, f in enumerate(fechas_sel, 1):
         fecha_origen = pd.Timestamp(f)
 
-        # -- Modo parquet: leer predicciones ya ajustadas desde step005 ----------
-        if USAR_PREDS_OVERLAY and df_preds_ov is not None:
+        # -- Modo parquet: leer predicciones desde step005 -----------------------
+        if df_preds_ov is not None:
             _rows = df_preds_ov[df_preds_ov["fecha_t"] == fecha_origen].sort_values("h")
             if _rows.empty:
                 if i % 5 == 0 or i == total:
@@ -635,8 +493,7 @@ def precomputar(df, medianas, cols_num, cols_feat, modelos, fechas_validas,
 
         res  = predecir_fecha(df_frame, fecha_origen, medianas_frame,
                               cols_num, cols_feat, modelos_frame)
-        if OVERLAY_SOBREENCAJE and df_ajuste is not None:
-            res = _aplicar_overlay_frame(res, fecha_origen, df_ajuste, df_frame)
+        # overlay no se aplica en tiempo real; usar parquets de step005
         hs   = res["h"].values
         real = res["target"].values / 1e6
         mask = ~np.isnan(real)

@@ -2882,6 +2882,7 @@ def evaluar_banco(banco: str):
             logger.error("  [REPLOT] Ejecuta primero con SOLO_REGENERAR_PLOTS=False")
             return None
 
+    all_preds_base    = []   # acumula predicciones base (sin overlay) para exportar
     all_preds_overlay = []   # acumula predicciones finales (con overlay) para exportar
     all_overlay_meta  = []   # acumula metadata del factor por fecha_t
 
@@ -3003,18 +3004,31 @@ def evaluar_banco(banco: str):
         # -- Overlay sobreencaje -----------------------------------------------
         # Lee peor_total desde Excel (step007) y aplica factor multiplicativo
         # uniforme sobre todo el horizonte, por fecha_t unica.
+        # -- Snapshot base (antes de overlay) -- siempre se guarda ----------------
+        _base_dict = {tau: arr.copy() for tau, arr in preds_test.items()}
+
         if OVERLAY_SOBREENCAJE:
             preds_test, _meta_fold = _aplicar_overlay_sobreencaje(preds_test, h_test, fechas_t_test, df)
             all_overlay_meta.extend(_meta_fold)
 
-        # -- Guardar predicciones finales (con todos los ajustes aplicados) ----
-        _preds_df = pd.DataFrame({
+        # -- Scaffolding compartido ------------------------------------------------
+        _scaffold = pd.DataFrame({
             "banco"  : banco,
             "fold"   : fold["fold"],
             "fecha_t": pd.DatetimeIndex(fechas_t_test),
             "h"      : h_test,
             "target" : y_test.values,
         })
+
+        # Predicciones base (sin overlay)
+        _preds_base_df = _scaffold.copy()
+        for _tau, _arr in _base_dict.items():
+            _col = "mean" if _tau == "mean" else f"q{int(_tau * 100):02d}"
+            _preds_base_df[_col] = _arr
+        all_preds_base.append(_preds_base_df)
+
+        # Predicciones finales (post-overlay si activo, igual que base si no)
+        _preds_df = _scaffold.copy()
         for _tau, _arr in preds_test.items():
             _col = "mean" if _tau == "mean" else f"q{int(_tau * 100):02d}"
             _preds_df[_col] = _arr
@@ -3135,12 +3149,18 @@ def evaluar_banco(banco: str):
         del X_train, y_train, X_val, y_val, X_test, y_test
         gc.collect()
 
-    # -- Exportar predicciones finales a parquet (input para orquestador/video) --
+    # -- Exportar predicciones a parquet (input para orquestador/video) ----------
+    if all_preds_base:
+        df_base_all = pd.concat(all_preds_base, ignore_index=True)
+        ruta_base = DIR_MODO / f"preds_base_{banco}_{fecha_hoy}.parquet"
+        df_base_all.to_parquet(ruta_base, index=False)
+        logger.info(f"  [{banco}] Predicciones base guardadas: {ruta_base.name}")
+
     if all_preds_overlay:
         df_preds_all = pd.concat(all_preds_overlay, ignore_index=True)
         ruta_preds = DIR_MODO / f"preds_overlay_{banco}_{fecha_hoy}.parquet"
         df_preds_all.to_parquet(ruta_preds, index=False)
-        logger.info(f"  [{banco}] Predicciones finales guardadas: {ruta_preds.name}")
+        logger.info(f"  [{banco}] Predicciones overlay guardadas: {ruta_preds.name}")
 
     # -- Exportar metadata del overlay a CSV (diagnóstico) -----------------------
     if all_overlay_meta:
