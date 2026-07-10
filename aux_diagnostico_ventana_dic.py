@@ -71,6 +71,7 @@ def mapear_fecha_target(df: pd.DataFrame) -> pd.DataFrame:
     print(f"Mapeando {len(fechas_unicas)} fechas de origen (h>=40)...")
 
     for fecha_t in fechas_unicas:
+        fecha_t = pd.Timestamp(fecha_t)
         grp = df_far[df_far["fecha_t"] == fecha_t]
         h_max = int(grp["h"].max())
         bh = pd.bdate_range(start=fecha_t + BDAY_PE, periods=h_max, freq=BDAY_PE)
