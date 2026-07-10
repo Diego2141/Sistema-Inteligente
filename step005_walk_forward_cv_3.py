@@ -2499,6 +2499,7 @@ def _aplicar_overlay_sobreencaje(
         return preds
 
     preds_adj = {tau: arr.copy() for tau, arr in preds.items()}
+    meta_rows = []   # metadatos del factor por fecha_t (para exportar)
     N = OVERLAY_CONOCIMIENTO_ANTICIPADO
 
     for fecha_t in sorted(set(fechas_t)):
@@ -2590,6 +2591,14 @@ def _aplicar_overlay_sobreencaje(
 
         q01_acum = float(preds[OVERLAY_TAU_REFERENCIA][mask_ventana].sum())
         if q01_acum >= 0 or abs(q01_acum) < 1e-6:
+            meta_rows.append({
+                "fecha_t": fecha_t, "cierre_fecha": fecha_cierre,
+                "h_cierre": h_cierre, "n_inciertos": n_inciertos,
+                "peor_total": peor_total, "retiro_conocido": retiro_conocido,
+                "peor_restante": peor_restante,
+                "q_tau_acum": q01_acum, "factor_f": 1.0, "overlay_activo": False,
+                "razon_no_activo": "q_tau>=0_o_nulo",
+            })
             continue
 
         # Fix 2 (consistencia dimensional): peor_total cubre VDH dias; si solo
@@ -2597,10 +2606,27 @@ def _aplicar_overlay_sobreencaje(
         # f = peor_restante * n_inciertos / (VDH * |Q[TAU]_acum|)
         f = (peor_restante * n_inciertos) / (OVERLAY_VENTANA_DH * abs(q01_acum))
         if f <= 1.0:
+            meta_rows.append({
+                "fecha_t": fecha_t, "cierre_fecha": fecha_cierre,
+                "h_cierre": h_cierre, "n_inciertos": n_inciertos,
+                "peor_total": peor_total, "retiro_conocido": retiro_conocido,
+                "peor_restante": peor_restante,
+                "q_tau_acum": q01_acum, "factor_f": f, "overlay_activo": False,
+                "razon_no_activo": "f<=1",
+            })
             continue
 
         for tau in preds_adj:
             preds_adj[tau][mask_origen] *= f
+
+        meta_rows.append({
+            "fecha_t": fecha_t, "cierre_fecha": fecha_cierre,
+            "h_cierre": h_cierre, "n_inciertos": n_inciertos,
+            "peor_total": peor_total, "retiro_conocido": retiro_conocido,
+            "peor_restante": peor_restante,
+            "q_tau_acum": q01_acum, "factor_f": f, "overlay_activo": True,
+            "razon_no_activo": "",
+        })
 
         logger.info(
             f"[OVERLAY] {fecha_t.date()} | cierre: {fecha_cierre.date()} "
@@ -2610,7 +2636,7 @@ def _aplicar_overlay_sobreencaje(
             f"restante={peor_restante:,.0f} | f={f:.3f}"
         )
 
-    return preds_adj
+    return preds_adj, meta_rows
 
 
 # PARTE 8 -- Pipeline principal
@@ -2867,6 +2893,7 @@ def evaluar_banco(banco: str):
             return None
 
     all_preds_overlay = []   # acumula predicciones finales (con overlay) para exportar
+    all_overlay_meta  = []   # acumula metadata del factor por fecha_t
 
     for fold in folds:
         t_fold = time.time()
@@ -2987,7 +3014,8 @@ def evaluar_banco(banco: str):
         # Lee peor_total desde Excel (step007) y aplica factor multiplicativo
         # uniforme sobre todo el horizonte, por fecha_t unica.
         if OVERLAY_SOBREENCAJE:
-            preds_test = _aplicar_overlay_sobreencaje(preds_test, h_test, fechas_t_test, df)
+            preds_test, _meta_fold = _aplicar_overlay_sobreencaje(preds_test, h_test, fechas_t_test, df)
+            all_overlay_meta.extend(_meta_fold)
 
         # -- Guardar predicciones finales (con todos los ajustes aplicados) ----
         _preds_df = pd.DataFrame({
@@ -3123,6 +3151,13 @@ def evaluar_banco(banco: str):
         ruta_preds = DIR_MODO / f"preds_overlay_{banco}_{fecha_hoy}.parquet"
         df_preds_all.to_parquet(ruta_preds, index=False)
         logger.info(f"  [{banco}] Predicciones finales guardadas: {ruta_preds.name}")
+
+    # -- Exportar metadata del overlay a CSV (diagnóstico) -----------------------
+    if all_overlay_meta:
+        df_meta = pd.DataFrame(all_overlay_meta)
+        ruta_meta = DIR_MODO / f"overlay_meta_{banco}_{fecha_hoy}.csv"
+        df_meta.to_csv(ruta_meta, index=False)
+        logger.info(f"  [{banco}] Metadata overlay guardada: {ruta_meta.name}")
 
     if SOLO_REGENERAR_PLOTS:
         logger.info(f"\n  [REPLOT] Fan charts regenerados para {banco}. "
