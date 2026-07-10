@@ -56,6 +56,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from pandas.tseries.offsets import CustomBusinessDay
 import xgboost as xgb
 import optuna
 import matplotlib.pyplot as plt
@@ -246,6 +247,19 @@ RUTA_AJUSTE_OVERLAY             = BASE_SISTEMA / "2. Output" / "analisis_cc" / "
 OVERLAY_VENTANA_DH              = 7   # dias habiles de la ventana de retiro (mismo valor que step007)
 OVERLAY_TAU_REFERENCIA          = 0.05  # quantil usado como denominador del factor
 OVERLAY_CONOCIMIENTO_ANTICIPADO = 2   # T+N: flujos conocidos con N dias habiles de antelacion
+
+# Calendario de días hábiles peruano para el overlay.
+# pd.bdate_range usa Mon-Fri estándar; excluimos feriados bancarios clave
+# (Navidad 24-25 dic, Año Nuevo 1 ene, Inmaculada 8 dic) que distorsionan
+# h_cierre y la ventana de 7 días hábiles del cierre de diciembre.
+_ANOS_FERIADOS = range(2018, 2032)
+_FERIADOS_PE = pd.to_datetime(
+    [f"{y}-01-01" for y in _ANOS_FERIADOS]   # Año Nuevo
+    + [f"{y}-12-08" for y in _ANOS_FERIADOS] # Inmaculada Concepción
+    + [f"{y}-12-24" for y in _ANOS_FERIADOS] # Nochebuena
+    + [f"{y}-12-25" for y in _ANOS_FERIADOS] # Navidad
+)
+BDAY_PE = CustomBusinessDay(holidays=_FERIADOS_PE)
 
 
 # -- Fan chart TEST: número de snapshots por fold ------------------------------
@@ -2511,13 +2525,14 @@ def _aplicar_overlay_sobreencaje(
         # el horizonte de ese trimestre ya venció → no hay overlay.
         # Se detecta comprobando que el siguiente día hábil ya pertenece a otro mes.
         if fecha_t.month in [3, 6, 9, 12]:
-            _prox_bday = fecha_t + pd.offsets.BDay(1)
+            _prox_bday = fecha_t + BDAY_PE
             if _prox_bday.month != fecha_t.month:
                 continue  # fecha_t == cierre trimestral → sin overlay
 
         bh = pd.bdate_range(
-            start=fecha_t + pd.offsets.BDay(1),
+            start=fecha_t + BDAY_PE,
             periods=N + OVERLAY_VENTANA_DH + 75,
+            freq=BDAY_PE,
         )
         bh_list = list(bh)
         df_bh = pd.DataFrame({"fecha": bh, "mes": bh.month, "anio": bh.year, "trim": bh.quarter})
@@ -2560,7 +2575,7 @@ def _aplicar_overlay_sobreencaje(
         #   A) Pasado realizado : dias de la ventana que ya ocurrieron (d <= fecha_t)
         #   B) T+N conocido     : dias h=1..N desde fecha_t que caen en la ventana
         # Ambos reducen peor_total -> peor_restante = max(0, peor_total - retiro_conocido)
-        fecha_inicio_ventana_real = fecha_cierre - pd.offsets.BDay(OVERLAY_VENTANA_DH - 1)
+        fecha_inicio_ventana_real = fecha_cierre - (OVERLAY_VENTANA_DH - 1) * BDAY_PE
         retiro_pasado = 0.0
         retiro_t2     = 0.0
 
@@ -2568,8 +2583,9 @@ def _aplicar_overlay_sobreencaje(
             # A) Flujos YA REALIZADOS en la ventana (fecha_inicio_ventana .. fecha_t)
             if fecha_inicio_ventana_real <= fecha_t:
                 for _d in pd.bdate_range(start=fecha_inicio_ventana_real,
-                                          end=min(fecha_t, fecha_cierre)):
-                    _d_prev = _d - pd.offsets.BDay(1)
+                                          end=min(fecha_t, fecha_cierre),
+                                          freq=BDAY_PE):
+                    _d_prev = _d - BDAY_PE
                     _rows = df_hist[
                         (df_hist["fecha_t"] == _d_prev) & (df_hist["h"] == 1)
                     ]
@@ -2579,12 +2595,13 @@ def _aplicar_overlay_sobreencaje(
                             retiro_pasado += abs(_flow)
 
             # B) Flujos T+N conocidos por adelantado que caen dentro de la ventana
-            _t2_desde = fecha_t + pd.offsets.BDay(1)
-            _t2_hasta  = min(fecha_t + pd.offsets.BDay(N), fecha_cierre)
+            _t2_desde = fecha_t + BDAY_PE
+            _t2_hasta  = min(fecha_t + N * BDAY_PE, fecha_cierre)
             if _t2_desde <= _t2_hasta and fecha_inicio_ventana_real <= _t2_hasta:
                 _t2_inicio_eff = max(_t2_desde, fecha_inicio_ventana_real)
-                for _d in pd.bdate_range(start=_t2_inicio_eff, end=_t2_hasta):
-                    _d_prev = _d - pd.offsets.BDay(1)
+                for _d in pd.bdate_range(start=_t2_inicio_eff, end=_t2_hasta,
+                                          freq=BDAY_PE):
+                    _d_prev = _d - BDAY_PE
                     _rows = df_hist[
                         (df_hist["fecha_t"] == _d_prev) & (df_hist["h"] == 1)
                     ]
