@@ -155,7 +155,6 @@ def _sheet_metodologia() -> pd.DataFrame:
         ("VDH", "Ventana en días hábiles = 7"),
         ("|Q[TAU]_acum|", "Suma del cuantil τ=5% para los días inciertos de la ventana"),
         ("", ""),
-        ("Condición overlay activo", "h_cierre ≤ OVERLAY_MAX_H_CIERRE (=40 bdays, ~8 semanas)"),
         ("", ""),
         ("T+2 conocimiento anticipado", "Los bancos notifican 2 días hábiles antes."),
         ("", "h=1,2 son conocidos; si h_cierre ≤ 2, saltar al siguiente trimestre."),

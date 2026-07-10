@@ -246,10 +246,6 @@ RUTA_AJUSTE_OVERLAY             = BASE_SISTEMA / "2. Output" / "analisis_cc" / "
 OVERLAY_VENTANA_DH              = 7   # dias habiles de la ventana de retiro (mismo valor que step007)
 OVERLAY_TAU_REFERENCIA          = 0.05  # quantil usado como denominador del factor
 OVERLAY_CONOCIMIENTO_ANTICIPADO = 2   # T+N: flujos conocidos con N dias habiles de antelacion
-# Solo activar overlay si el cierre esta dentro de este horizonte (bdays).
-# Mas alla de este umbral, las predicciones del modelo son poco fiables para
-# comparar con peor_total (problema estructural del salto T+2 al proximo trimestre).
-OVERLAY_MAX_H_CIERRE            = 40  # ~8 semanas antes del cierre
 
 
 # -- Fan chart TEST: número de snapshots por fold ------------------------------
@@ -2569,12 +2565,6 @@ def _aplicar_overlay_sobreencaje(
                 f"[OVERLAY] {fecha_t.date()} | cap consumido "
                 f"(conocidos={retiro_conocido:,.0f} >= peor={peor_total:,.0f}) -- sin ajuste"
             )
-            continue
-
-        # Fix 1 (horizonte): no aplicar si el cierre esta demasiado lejos.
-        # Mas alla de OVERLAY_MAX_H_CIERRE dias, las predicciones del modelo son
-        # poco confiables para comparar contra peor_total.
-        if h_cierre > OVERLAY_MAX_H_CIERRE:
             continue
 
         # Q[TAU] sobre la porcion incierta: h > N (proximos N dias ya son conocidos)
