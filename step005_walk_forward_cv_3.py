@@ -2696,10 +2696,12 @@ def _aplicar_overlay_sobreencaje(
             })
             continue
 
-        # Fix 2 (consistencia dimensional): peor_total cubre VDH dias; si solo
-        # quedan n_inciertos < VDH dias, normalizar al mismo denominador de 7 dias.
-        # f = peor_restante * n_inciertos / (VDH * |Q[TAU]_acum|)
-        f = (peor_restante * n_inciertos) / (OVERLAY_VENTANA_DH * abs(q01_acum))
+        # Factor: el overlay lleva la suma de Q[TAU] en la ventana incierta hasta
+        # -peor_restante. Se aplica solo a mask_ventana (h en la ventana de cierre)
+        # para no contaminar horizontes post-cierre en el acumulado del fanchart.
+        # f = peor_restante / |Q[TAU]_acum|   (sin normalizar por VDH/n_inciertos
+        # porque se aplica exactamente a los n_inciertos dias de la ventana)
+        f = peor_restante / abs(q01_acum)
         if f <= 1.0:
             meta_rows.append({
                 "fecha_t": fecha_t, "cierre_fecha": fecha_cierre,
@@ -2713,7 +2715,7 @@ def _aplicar_overlay_sobreencaje(
             continue
 
         for tau in preds_adj:
-            preds_adj[tau][mask_origen] *= f
+            preds_adj[tau][mask_ventana] *= f
 
         meta_rows.append({
             "fecha_t": fecha_t, "cierre_fecha": fecha_cierre,
