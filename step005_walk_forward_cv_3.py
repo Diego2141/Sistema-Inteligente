@@ -2520,20 +2520,23 @@ def _aplicar_overlay_sobreencaje(
     df_hist: "pd.DataFrame | None" = None,
 ) -> dict:
     """
-    Lee peor_total diario desde la tab 'Ajuste_diario' del Excel de step007
-    y aplica un factor multiplicativo uniforme sobre toda la ventana de proyeccion.
+    Aplica factor multiplicativo de sobreencaje sobre los cuantiles proyectados.
 
-    Logica T+N (OVERLAY_CONOCIMIENTO_ANTICIPADO = N):
-    - Los flujos de los proximos N dias habiles son conocidos con antelacion.
-    - Se usa SIEMPRE el cierre trimestral mas cercano (no se salta al siguiente).
-    - Si h_cierre <= N: todos los dias del cierre son conocidos -> sin overlay
-      para esta fecha (no se activa el cierre siguiente para evitar factor explosion).
-    - Para el cierre elegido: los dias conocidos (realizados + N dias adelante)
-      consumen el tope peor_total (netting). Solo el resto es incierto.
-    - Q[TAU]_acum se calcula sobre la porcion incierta: h en [N+1 .. h_cierre].
+    Lógica (T+2 desactivado; N=0):
 
-    peor_restante = max(0, peor_total - retiros_conocidos_en_ventana)
-    f = peor_restante / |sum(Q[TAU] para h en [max(N+1,h_inicio)..h_cierre])|
+    FUERA de la ventana (fecha_t < inicio de los últimos 7 DH del trimestre):
+      - mask_ventana = h_inicio..h_cierre  (los 7 DH completos de la ventana)
+      - peor_usado   = peor_total           (ningún retiro conocido aún)
+      - f = peor_total / |Q[TAU]_acum_7días|
+
+    DENTRO de la ventana (fecha_t >= inicio de los últimos 7 DH del trimestre):
+      - mask_ventana = h=1..h_cierre        (solo días futuros restantes)
+      - retiro_pasado = sum de flujos negativos realizados en la ventana hasta fecha_t
+      - peor_usado   = max(0, peor_total − retiro_pasado)
+      - f = peor_usado / |Q[TAU]_acum_restante|
+      → numerador y denominador se reducen al mismo ritmo → f estable
+
+    El factor se aplica únicamente a mask_ventana (no a horizontes post-cierre).
     """
     if not OVERLAY_SOBREENCAJE:
         return preds
