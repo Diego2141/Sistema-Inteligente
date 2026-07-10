@@ -1,128 +1,72 @@
 # -*- coding: utf-8 -*-
 """
 aux_fanchart_horizontes_xgb_qt.py
-Fan chart del modelo XGBoost QT (per-quantile Optuna) para múltiples fechas de origen.
+Fan chart del modelo XGBoost QT — lee predicciones de step005 (parquet).
 
-Idéntico a aux_fanchart_horizontes_xgb.py, salvo:
-  1. Apunta a modelos_xgb_qt/eval/ (step004_train_xgboost_qt.py)
-  2. Color de bandas: tomato (distingue de XGBoost estándar darkorange y LightGBM steelblue)
-  3. Títulos y nombres de archivo llevan sufijo _xgb_qt
-
-Por cada fecha de origen genera un PNG con 3 subplots:
+Por cada fecha de origen seleccionada genera un PNG con 3 subplots:
     1. Flujo diario D-R: bandas + realizado
     2. Flujo diario D-R: solo modelo (mediana visible)
     3. Flujo neto acumulado D-R: bandas + realizado acumulado
 
+Requiere haber corrido step005_walk_forward_cv_3.py para generar los parquets:
+    preds_base_{banco}_{fecha}.parquet    <- predicciones modelo puro
+    preds_overlay_{banco}_{fecha}.parquet <- con overlay sobreencaje
+
 Parámetros ajustables:
-  PASO_FECHAS : cada cuántos días hábiles tomar una fecha de origen (2 = bisemanal)
-  N_FECHAS_MAX: límite de gráficos a generar (None = todos)
+  PASO_FECHAS   : cada cuántos días hábiles tomar una fecha de origen (2 = bisemanal)
+  N_FECHAS_MAX  : límite de gráficos a generar (None = todos)
+  MOSTRAR_OVERLAY: False = base; True = con overlay sobreencaje
 """
 
 from pathlib import Path
-import json
 import numpy as np
 import pandas as pd
-import xgboost as xgb
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 
 # ── Rutas ─────────────────────────────────────────────────────────────────────
-BASE_SISTEMA = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente")
-RUTA_MATRIZ  = BASE_SISTEMA / "1. Data"   / "Clean"  / "matriz_features.parquet"
-DIR_MODELOS  = BASE_SISTEMA / "2. Output" / "modelos_xgb_qt" / "eval"
-DIR_OUTPUT   = BASE_SISTEMA / "2. Output" / "aux_fanchart_horizontes_xgb_qt"
+BASE_SISTEMA      = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente")
+DIR_PREDS_STEP005 = BASE_SISTEMA / "2. Output" / "step005_wfcv_v3"
+DIR_OUTPUT        = BASE_SISTEMA / "2. Output" / "aux_fanchart_horizontes_xgb_qt"
 DIR_OUTPUT.mkdir(parents=True, exist_ok=True)
 
-BANCO      = "SISTEMA"
-CORTE_VAL  = pd.Timestamp("2022-07-01")
-CORTE_TEST = pd.Timestamp("2023-01-03")
+BANCO = "SISTEMA"
 
 # ── Parámetros del loop ───────────────────────────────────────────────────────
-PASO_FECHAS  = 2    # cada 2 días hábiles; usar 1 para todas las fechas
-N_FECHAS_MAX = None # None = generar todos; ej: 6 para las 6 primeras fechas válidas
+PASO_FECHAS    = 2     # cada 2 días hábiles; usar 1 para todas las fechas
+N_FECHAS_MAX   = None  # None = generar todos; ej: 6 para las 6 primeras fechas válidas
+MOSTRAR_OVERLAY = False  # False = predicciones base; True = con overlay sobreencaje
 
-COLOR_BANDA = "tomato"  # distingue XGBoost QT de XGBoost estándar (darkorange) y LightGBM (steelblue)
+COLOR_BANDA = "tomato"
 
 
-# ── 1. Cargar modelos XGBoost QT más recientes ────────────────────────────────
-def cargar_modelos(banco: str, dir_modelos: Path) -> tuple[dict, list[str]]:
-    metas = sorted(dir_modelos.glob(f"metadata_xgb_qt_{banco}_*.json"), reverse=True)
-    if not metas:
+# ── 1. Cargar parquet de step005 ──────────────────────────────────────────────
+def cargar_parquet(banco: str) -> pd.DataFrame:
+    tipo = "overlay" if MOSTRAR_OVERLAY else "base"
+    candidatos = sorted(DIR_PREDS_STEP005.glob(f"*/preds_{tipo}_{banco}_*.parquet"))
+    if not candidatos:
         raise FileNotFoundError(
-            f"No se encontró metadata XGBoost para banco={banco} en {dir_modelos}"
+            f"No se encontró preds_{tipo}_{banco}_*.parquet en {DIR_PREDS_STEP005}\n"
+            f"  -> Corre step005_walk_forward_cv_3.py primero"
         )
-    meta      = json.loads(metas[0].read_text(encoding="utf-8"))
-    fecha     = metas[0].stem.split("_")[-1]
-    cols_feat = meta["features"]
-    quantiles = meta["quantiles"]
-
-    modelos = {}
-    for tau in quantiles:
-        ruta = dir_modelos / f"xgb_qt_{banco}_q{int(tau*100):02d}_{fecha}.json"
-        if not ruta.exists():
-            raise FileNotFoundError(f"Modelo no encontrado: {ruta}")
-        booster = xgb.Booster()
-        booster.load_model(str(ruta))
-        modelos[tau] = booster
-
-    print(f"Modelo XGBoost QT cargado : {metas[0].name}")
-    print(f"  Quantiles               : {quantiles}")
-    print(f"  Features                : {len(cols_feat)}")
-    return modelos, cols_feat
-
-
-# ── 2. Leer datos y preparar medianas de imputación ──────────────────────────
-def leer_datos(banco: str, cols_feat: list[str]):
-    df = pd.read_parquet(RUTA_MATRIZ, filters=[("banco", "==", banco)])
+    ruta = candidatos[-1]
+    df = pd.read_parquet(ruta)
     df["fecha_t"] = pd.to_datetime(df["fecha_t"])
-    df = df.sort_values(["fecha_t", "h"]).reset_index(drop=True)
-
-    df_train = df[df["fecha_t"] < CORTE_VAL].copy()
-    df_test  = df[df["fecha_t"] >= CORTE_TEST].copy()
-
-    cols_excluir = {"fecha_t", "banco", "target"}
-    cols_num     = [c for c in df.columns if c not in cols_excluir]
-    medianas     = df_train[cols_num].median()
-
-    print(f"\nTRAIN : hasta {CORTE_VAL.date()}")
-    print(f"TEST  : {CORTE_TEST.date()} → "
-          f"{df_test['fecha_t'].max().date()} ({df_test['fecha_t'].nunique()} fechas)")
-
-    fechas_validas = np.sort(
-        df_test[(df_test["h"] == 90) & df_test["target"].notna()]["fecha_t"].unique()
-    )
-    if len(fechas_validas) == 0:
-        raise ValueError("Ninguna fecha del TEST tiene h=90 realizado.")
-
-    print(f"Fechas válidas de origen (h=90 realizado): "
-          f"{pd.Timestamp(fechas_validas[0]).date()} → "
-          f"{pd.Timestamp(fechas_validas[-1]).date()} "
-          f"({len(fechas_validas)} fechas)")
-
-    return df, medianas, cols_num, fechas_validas, cols_feat
+    print(f"[OK] Parquet '{tipo}' cargado: {ruta.name}  ({len(df):,} filas)")
+    return df
 
 
-def preparar_fecha(df, fecha_origen: pd.Timestamp, medianas, cols_num, cols_feat) -> pd.DataFrame:
-    df_fecha    = df[df["fecha_t"] == fecha_origen].copy().sort_values("h")
-    cols_num_ok = [c for c in cols_num if c in df_fecha.columns]
-    df_fecha[cols_num_ok] = df_fecha[cols_num_ok].fillna(medianas)
-    for c in set(cols_feat) - set(df_fecha.columns):
-        df_fecha[c] = 0.0
-    return df_fecha
+# ── 2. Obtener fechas válidas ─────────────────────────────────────────────────
+def fechas_validas(df: pd.DataFrame) -> np.ndarray:
+    return np.sort(df["fecha_t"].unique())
 
 
-# ── 3. Predecir ───────────────────────────────────────────────────────────────
-def predecir(modelos: dict, df_fecha: pd.DataFrame, cols_feat: list[str]) -> pd.DataFrame:
-    cols_ok = [c for c in cols_feat if c in df_fecha.columns]
-    dmat    = xgb.DMatrix(df_fecha[cols_ok].copy())
-
-    resultado = df_fecha[["h", "target"]].copy().reset_index(drop=True)
-    for tau, booster in modelos.items():
-        resultado[f"q{int(tau*100):02d}"] = booster.predict(dmat)
-
-    q_cols = sorted([c for c in resultado.columns if c.startswith("q")])
-    resultado[q_cols] = np.sort(resultado[q_cols].values, axis=1)
-    return resultado
+# ── 3. Preparar resultado para una fecha ─────────────────────────────────────
+def preparar_resultado(df: pd.DataFrame, fecha_origen: pd.Timestamp) -> pd.DataFrame:
+    res = df[df["fecha_t"] == fecha_origen].sort_values("h").reset_index(drop=True)
+    if res.empty:
+        raise ValueError(f"Sin datos en parquet para fecha_t={fecha_origen.date()}")
+    return res
 
 
 # ── 4. Graficar ───────────────────────────────────────────────────────────────
@@ -152,11 +96,13 @@ def graficar(resultado: pd.DataFrame, fecha_origen: pd.Timestamp, banco: str,
     mask_real = ~np.isnan(realizado)
     h_max_real = int(resultado.loc[mask_real, "h"].max()) if mask_real.any() else 0
 
+    tipo_label = "con Overlay Sobreencaje" if MOSTRAR_OVERLAY else "Base (sin overlay)"
     titulo_base = (
-        f"Fan Chart XGBoost QT — {banco}  |  Fecha de origen: {fecha_origen.strftime('%d %b %Y')}  |  "
-        f"h = 1 … 90 días hábiles\n"
+        f"Fan Chart XGBoost QT — {banco}  [{tipo_label}]  |  "
+        f"Fecha de origen: {fecha_origen.strftime('%d %b %Y')}  |  "
+        f"h = 1 … {int(hs.max())} días hábiles\n"
         f"Realizado disponible: h = 1 … {h_max_real}  |  "
-        f"Proyección pura: h = {h_max_real + 1} … 90"
+        f"Proyección pura: h = {h_max_real + 1} … {int(hs.max())}"
     )
 
     cum_q01  = np.cumsum(resultado["q01"].values / 1e6)
@@ -221,7 +167,8 @@ def graficar(resultado: pd.DataFrame, fecha_origen: pd.Timestamp, banco: str,
     ax3.xaxis.set_major_locator(mticker.MultipleLocator(10))
     ax3.set_xlim(hs.min() - 1, hs.max() + 1)
 
-    nombre = f"fanchart_xgb_qt_{banco}_{fecha_origen.strftime('%Y%m%d')}_h1_h90.png"
+    tipo_sfx = "overlay" if MOSTRAR_OVERLAY else "base"
+    nombre = f"fanchart_xgb_qt_{banco}_{fecha_origen.strftime('%Y%m%d')}_{tipo_sfx}.png"
     plt.savefig(DIR_OUTPUT / nombre, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  [{idx}/{total}] Guardado: {nombre}")
@@ -229,19 +176,23 @@ def graficar(resultado: pd.DataFrame, fecha_origen: pd.Timestamp, banco: str,
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    modelos, cols_feat = cargar_modelos(BANCO, DIR_MODELOS)
-    df, medianas, cols_num, fechas_validas, cols_feat = leer_datos(BANCO, cols_feat)
+    df_preds = cargar_parquet(BANCO)
 
-    fechas_selec = fechas_validas[::PASO_FECHAS]
+    todas = fechas_validas(df_preds)
+    fechas_selec = todas[::PASO_FECHAS]
     if N_FECHAS_MAX is not None:
         fechas_selec = fechas_selec[:N_FECHAS_MAX]
 
-    print(f"\nGenerando {len(fechas_selec)} gráfico(s) "
+    tipo_label = "overlay" if MOSTRAR_OVERLAY else "base"
+    print(f"\nGenerando {len(fechas_selec)} gráfico(s) [{tipo_label}] "
           f"(paso={PASO_FECHAS} días hábiles, límite={N_FECHAS_MAX}):")
+
     for i, f_orig in enumerate(fechas_selec, 1):
         fecha_origen = pd.Timestamp(f_orig)
-        df_fecha  = preparar_fecha(df, fecha_origen, medianas, cols_num, cols_feat)
-        resultado = predecir(modelos, df_fecha, cols_feat)
-        graficar(resultado, fecha_origen, BANCO, idx=i, total=len(fechas_selec))
+        try:
+            resultado = preparar_resultado(df_preds, fecha_origen)
+            graficar(resultado, fecha_origen, BANCO, idx=i, total=len(fechas_selec))
+        except ValueError as e:
+            print(f"  [{i}/{len(fechas_selec)}] Saltando {fecha_origen.date()}: {e}")
 
-    print(f"\n✓ Todos los gráficos guardados en: {DIR_OUTPUT}")
+    print(f"\n[OK] Todos los gráficos guardados en: {DIR_OUTPUT}")
