@@ -2468,8 +2468,9 @@ def _aplicar_overlay_sobreencaje(
 
     Logica T+N (OVERLAY_CONOCIMIENTO_ANTICIPADO = N):
     - Los flujos de los proximos N dias habiles son conocidos con antelacion.
-    - Si h_cierre <= N: el cierre ya es completamente conocido -> se usa el
-      SIGUIENTE cierre trimestral (que aun tiene incertidumbre real).
+    - Se usa SIEMPRE el cierre trimestral mas cercano (no se salta al siguiente).
+    - Si h_cierre <= N: todos los dias del cierre son conocidos -> sin overlay
+      para esta fecha (no se activa el cierre siguiente para evitar factor explosion).
     - Para el cierre elegido: los dias conocidos (realizados + N dias adelante)
       consumen el tope peor_total (netting). Solo el resto es incierto.
     - Q[TAU]_acum se calcula sobre la porcion incierta: h en [N+1 .. h_cierre].
@@ -2520,7 +2521,7 @@ def _aplicar_overlay_sobreencaje(
         if not cierres_proy:
             continue
 
-        # Primer cierre con horizonte incierto > N (si h_cierre <= N, ya es conocido)
+        # Primer cierre trimestral proyectado (el más cercano)
         fecha_cierre = None
         h_cierre = None
         for _cand in cierres_proy:
@@ -2529,12 +2530,17 @@ def _aplicar_overlay_sobreencaje(
             except ValueError:
                 _diffs = [abs((d - _cand).days) for d in bh_list]
                 _h = _diffs.index(min(_diffs)) + 1
-            if _h > N:
-                fecha_cierre = _cand
-                h_cierre = _h
-                break
+            fecha_cierre = _cand
+            h_cierre = _h
+            break  # siempre el más cercano; no saltar al siguiente trimestre
 
         if fecha_cierre is None:
+            continue
+
+        # Si el cierre está dentro del conocimiento anticipado (h_cierre <= N),
+        # todos sus días ya son conocidos vía T+N → sin incertidumbre real.
+        # No se salta al siguiente cierre; simplemente no hay overlay esta fecha.
+        if h_cierre <= N:
             continue
 
         mask_origen = (fechas_t == fecha_t)
