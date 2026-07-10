@@ -2513,7 +2513,14 @@ def _aplicar_overlay_sobreencaje(
     meta_rows = []   # metadatos del factor por fecha_t (para exportar)
     N = OVERLAY_CONOCIMIENTO_ANTICIPADO
 
+    # Conjunto de feriados para lookup O(1)
+    _feriados_set = set(pd.DatetimeIndex(_FERIADOS_PE).normalize())
+
     for fecha_t in sorted(set(fechas_t)):
+        # Saltar feriados que aparezcan en los datos por forward-fill del origen
+        if pd.Timestamp(fecha_t).normalize() in _feriados_set:
+            continue
+
         disponibles = df_aj.index[df_aj.index <= fecha_t]
         if len(disponibles) == 0:
             continue
