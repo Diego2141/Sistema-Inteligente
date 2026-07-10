@@ -67,11 +67,10 @@ def mapear_fecha_target(df: pd.DataFrame) -> pd.DataFrame:
     """
     df_far = df[df["h"] >= 40].copy()
     partes = []
-    fechas_unicas = sorted(df_far["fecha_t"].unique())
+    fechas_unicas = [pd.Timestamp(t) for t in sorted(df_far["fecha_t"].unique())]
     print(f"Mapeando {len(fechas_unicas)} fechas de origen (h>=40)...")
 
     for fecha_t in fechas_unicas:
-        fecha_t = pd.Timestamp(fecha_t)
         grp = df_far[df_far["fecha_t"] == fecha_t]
         h_max = int(grp["h"].max())
         bh = pd.bdate_range(start=fecha_t + BDAY_PE, periods=h_max, freq=BDAY_PE)
@@ -96,7 +95,7 @@ def filtrar_ventana_dic(df: pd.DataFrame) -> pd.DataFrame:
 def graficar_consistencia(df_vent: pd.DataFrame) -> None:
     df_vent = df_vent.copy()
     df_vent["anio_target"] = df_vent["fecha_target"].dt.year
-    df_vent["label_target"] = df_vent["fecha_target"].dt.strftime("%-d %b")  # "26 Dec"
+    df_vent["label_target"] = df_vent["fecha_target"].dt.strftime("%d %b")  # "26 Dec"
 
     for anio in sorted(df_vent["anio_target"].unique()):
         sub = df_vent[df_vent["anio_target"] == anio].copy()
@@ -112,7 +111,7 @@ def graficar_consistencia(df_vent: pd.DataFrame) -> None:
         ax1 = axes[0]
         for dia, color in zip(dias_dic, colores):
             serie = sub[sub["fecha_target"] == dia].set_index("fecha_t")["q05"].sort_index() / 1e6
-            label = pd.Timestamp(dia).strftime("%-d %b")
+            label = pd.Timestamp(dia).strftime("%d %b")
             ax1.plot(serie.index, serie.values, marker=".", lw=1.4,
                      label=label, color=color)
         ax1.axhline(0, color="black", lw=0.7, ls="--", alpha=0.4)
