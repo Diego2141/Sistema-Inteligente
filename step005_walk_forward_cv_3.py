@@ -248,18 +248,61 @@ OVERLAY_VENTANA_DH              = 7   # dias habiles de la ventana de retiro (mi
 OVERLAY_TAU_REFERENCIA          = 0.05  # quantil usado como denominador del factor
 OVERLAY_CONOCIMIENTO_ANTICIPADO = 2   # T+N: flujos conocidos con N dias habiles de antelacion
 
-# Calendario de días hábiles peruano para el overlay.
-# pd.bdate_range usa Mon-Fri estándar; excluimos feriados bancarios clave
-# (Navidad 24-25 dic, Año Nuevo 1 ene, Inmaculada 8 dic) que distorsionan
-# h_cierre y la ventana de 7 días hábiles del cierre de diciembre.
+# Calendario de días hábiles PER + USA para el overlay.
+# Se combinan ambos conjuntos de feriados porque los flujos D-R involucran
+# operaciones en moneda extranjera (USD) que no liquidan en feriados de EE.UU.
+#
+# Preferencia: librería `holidays` (calcula feriados variables como Thanksgiving,
+# Viernes Santo, MLK Day, etc.). Si no está instalada, se usa una lista curada
+# con los feriados fijos más relevantes para la ventana de diciembre.
 _ANOS_FERIADOS = range(2018, 2032)
-_FERIADOS_PE = pd.to_datetime(
-    [f"{y}-01-01" for y in _ANOS_FERIADOS]   # Año Nuevo
-    + [f"{y}-12-08" for y in _ANOS_FERIADOS] # Inmaculada Concepción
-    + [f"{y}-12-24" for y in _ANOS_FERIADOS] # Nochebuena
-    + [f"{y}-12-25" for y in _ANOS_FERIADOS] # Navidad
-)
-BDAY_PE = CustomBusinessDay(holidays=_FERIADOS_PE)
+
+try:
+    import holidays as _hlib
+    _dias_pe = _hlib.Peru(years=_ANOS_FERIADOS)
+    _dias_us = _hlib.UnitedStates(years=_ANOS_FERIADOS)
+    _FERIADOS_PEUSA = pd.to_datetime(
+        sorted(set(list(_dias_pe.keys()) + list(_dias_us.keys())))
+    )
+    logger.info(f"[BDAY] Calendario PER+USA cargado via 'holidays' "
+                f"({len(_FERIADOS_PEUSA)} días, {_ANOS_FERIADOS.start}-{_ANOS_FERIADOS.stop-1})")
+except ImportError:
+    # Fallback: feriados fijos PER + feriados fijos USA más relevantes (2018-2031)
+    # PER: Año Nuevo, Jueves/Viernes Santo*, Día del Trabajo, Fiestas Patrias,
+    #      Sta. Rosa de Lima, Combate de Angamos, Todos los Santos,
+    #      Inmaculada Concepción, Nochebuena, Navidad
+    # USA: Año Nuevo, MLK Day*, Pres. Day*, Memorial Day*, Juneteenth,
+    #      Independence Day, Labor Day*, Columbus Day*, Veterans Day,
+    #      Thanksgiving*, Christmas
+    # (*) feriados variables no incluidos en el fallback — instalar `holidays`
+    #     para cobertura completa: pip install holidays
+    _f_pe_fijos = pd.to_datetime(
+        [f"{y}-01-01" for y in _ANOS_FERIADOS]   # Año Nuevo PER
+        + [f"{y}-05-01" for y in _ANOS_FERIADOS]  # Día del Trabajo PER
+        + [f"{y}-06-29" for y in _ANOS_FERIADOS]  # San Pedro y San Pablo PER
+        + [f"{y}-07-28" for y in _ANOS_FERIADOS]  # Fiestas Patrias PER (día 1)
+        + [f"{y}-07-29" for y in _ANOS_FERIADOS]  # Fiestas Patrias PER (día 2)
+        + [f"{y}-08-30" for y in _ANOS_FERIADOS]  # Sta. Rosa de Lima PER
+        + [f"{y}-10-08" for y in _ANOS_FERIADOS]  # Combate de Angamos PER
+        + [f"{y}-11-01" for y in _ANOS_FERIADOS]  # Todos los Santos PER
+        + [f"{y}-12-08" for y in _ANOS_FERIADOS]  # Inmaculada Concepción PER
+        + [f"{y}-12-24" for y in _ANOS_FERIADOS]  # Nochebuena PER
+        + [f"{y}-12-25" for y in _ANOS_FERIADOS]  # Navidad PER/USA
+    )
+    _f_us_fijos = pd.to_datetime(
+        [f"{y}-07-04" for y in _ANOS_FERIADOS]   # Independence Day USA
+        + [f"{y}-06-19" for y in _ANOS_FERIADOS]  # Juneteenth USA (desde 2021)
+        + [f"{y}-11-11" for y in _ANOS_FERIADOS]  # Veterans Day USA
+    )
+    _FERIADOS_PEUSA = pd.to_datetime(
+        sorted(set(_f_pe_fijos.tolist() + _f_us_fijos.tolist()))
+    )
+    logger.warning(
+        "[BDAY] Librería 'holidays' no encontrada — usando lista de feriados fijos PER+USA. "
+        "Instalar con: pip install holidays"
+    )
+
+BDAY_PE = CustomBusinessDay(holidays=_FERIADOS_PEUSA)
 
 
 # -- Fan chart TEST: número de snapshots por fold ------------------------------
@@ -2513,8 +2556,8 @@ def _aplicar_overlay_sobreencaje(
     meta_rows = []   # metadatos del factor por fecha_t (para exportar)
     N = OVERLAY_CONOCIMIENTO_ANTICIPADO
 
-    # Conjunto de feriados para lookup O(1)
-    _feriados_set = set(pd.DatetimeIndex(_FERIADOS_PE).normalize())
+    # Conjunto de feriados PER+USA para lookup O(1)
+    _feriados_set = set(pd.DatetimeIndex(_FERIADOS_PEUSA).normalize())
 
     for fecha_t in sorted(set(fechas_t)):
         # Saltar feriados que aparezcan en los datos por forward-fill del origen
