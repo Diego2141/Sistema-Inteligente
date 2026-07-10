@@ -2540,30 +2540,53 @@ def _aplicar_overlay_sobreencaje(
         mask_origen = (fechas_t == fecha_t)
         h_inicio = max(1, h_cierre - OVERLAY_VENTANA_DH + 1)
 
-        # -- Netting: dias conocidos = realizados hasta fecha_t + N dias hábiles
+        # -- Netting: retiros ya realizados + T+N conocidos dentro de la ventana --
+        # La ventana cubre los ultimos OVERLAY_VENTANA_DH dias habiles antes del cierre.
+        # Se separan dos fuentes:
+        #   A) Pasado realizado : dias de la ventana que ya ocurrieron (d <= fecha_t)
+        #   B) T+N conocido     : dias h=1..N desde fecha_t que caen en la ventana
+        # Ambos reducen peor_total -> peor_restante = max(0, peor_total - retiro_conocido)
         fecha_inicio_ventana_real = fecha_cierre - pd.offsets.BDay(OVERLAY_VENTANA_DH - 1)
-        fecha_conocida_hasta = min(
-            fecha_t + pd.offsets.BDay(N),
-            fecha_cierre,
-        )
-        retiro_conocido = 0.0
-        if df_hist is not None and fecha_inicio_ventana_real <= fecha_conocida_hasta:
-            known_days = pd.bdate_range(
-                start=fecha_inicio_ventana_real, end=fecha_conocida_hasta
-            )
-            for _d in known_days:
-                _d_prev = _d - pd.offsets.BDay(1)
-                _rows = df_hist[(df_hist["fecha_t"] == _d_prev) & (df_hist["h"] == 1)]
-                if not _rows.empty:
-                    _flow = float(_rows["target"].values[0])
-                    if _flow < 0:
-                        retiro_conocido += abs(_flow)
+        retiro_pasado = 0.0
+        retiro_t2     = 0.0
+
+        if df_hist is not None:
+            # A) Flujos YA REALIZADOS en la ventana (fecha_inicio_ventana .. fecha_t)
+            if fecha_inicio_ventana_real <= fecha_t:
+                for _d in pd.bdate_range(start=fecha_inicio_ventana_real,
+                                          end=min(fecha_t, fecha_cierre)):
+                    _d_prev = _d - pd.offsets.BDay(1)
+                    _rows = df_hist[
+                        (df_hist["fecha_t"] == _d_prev) & (df_hist["h"] == 1)
+                    ]
+                    if not _rows.empty:
+                        _flow = float(_rows["target"].values[0])
+                        if _flow < 0:
+                            retiro_pasado += abs(_flow)
+
+            # B) Flujos T+N conocidos por adelantado que caen dentro de la ventana
+            _t2_desde = fecha_t + pd.offsets.BDay(1)
+            _t2_hasta  = min(fecha_t + pd.offsets.BDay(N), fecha_cierre)
+            if _t2_desde <= _t2_hasta and fecha_inicio_ventana_real <= _t2_hasta:
+                _t2_inicio_eff = max(_t2_desde, fecha_inicio_ventana_real)
+                for _d in pd.bdate_range(start=_t2_inicio_eff, end=_t2_hasta):
+                    _d_prev = _d - pd.offsets.BDay(1)
+                    _rows = df_hist[
+                        (df_hist["fecha_t"] == _d_prev) & (df_hist["h"] == 1)
+                    ]
+                    if not _rows.empty:
+                        _flow = float(_rows["target"].values[0])
+                        if _flow < 0:
+                            retiro_t2 += abs(_flow)
+
+        retiro_conocido = retiro_pasado + retiro_t2
 
         peor_restante = max(0.0, peor_total - retiro_conocido)
         if peor_restante < 1e-6:
             logger.info(
                 f"[OVERLAY] {fecha_t.date()} | cap consumido "
-                f"(conocidos={retiro_conocido:,.0f} >= peor={peor_total:,.0f}) -- sin ajuste"
+                f"(pasado={retiro_pasado:,.0f} + T{N}={retiro_t2:,.0f} = {retiro_conocido:,.0f} "
+                f">= peor={peor_total:,.0f}) -- sin ajuste"
             )
             continue
 
@@ -2585,6 +2608,7 @@ def _aplicar_overlay_sobreencaje(
                 "fecha_t": fecha_t, "cierre_fecha": fecha_cierre,
                 "h_cierre": h_cierre, "n_inciertos": n_inciertos,
                 "peor_total": peor_total, "retiro_conocido": retiro_conocido,
+                "retiro_pasado": retiro_pasado, "retiro_t2": retiro_t2,
                 "peor_restante": peor_restante,
                 "q_tau_acum": q01_acum, "factor_f": 1.0, "overlay_activo": False,
                 "razon_no_activo": "q_tau>=0_o_nulo",
@@ -2600,6 +2624,7 @@ def _aplicar_overlay_sobreencaje(
                 "fecha_t": fecha_t, "cierre_fecha": fecha_cierre,
                 "h_cierre": h_cierre, "n_inciertos": n_inciertos,
                 "peor_total": peor_total, "retiro_conocido": retiro_conocido,
+                "retiro_pasado": retiro_pasado, "retiro_t2": retiro_t2,
                 "peor_restante": peor_restante,
                 "q_tau_acum": q01_acum, "factor_f": f, "overlay_activo": False,
                 "razon_no_activo": "f<=1",
@@ -2613,6 +2638,7 @@ def _aplicar_overlay_sobreencaje(
             "fecha_t": fecha_t, "cierre_fecha": fecha_cierre,
             "h_cierre": h_cierre, "n_inciertos": n_inciertos,
             "peor_total": peor_total, "retiro_conocido": retiro_conocido,
+            "retiro_pasado": retiro_pasado, "retiro_t2": retiro_t2,
             "peor_restante": peor_restante,
             "q_tau_acum": q01_acum, "factor_f": f, "overlay_activo": True,
             "razon_no_activo": "",
@@ -2622,8 +2648,8 @@ def _aplicar_overlay_sobreencaje(
             f"[OVERLAY] {fecha_t.date()} | cierre: {fecha_cierre.date()} "
             f"h=[{h_inicio_incierto},{h_cierre}] n_inc={n_inciertos} | "
             f"Q{int(OVERLAY_TAU_REFERENCIA*100):02d}_acum={q01_acum:+.0f} | "
-            f"peor={peor_total:,.0f} | conocidos={retiro_conocido:,.0f} | "
-            f"restante={peor_restante:,.0f} | f={f:.3f}"
+            f"peor={peor_total:,.0f} | pasado={retiro_pasado:,.0f} T{N}={retiro_t2:,.0f} "
+            f"conocidos={retiro_conocido:,.0f} | restante={peor_restante:,.0f} | f={f:.3f}"
         )
 
     return preds_adj, meta_rows

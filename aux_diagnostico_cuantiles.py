@@ -81,7 +81,7 @@ def _cargar_datos(banco: str, fecha_hoy: str) -> tuple[pd.DataFrame, pd.DataFram
 def _sheet_factor(df_meta: pd.DataFrame) -> pd.DataFrame:
     cols_orden = [
         "fecha_t", "cierre_fecha", "h_cierre", "n_inciertos",
-        "peor_total", "retiro_conocido", "peor_restante",
+        "peor_total", "retiro_pasado", "retiro_t2", "retiro_conocido", "peor_restante",
         "q_tau_acum", "factor_f", "overlay_activo", "razon_no_activo",
     ]
     cols = [c for c in cols_orden if c in df_meta.columns]
