@@ -49,25 +49,30 @@ TAUS_MOSTRAR = [0.01, 0.05, 0.25, 0.50, 0.75, 0.95, 0.99]
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _encontrar_ultimo(patron: str) -> Path:
-    archivos = sorted(glob.glob(patron))
+    # busca también en subdirectorios (DIR_MODO = step005_wfcv_v3/xgb_expanding_XXX/)
+    archivos = sorted(glob.glob(patron, recursive=True))
     if not archivos:
-        raise FileNotFoundError(f"No se encontró archivo con patrón: {patron}")
+        raise FileNotFoundError(
+            f"No se encontró archivo con patrón: {patron}\n"
+            f"  -> Asegúrate de haber corrido step005 con OVERLAY_SOBREENCAJE = True"
+        )
     return Path(archivos[-1])
 
 
 def _cargar_datos(banco: str, fecha_hoy: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     if fecha_hoy == "AUTO":
-        ruta_preds = _encontrar_ultimo(str(DIR_STEP005 / f"preds_overlay_{banco}_*.parquet"))
-        ruta_meta  = _encontrar_ultimo(str(DIR_STEP005 / f"overlay_meta_{banco}_*.csv"))
+        # "**/" busca en cualquier subdirectorio de DIR_STEP005
+        ruta_preds = _encontrar_ultimo(str(DIR_STEP005 / "**" / f"preds_overlay_{banco}_*.parquet"))
+        ruta_meta  = _encontrar_ultimo(str(DIR_STEP005 / "**" / f"overlay_meta_{banco}_*.csv"))
     else:
-        ruta_preds = DIR_STEP005 / f"preds_overlay_{banco}_{fecha_hoy}.parquet"
-        ruta_meta  = DIR_STEP005 / f"overlay_meta_{banco}_{fecha_hoy}.csv"
+        ruta_preds = _encontrar_ultimo(str(DIR_STEP005 / "**" / f"preds_overlay_{banco}_{fecha_hoy}.parquet"))
+        ruta_meta  = _encontrar_ultimo(str(DIR_STEP005 / "**" / f"overlay_meta_{banco}_{fecha_hoy}.csv"))
 
     df_preds = pd.read_parquet(ruta_preds)
     df_meta  = pd.read_csv(ruta_meta, parse_dates=["fecha_t", "cierre_fecha"])
 
-    print(f"Predicciones : {ruta_preds.name}  ({len(df_preds):,} filas)")
-    print(f"Metadata     : {ruta_meta.name}   ({len(df_meta):,} filas)")
+    print(f"[OK] Predicciones cargadas : {ruta_preds.name}  ({len(df_preds):,} filas)")
+    print(f"[OK] Metadata cargada      : {ruta_meta.name}   ({len(df_meta):,} filas)")
     return df_preds, df_meta
 
 
@@ -183,7 +188,9 @@ def main():
         _sheet_pivot_q05(df_preds).to_excel(writer, sheet_name="Pivot_Q05", index=False)
         _sheet_pivot_factor(df_meta).to_excel(writer, sheet_name="Pivot_Factor", index=False)
 
-    print(f"\nExcel guardado en:\n  {ruta_out}")
+    print(f"\n[OK] Excel de diagnóstico generado correctamente:")
+    print(f"     {ruta_out}")
+    print(f"     Sheets: Metodologia | Factor_overlay | Cuantiles_origen | Pivot_Q05 | Pivot_Factor")
 
 
 if __name__ == "__main__":
