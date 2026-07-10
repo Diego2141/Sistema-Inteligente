@@ -2626,6 +2626,15 @@ def _aplicar_overlay_sobreencaje(
         #   B) T+N conocido     : dias h=1..N desde fecha_t que caen en la ventana
         # Ambos reducen peor_total -> peor_restante = max(0, peor_total - retiro_conocido)
         fecha_inicio_ventana_real = fecha_cierre - (OVERLAY_VENTANA_DH - 1) * BDAY_PE
+
+        # El overlay solo aplica cuando fecha_t ya está dentro de la ventana de
+        # cierre (últimos OVERLAY_VENTANA_DH DH del trimestre). Antes de esa
+        # ventana, el modelo base cubre el riesgo sin ajuste; activarlo antes
+        # reduce n_inc artificialmente (el T+2 empieza a cortar h_inicio) y
+        # produce factores fuera del período relevante.
+        if pd.Timestamp(fecha_t) < fecha_inicio_ventana_real:
+            continue
+
         retiro_pasado = 0.0
         retiro_t2     = 0.0
 
