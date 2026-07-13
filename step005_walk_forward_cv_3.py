@@ -2644,15 +2644,18 @@ def _aplicar_overlay_sobreencaje(
 
         # ── Netting (solo dentro de la ventana) ──────────────────────────────
         # Fuera: peor_usado = peor_total (ningún retiro conocido aún).
-        # Dentro: peor_usado = max(0, peor_total − retiro_pasado) donde
-        #         retiro_pasado = flujos negativos YA realizados en la ventana.
-        # El Q05_acum (calculado sobre mask_ventana = días restantes) es comparable:
-        # ambos numerador y denominador se reducen al mismo ritmo al avanzar.
-        retiro_pasado = 0.0
+        # Dentro: peor_usado = max(0, peor_total + flujo_neto_realizado) donde
+        #         flujo_neto_realizado = suma NETA (con signo) de los flujos
+        #         realizados en la ventana hasta fecha_t.
+        #         - Flujo negativo (retiro): reduce el peor_restante.
+        #         - Flujo positivo (depósito): aumenta el peor_restante, porque
+        #           la contraparte podría retirar más en los días restantes para
+        #           compensar los depósitos ya realizados.
+        # Fórmula: peor_restante = max(0, peor_total + sum(flujos realizados))
+        # La matriz tiene h_min=2: el target en (fecha_t=T, h=2) es el flujo real
+        # en T+2BDays → usamos _d_lookback = _d - 2*BDAY_PE, h=2.
+        retiro_pasado = 0.0  # suma neta con signo: positivo=depósito, negativo=retiro
         if dentro_ventana and df_hist is not None:
-            # La matriz tiene h_min=2 (no hay h=1). El target en (fecha_t=T, h=2)
-            # es el flujo real en T+2BDays. Para obtener el flujo realizado en _d
-            # usamos fecha_t = _d - 2*BDAY_PE y h=2.
             _H_MIN = 2
             for _d in pd.bdate_range(start=fecha_inicio_ventana_real,
                                       end=min(fecha_t, fecha_cierre),
@@ -2662,12 +2665,10 @@ def _aplicar_overlay_sobreencaje(
                     (df_hist["fecha_t"] == _d_lookback) & (df_hist["h"] == _H_MIN)
                 ]
                 if not _rows.empty:
-                    _flow = float(_rows["target"].values[0])
-                    if _flow < 0:
-                        retiro_pasado += abs(_flow)
+                    retiro_pasado += float(_rows["target"].values[0])
 
         peor_usado = (
-            max(0.0, peor_total - retiro_pasado) if dentro_ventana else peor_total
+            max(0.0, peor_total + retiro_pasado) if dentro_ventana else peor_total
         )
         if peor_usado < 1e-6:
             meta_rows.append({
@@ -2739,8 +2740,8 @@ def _aplicar_overlay_sobreencaje(
             f"[OVERLAY] {fecha_t.date()} [{_zona}] | cierre: {fecha_cierre.date()} "
             f"h=[{h_inicio_mask},{h_cierre}] n_inc={n_inciertos} | "
             f"Q{int(OVERLAY_TAU_REFERENCIA*100):02d}_acum={q01_acum:+.0f} | "
-            f"peor={peor_total:,.0f} | pasado={retiro_pasado:,.0f} | "
-            f"peor_usado={peor_usado:,.0f} | f={f:.3f}"
+            f"peor={peor_total:,.0f} | flujo_neto={retiro_pasado:+,.0f} | "
+            f"peor_restante={peor_usado:,.0f} | f={f:.3f}"
         )
 
     return preds_adj, meta_rows
