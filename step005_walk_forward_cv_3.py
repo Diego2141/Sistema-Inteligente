@@ -2682,6 +2682,21 @@ def _aplicar_overlay_sobreencaje(
             if not mask_ventana.any():
                 h_disponibles = h_arr[mask_origen & (h_arr <= h_cierre)]
                 if len(h_disponibles) == 0:
+                    # h_cierre < h_min (ej. h_cierre=1 cuando h_min=2): no hay
+                    # predicciones para este cierre; registrar para diagnóstico.
+                    meta_rows.append({
+                        "fecha_t": fecha_t, "cierre_fecha": fecha_cierre,
+                        "h_cierre": h_cierre, "n_inciertos": 0,
+                        "peor_total": peor_total, "retiro_conocido": 0.0,
+                        "retiro_pasado": 0.0, "retiro_t2": 0.0,
+                        "peor_restante": peor_total,
+                        "q_tau_acum": np.nan, "factor_f": np.nan,
+                        "overlay_activo": False, "razon_no_activo": "h_cierre_lt_hmin",
+                    })
+                    logger.debug(
+                        f"[OVERLAY] {fecha_t.date()} | cierre: {fecha_cierre.date()} "
+                        f"h_cierre={h_cierre} < h_min — sin predicciones, se omite"
+                    )
                     _last_h_cierre = h_cierre
                     continue
                 h_fb = h_disponibles[np.abs(h_disponibles - h_cierre).argmin()]

@@ -187,8 +187,16 @@ def _sheet_diagnostico(df_meta: pd.DataFrame) -> pd.DataFrame:
         ("", ""),
         ("EDGE CASE: h_cierre > 75", f"{len(edge)} fechas con cierre fuera del horizonte pred."),
         ("  Interpretación",
-         "El factor se aplica a h=75 (fallback). Ocurre cuando el 2do cierre "
-         "está a >75 BDays de fecha_t. Normal para dates muy cercanas al cierre anterior."),
+         "C2 con h_cierre>75: se extiende el factor de C1 a h=[h_cierre_C1+1..75] (zona EXT). "
+         "Normal para fechas muy cercanas al cierre anterior."),
+        ("", ""),
+        ("EDGE CASE: h_cierre_lt_hmin",
+         str((df_meta.get("razon_no_activo", pd.Series()) == "h_cierre_lt_hmin").sum())
+         + " filas donde h_cierre < h_min=2 (cierre a 1 BDay, sin predicciones para ese horizonte)"),
+        ("  Interpretación",
+         "Ocurre cuando fecha_t es el penúltimo día hábil antes del cierre (ej. Sep 27→Sep 30). "
+         "h=1 no existe en la matriz de features (h_min=2). El cierre queda registrado pero "
+         "sin overlay activo. Dec-31 aparece como cierre_proximo en Resumen_Factores."),
         ("", ""),
         ("RESULTADO", "OK — máximo 2 cierres por fecha_t" if resumen_ft["n_cierres"].max() <= 2
                       else "ALERTA — hay fecha_t con 3+ cierres, revisar"),
