@@ -480,7 +480,7 @@ def _sheet_resumen_factores(df_meta: pd.DataFrame) -> pd.DataFrame:
             cierre2, h_c2 = pd.NaT, np.nan
 
         rows.append({
-            "fecha_t":          ft.date(),
+            "fecha_t":          pd.Timestamp(ft).date(),
             "cierre_proximo":   cierre1.date() if pd.notna(cierre1) else None,
             "h_cierre_prox":    h_c1,
             "zona_C1":          zona_c1,
