@@ -2650,12 +2650,16 @@ def _aplicar_overlay_sobreencaje(
         # ambos numerador y denominador se reducen al mismo ritmo al avanzar.
         retiro_pasado = 0.0
         if dentro_ventana and df_hist is not None:
+            # La matriz tiene h_min=2 (no hay h=1). El target en (fecha_t=T, h=2)
+            # es el flujo real en T+2BDays. Para obtener el flujo realizado en _d
+            # usamos fecha_t = _d - 2*BDAY_PE y h=2.
+            _H_MIN = 2
             for _d in pd.bdate_range(start=fecha_inicio_ventana_real,
                                       end=min(fecha_t, fecha_cierre),
                                       freq=BDAY_PE):
-                _d_prev = _d - BDAY_PE
+                _d_lookback = _d - _H_MIN * BDAY_PE
                 _rows = df_hist[
-                    (df_hist["fecha_t"] == _d_prev) & (df_hist["h"] == 1)
+                    (df_hist["fecha_t"] == _d_lookback) & (df_hist["h"] == _H_MIN)
                 ]
                 if not _rows.empty:
                     _flow = float(_rows["target"].values[0])
