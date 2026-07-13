@@ -402,14 +402,25 @@ def _cargar_preds_step005(banco: str) -> dict:
 # ── 4. Pre-computar todos los resultados ──────────────────────────────────────
 def precomputar(df, medianas, cols_num, cols_feat, modelos, fechas_validas,
                 meta=None, dir_modelos=None, banco=None, modelos_s4=None):
-    fechas_sel      = fechas_validas[::PASO_FECHAS]
-    total           = len(fechas_sel)
     folds_manifest  = (meta or {}).get("folds_manifest", []) if MODO_HISTORICO else []
     usar_historico  = MODO_HISTORICO and bool(folds_manifest)
 
     preds_step005 = _cargar_preds_step005(banco)
     tipo_preds    = "overlay" if MOSTRAR_OVERLAY else "base"
     df_preds_ov   = preds_step005[tipo_preds]
+
+    # En modo parquet: usar las fechas del propio parquet (cubre TODOS los folds),
+    # no las de la matriz de features (que filtra por target.notna() y puede
+    # recortar a solo el primer fold si el parquet fue generado en varias corridas).
+    if df_preds_ov is not None:
+        fechas_sel = np.sort(df_preds_ov["fecha_t"].unique())[::PASO_FECHAS]
+        total      = len(fechas_sel)
+        print(f"  [STEP005] Fechas en parquet '{tipo_preds}': "
+              f"{pd.Timestamp(fechas_sel[0]).date()} → {pd.Timestamp(fechas_sel[-1]).date()} "
+              f"({total} fechas)")
+    else:
+        fechas_sel = fechas_validas[::PASO_FECHAS]
+        total      = len(fechas_sel)
 
     if usar_historico:
         print(f"\nPre-computando {total} fechas [MODO HISTORICO - fold por fecha]...")
