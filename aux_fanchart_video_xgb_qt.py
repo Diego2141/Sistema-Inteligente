@@ -376,7 +376,13 @@ _preds_cache: dict = {}  # {banco: {"base": df|None, "overlay": df|None}}
 
 
 def _cargar_preds_step005(banco: str) -> dict:
-    """Carga base y overlay parquets de step005. Retorna {"base": df|None, "overlay": df|None}."""
+    """
+    Carga base y overlay parquets de step005 y los concatena todos.
+    Si step005 se corrió en múltiples pasadas (una por fold), cada corrida genera
+    un parquet distinto; concatenar todos cubre el rango histórico completo.
+    Las filas duplicadas por (fecha_t, h) se eliminan conservando la más reciente
+    (parquet con nombre de fecha mayor = corrida más reciente para ese fold).
+    """
     if banco in _preds_cache:
         return _preds_cache[banco]
 
@@ -386,14 +392,29 @@ def _cargar_preds_step005(banco: str) -> dict:
         if not candidatos:
             print(f"  [STEP005] No se encontro preds_{tipo}_{banco}_*.parquet en {DIR_PREDS_STEP005}")
             continue
-        ruta = candidatos[-1]
-        try:
-            df = pd.read_parquet(ruta)
-            df["fecha_t"] = pd.to_datetime(df["fecha_t"])
-            result[tipo] = df
-            print(f"  [STEP005] {tipo:7s}: {ruta.name}  ({len(df):,} filas)")
-        except Exception as e:
-            print(f"  [STEP005] Error leyendo {ruta.name}: {e}")
+        dfs = []
+        for ruta in candidatos:
+            try:
+                _df = pd.read_parquet(ruta)
+                _df["fecha_t"] = pd.to_datetime(_df["fecha_t"])
+                dfs.append(_df)
+            except Exception as e:
+                print(f"  [STEP005] Error leyendo {ruta.name}: {e}")
+        if not dfs:
+            continue
+        if len(dfs) == 1:
+            df = dfs[0]
+        else:
+            df = pd.concat(dfs, ignore_index=True)
+            # Conservar la fila más reciente por (fecha_t, h) en caso de solapamientos
+            key_cols = [c for c in ["fecha_t", "h", "banco", "fold"] if c in df.columns]
+            df = df.drop_duplicates(subset=key_cols, keep="last")
+            df = df.sort_values(["fecha_t", "h"] if "h" in df.columns else ["fecha_t"])
+        result[tipo] = df
+        n_fechas = df["fecha_t"].nunique()
+        rng = (f"{df['fecha_t'].min().date()} → {df['fecha_t'].max().date()}")
+        print(f"  [STEP005] {tipo:7s}: {len(candidatos)} archivo(s) | "
+              f"{len(df):,} filas | {n_fechas} fechas | {rng}")
 
     _preds_cache[banco] = result
     return result

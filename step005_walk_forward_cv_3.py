@@ -2704,9 +2704,12 @@ def _aplicar_overlay_sobreencaje(
                 n_inciertos  = 1
 
             # ── Netting: flujo neto realizado en la ventana de ESTE cierre ────
+            # _H_MIN viene de OVERLAY_CONOCIMIENTO_ANTICIPADO (config global).
+            # df_hist contiene targets de todos los folds; el lookback de _H_MIN
+            # días hábiles garantiza que nunca se accede a fechas > fecha_t.
             retiro_pasado = 0.0
             if dentro_ventana and df_hist is not None:
-                _H_MIN = 2
+                _H_MIN = OVERLAY_CONOCIMIENTO_ANTICIPADO
                 for _d in pd.bdate_range(start=fecha_inicio_ventana_real,
                                           end=min(fecha_t, fecha_cierre),
                                           freq=BDAY_PE):
