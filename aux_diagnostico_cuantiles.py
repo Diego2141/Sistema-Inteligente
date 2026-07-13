@@ -25,7 +25,8 @@ SHEETS
 ------
   "Metodologia"      : descripción de la lógica multi-cierre IN/OUT
   "Diagnostico"      : validación: n_cierres por fecha_t, edge cases, resumen
-  "Factor_C1_C2"     : una fila por fecha_t con factor C1 y C2 lado a lado
+  "Resumen_Factores" : una fila por fecha_t con cierre más próximo y factores efectivos (C1/C2/EXT)
+  "Factor_C1_C2"     : una fila por fecha_t con factor C1 y C2 lado a lado (detalle completo)
   "Factor_overlay"   : una fila por (fecha_t, cierre_fecha) — formato largo
   "Factor_evolucion" : evolución del factor por cierre_fecha a través del tiempo
   "Cuantiles_origen" : una fila por (fecha_t, h) con cuantiles post-overlay
@@ -410,6 +411,93 @@ def _sheet_pre_post(df_overlay: pd.DataFrame, df_meta: pd.DataFrame,
     return df_merged
 
 
+def _sheet_resumen_factores(df_meta: pd.DataFrame) -> pd.DataFrame:
+    """
+    Una fila por fecha_t mostrando el cierre más próximo y los factores
+    efectivamente aplicados (C1, C2 o EXT).
+
+    Columnas:
+      fecha_t, cierre_proximo, h_cierre_prox, zona_C1,
+      factor_C1, c1_activo, c1_razon,
+      cierre_siguiente, h_cierre_sig, zona_C2,
+      factor_C2, c2_activo, c2_razon
+    """
+    df = df_meta.copy()
+    df["fecha_t"]      = pd.to_datetime(df["fecha_t"])
+    df["cierre_fecha"] = pd.to_datetime(df["cierre_fecha"])
+    df = df.sort_values(["fecha_t", "cierre_fecha"])
+    df["rank"] = df.groupby("fecha_t").cumcount() + 1   # 1=C1, 2=C2
+
+    def _zona(row):
+        """Inferir IN / OUT / EXT desde n_inciertos y razon_no_activo."""
+        razon = str(row.get("razon_no_activo", ""))
+        if razon == "ext_f_c1":
+            return "EXT"
+        n   = row.get("n_inciertos", 7)
+        h_c = row.get("h_cierre", 0)
+        # si n_inciertos == h_cierre la ventana empieza en h=1 → estamos DENTRO
+        if pd.notna(n) and pd.notna(h_c) and int(n) == int(h_c):
+            return "IN"
+        return "OUT"
+
+    c1 = df[df["rank"] == 1].set_index("fecha_t")
+    c2 = df[df["rank"] == 2].set_index("fecha_t")
+
+    rows = []
+    for ft in sorted(df["fecha_t"].unique()):
+        r1 = c1.loc[ft] if ft in c1.index else None
+        r2 = c2.loc[ft] if ft in c2.index else None
+
+        # C1
+        if r1 is not None:
+            activo_c1 = bool(r1.get("overlay_activo", False))
+            factor_c1 = float(r1["factor_f"]) if activo_c1 and pd.notna(r1.get("factor_f")) else np.nan
+            zona_c1   = _zona(r1)
+            razon_c1  = "" if activo_c1 else str(r1.get("razon_no_activo", ""))
+            cierre1   = r1["cierre_fecha"]
+            h_c1      = int(r1["h_cierre"]) if pd.notna(r1.get("h_cierre")) else np.nan
+        else:
+            activo_c1, factor_c1, zona_c1, razon_c1 = False, np.nan, "", ""
+            cierre1, h_c1 = pd.NaT, np.nan
+
+        # C2 (puede ser activo, EXT, o ninguno)
+        if r2 is not None:
+            activo_c2 = bool(r2.get("overlay_activo", False))
+            razon_c2  = str(r2.get("razon_no_activo", ""))
+            zona_c2   = _zona(r2)
+            if activo_c2 and pd.notna(r2.get("factor_f")):
+                factor_c2 = float(r2["factor_f"])
+            elif razon_c2 == "ext_f_c1":
+                # extensión: el factor aplicado fue el de C1
+                factor_c2 = float(r2["factor_f"]) if pd.notna(r2.get("factor_f")) else factor_c1
+                activo_c2 = True   # el factor SÍ se aplicó (como extensión)
+            else:
+                factor_c2 = np.nan
+            cierre2 = r2["cierre_fecha"]
+            h_c2    = int(r2["h_cierre"]) if pd.notna(r2.get("h_cierre")) else np.nan
+        else:
+            activo_c2, factor_c2, zona_c2, razon_c2 = False, np.nan, "", ""
+            cierre2, h_c2 = pd.NaT, np.nan
+
+        rows.append({
+            "fecha_t":          ft.date(),
+            "cierre_proximo":   cierre1.date() if pd.notna(cierre1) else None,
+            "h_cierre_prox":    h_c1,
+            "zona_C1":          zona_c1,
+            "factor_C1":        round(factor_c1, 4) if pd.notna(factor_c1) else np.nan,
+            "c1_activo":        activo_c1,
+            "c1_razon":         razon_c1,
+            "cierre_siguiente": cierre2.date() if pd.notna(cierre2) else None,
+            "h_cierre_sig":     h_c2,
+            "zona_C2":          zona_c2,
+            "factor_C2":        round(factor_c2, 4) if pd.notna(factor_c2) else np.nan,
+            "c2_activo":        activo_c2,
+            "c2_razon":         "" if activo_c2 else razon_c2,
+        })
+
+    return pd.DataFrame(rows)
+
+
 def _sheet_pivot_q05(df_preds: pd.DataFrame) -> pd.DataFrame:
     if "q05" not in df_preds.columns:
         return pd.DataFrame({"nota": ["Columna q05 no disponible"]})
@@ -516,6 +604,7 @@ def main():
     with pd.ExcelWriter(ruta_out, engine="openpyxl") as writer:
         _sheet_metodologia().to_excel(writer, sheet_name="Metodologia", index=False)
         _sheet_diagnostico(df_meta).to_excel(writer, sheet_name="Diagnostico", index=False)
+        _sheet_resumen_factores(df_meta).to_excel(writer, sheet_name="Resumen_Factores", index=False)
         _sheet_factor_c1_c2(df_meta).to_excel(writer, sheet_name="Factor_C1_C2", index=False)
         _sheet_factor(df_meta).to_excel(writer, sheet_name="Factor_overlay", index=False)
         _sheet_factor_evolucion(df_meta).to_excel(writer, sheet_name="Factor_evolucion", index=False)
@@ -526,8 +615,8 @@ def main():
         _sheet_calendario_bday().to_excel(writer, sheet_name="Calendario_BDay", index=False)
 
     print(f"\n[OK] Excel generado: {ruta_out}")
-    print("     Sheets: Metodologia | Diagnostico | Factor_C1_C2 | Factor_overlay |")
-    print("             Factor_evolucion | Cuantiles_origen | Pre_vs_Post |")
+    print("     Sheets: Metodologia | Diagnostico | Resumen_Factores | Factor_C1_C2 |")
+    print("             Factor_overlay | Factor_evolucion | Cuantiles_origen | Pre_vs_Post |")
     print("             Pivot_Q05 | Pivot_Factor | Calendario_BDay")
 
 
