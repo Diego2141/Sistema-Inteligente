@@ -2627,10 +2627,10 @@ def _aplicar_overlay_sobreencaje(
 
             h_inicio = max(1, h_cierre - OVERLAY_VENTANA_DH + 1)
 
-            # Si la ventana entera cae fuera del horizonte de predicción (h_inicio > 75):
-            # extender el factor de C1 a h=[_last_h_cierre+1 .. 75], que es el
-            # mejor estimado disponible para el cierre futuro no visible aún.
-            if h_inicio > 75:
+            # Si el cierre cae fuera del horizonte de predicción (h_cierre > 75):
+            # aplicar el factor a h=75 solo infla el ratio por usar un único paso.
+            # Extender el factor de C1 a h=[_last_h_cierre+1..75] es mejor estimado.
+            if h_cierre > 75:
                 if _last_applied_f is not None and _last_h_cierre < 75:
                     h_ext_ini = _last_h_cierre + 1
                     mask_ext  = mask_origen & (h_arr >= h_ext_ini) & (h_arr <= 75)
