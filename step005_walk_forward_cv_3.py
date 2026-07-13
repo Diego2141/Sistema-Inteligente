@@ -2522,21 +2522,27 @@ def _aplicar_overlay_sobreencaje(
     """
     Aplica factor multiplicativo de sobreencaje sobre los cuantiles proyectados.
 
-    Lógica (T+2 desactivado; N=0):
+    Para cada fecha_t, itera sobre TODOS los cierres trimestrales dentro del horizonte
+    de proyección (hasta 75 DH). Cada cierre tiene su propio factor independiente
+    aplicado a su propia ventana de 7 DH. Los factores no se solapan.
 
-    FUERA de la ventana (fecha_t < inicio de los últimos 7 DH del trimestre):
-      - mask_ventana = h_inicio..h_cierre  (los 7 DH completos de la ventana)
-      - peor_usado   = peor_total           (ningún retiro conocido aún)
-      - f = peor_total / |Q[TAU]_acum_7días|
+    Por cierre fecha_cierre_k:
 
-    DENTRO de la ventana (fecha_t >= inicio de los últimos 7 DH del trimestre):
-      - mask_ventana = h=1..h_cierre        (solo días futuros restantes)
-      - retiro_pasado = sum de flujos negativos realizados en la ventana hasta fecha_t
-      - peor_usado   = max(0, peor_total − retiro_pasado)
-      - f = peor_usado / |Q[TAU]_acum_restante|
+    FUERA de la ventana (fecha_t < inicio de los últimos 7 DH del trimestre k):
+      - mask_ventana = h_inicio_k..h_cierre_k  (7 DH completos de la ventana k)
+      - peor_usado   = peor_total               (ningún retiro conocido aún)
+      - f = peor_total / |Q[TAU]_acum_7días_k|
+
+    DENTRO de la ventana (fecha_t >= inicio de los últimos 7 DH del trimestre k):
+      - mask_ventana = h=1..h_cierre_k          (días futuros restantes)
+      - flujo_neto   = suma neta de flujos realizados en la ventana hasta fecha_t
+                       (positivo=depósito aumenta peor_restante; negativo=retiro lo reduce)
+      - peor_usado   = max(0, peor_total + flujo_neto)
+      - f = peor_usado / |Q[TAU]_acum_restante_k|
       → numerador y denominador se reducen al mismo ritmo → f estable
 
-    El factor se aplica únicamente a mask_ventana (no a horizontes post-cierre).
+    peor_total se lee del Excel como el valor más reciente disponible a fecha_t.
+    Si Q4 aún no tiene entrada propia, hereda el último disponible (Q3).
     """
     if not OVERLAY_SOBREENCAJE:
         return preds
@@ -2556,9 +2562,7 @@ def _aplicar_overlay_sobreencaje(
         return preds
 
     preds_adj = {tau: arr.copy() for tau, arr in preds.items()}
-    meta_rows = []   # metadatos del factor por fecha_t (para exportar)
-    # T+2 desactivado por el momento: no asumimos conocimiento anticipado de retiros
-    N = 0  # OVERLAY_CONOCIMIENTO_ANTICIPADO ignorado hasta nueva indicación
+    meta_rows = []   # metadatos del factor por (fecha_t, cierre_fecha)
 
     # Conjunto de feriados PER+USA para lookup O(1)
     _feriados_set = set(pd.DatetimeIndex(_FERIADOS_PEUSA).normalize())
@@ -2568,27 +2572,29 @@ def _aplicar_overlay_sobreencaje(
         if pd.Timestamp(fecha_t).normalize() in _feriados_set:
             continue
 
+        # Leer peor_total una vez por fecha_t (valor más reciente disponible en el Excel).
+        # Si Q4 aún no tiene entrada propia, hereda el último valor disponible (Q3),
+        # que es el comportamiento correcto: "comenzar siendo el estimado del trimestre anterior".
         disponibles = df_aj.index[df_aj.index <= fecha_t]
         if len(disponibles) == 0:
             continue
-        peor_total = float(df_aj.loc[disponibles[-1], "peor_total"])
-        if peor_total <= 0:
+        peor_total_base = float(df_aj.loc[disponibles[-1], "peor_total"])
+        if peor_total_base <= 0:
             continue
 
-        # Si fecha_t es el propio cierre trimestral (último día hábil del trimestre),
-        # el horizonte de ese trimestre ya venció → no hay overlay.
-        # Se detecta comprobando que el siguiente día hábil ya pertenece a otro mes.
+        # Log informativo si fecha_t es el propio cierre trimestral.
+        # La ventana de ESE trimestre ya venció (bh empieza en fecha_t+1BDay),
+        # pero los trimestres futuros (Q4, Q1…) sí se procesan en el inner loop.
         if fecha_t.month in [3, 6, 9, 12]:
             _prox_bday = fecha_t + BDAY_PE
             if _prox_bday.month != fecha_t.month:
-                # fecha_t ES el cierre trimestral: la ventana ya venció, no hay
-                # predicciones futuras en el trimestre → sin overlay.
                 logger.info(
                     f"[OVERLAY] {fecha_t.date()} — DIA CIERRE TRIMESTRAL "
-                    f"(prox BDay={_prox_bday.date()}): ventana cerrada, sin ajuste"
+                    f"(prox BDay={_prox_bday.date()}): ventana Q{fecha_t.quarter} cerrada, "
+                    f"procesando trimestres futuros"
                 )
-                continue
 
+        # Horizonte de días hábiles proyectados (h=1..75 desde fecha_t+1BDay)
         bh = pd.bdate_range(
             start=fecha_t + BDAY_PE,
             periods=OVERLAY_VENTANA_DH + 75,
@@ -2596,6 +2602,8 @@ def _aplicar_overlay_sobreencaje(
         )
         bh_list = list(bh)
         df_bh = pd.DataFrame({"fecha": bh, "mes": bh.month, "anio": bh.year, "trim": bh.quarter})
+
+        # Todos los cierres trimestrales dentro del rango de proyección
         cierres_proy = (
             df_bh[df_bh["mes"].isin([3, 6, 9, 12])]
             .groupby(["anio", "trim"])["fecha"].max()
@@ -2604,145 +2612,132 @@ def _aplicar_overlay_sobreencaje(
         if not cierres_proy:
             continue
 
-        # Primer cierre trimestral proyectado (el más cercano)
-        fecha_cierre = None
-        h_cierre = None
-        for _cand in cierres_proy:
-            try:
-                _h = bh_list.index(_cand) + 1
-            except ValueError:
-                _diffs = [abs((d - _cand).days) for d in bh_list]
-                _h = _diffs.index(min(_diffs)) + 1
-            fecha_cierre = _cand
-            h_cierre = _h
-            break  # siempre el más cercano; no saltar al siguiente trimestre
-
-        if fecha_cierre is None:
-            continue
-
         mask_origen = (fechas_t == fecha_t)
-        h_inicio = max(1, h_cierre - OVERLAY_VENTANA_DH + 1)
 
-        fecha_inicio_ventana_real = fecha_cierre - (OVERLAY_VENTANA_DH - 1) * BDAY_PE
-        dentro_ventana = (pd.Timestamp(fecha_t) >= fecha_inicio_ventana_real)
+        # ── Procesar CADA cierre trimestral de forma independiente ────────────
+        # Cada cierre tiene su propia ventana de 7 DH, su propio factor f, y
+        # su propia fila en meta_rows. Los factores no se solapan porque cada
+        # horizonte h pertenece a exactamente un cierre trimestral.
+        for fecha_cierre in cierres_proy:
 
-        # ── mask_ventana y n_inciertos ────────────────────────────────────────
-        # Fuera de la ventana: todos los DH de la ventana son inciertos → h_inicio..h_cierre
-        # Dentro de la ventana: solo los días futuros restantes         → h=1..h_cierre
-        # (sin T+2: no se excluye ningún h por conocimiento anticipado)
-        h_inicio_mask = 1 if dentro_ventana else h_inicio
-        mask_ventana  = mask_origen & (h_arr >= h_inicio_mask) & (h_arr <= h_cierre)
-        n_inciertos   = max(1, h_cierre - h_inicio_mask + 1)
+            # h correspondiente a este cierre en el vector de proyección
+            try:
+                h_cierre = bh_list.index(fecha_cierre) + 1
+            except ValueError:
+                _diffs = [abs((d - fecha_cierre).days) for d in bh_list]
+                h_cierre = _diffs.index(min(_diffs)) + 1
 
-        if not mask_ventana.any():
-            h_disponibles = h_arr[mask_origen & (h_arr <= h_cierre)]
-            if len(h_disponibles) == 0:
+            # peor_total para este cierre: en el futuro se puede diferenciar por
+            # trimestre si el Excel tiene columnas adicionales (ej. peor_q3, peor_q4).
+            # Por ahora se usa el valor base leído al inicio del loop fecha_t.
+            peor_total = peor_total_base
+
+            h_inicio = max(1, h_cierre - OVERLAY_VENTANA_DH + 1)
+
+            fecha_inicio_ventana_real = fecha_cierre - (OVERLAY_VENTANA_DH - 1) * BDAY_PE
+            dentro_ventana = (pd.Timestamp(fecha_t) >= fecha_inicio_ventana_real)
+
+            # mask_ventana y n_inciertos para ESTE cierre
+            h_inicio_mask = 1 if dentro_ventana else h_inicio
+            mask_ventana  = mask_origen & (h_arr >= h_inicio_mask) & (h_arr <= h_cierre)
+            n_inciertos   = max(1, h_cierre - h_inicio_mask + 1)
+
+            if not mask_ventana.any():
+                h_disponibles = h_arr[mask_origen & (h_arr <= h_cierre)]
+                if len(h_disponibles) == 0:
+                    continue
+                h_fb = h_disponibles[np.abs(h_disponibles - h_cierre).argmin()]
+                mask_ventana = mask_origen & (h_arr == h_fb)
+                n_inciertos  = 1
+
+            # ── Netting: flujo neto realizado en la ventana de ESTE cierre ────
+            # Solo aplica cuando fecha_t está dentro de la ventana de 7 DH.
+            # Flujos positivos (depósitos) AUMENTAN peor_restante: la contraparte
+            # puede retirar más en los días restantes para compensar.
+            # La matriz tiene h_min=2: target en (fecha_t=T, h=2) = flujo en T+2BDay.
+            retiro_pasado = 0.0
+            if dentro_ventana and df_hist is not None:
+                _H_MIN = 2
+                for _d in pd.bdate_range(start=fecha_inicio_ventana_real,
+                                          end=min(fecha_t, fecha_cierre),
+                                          freq=BDAY_PE):
+                    _d_lookback = _d - _H_MIN * BDAY_PE
+                    _rows = df_hist[
+                        (df_hist["fecha_t"] == _d_lookback) & (df_hist["h"] == _H_MIN)
+                    ]
+                    if not _rows.empty:
+                        retiro_pasado += float(_rows["target"].values[0])
+
+            peor_usado = (
+                max(0.0, peor_total + retiro_pasado) if dentro_ventana else peor_total
+            )
+            if peor_usado < 1e-6:
+                meta_rows.append({
+                    "fecha_t": fecha_t, "cierre_fecha": fecha_cierre,
+                    "h_cierre": h_cierre, "n_inciertos": n_inciertos,
+                    "peor_total": peor_total, "retiro_conocido": retiro_pasado,
+                    "retiro_pasado": retiro_pasado, "retiro_t2": 0.0,
+                    "peor_restante": 0.0,
+                    "q_tau_acum": 0.0, "factor_f": 1.0, "overlay_activo": False,
+                    "razon_no_activo": "peor_consumido",
+                })
                 continue
-            h_fb = h_disponibles[np.abs(h_disponibles - h_cierre).argmin()]
-            mask_ventana = mask_origen & (h_arr == h_fb)
-            n_inciertos  = 1
 
-        # ── Netting (solo dentro de la ventana) ──────────────────────────────
-        # Fuera: peor_usado = peor_total (ningún retiro conocido aún).
-        # Dentro: peor_usado = max(0, peor_total + flujo_neto_realizado) donde
-        #         flujo_neto_realizado = suma NETA (con signo) de los flujos
-        #         realizados en la ventana hasta fecha_t.
-        #         - Flujo negativo (retiro): reduce el peor_restante.
-        #         - Flujo positivo (depósito): aumenta el peor_restante, porque
-        #           la contraparte podría retirar más en los días restantes para
-        #           compensar los depósitos ya realizados.
-        # Fórmula: peor_restante = max(0, peor_total + sum(flujos realizados))
-        # La matriz tiene h_min=2: el target en (fecha_t=T, h=2) es el flujo real
-        # en T+2BDays → usamos _d_lookback = _d - 2*BDAY_PE, h=2.
-        retiro_pasado = 0.0  # suma neta con signo: positivo=depósito, negativo=retiro
-        if dentro_ventana and df_hist is not None:
-            _H_MIN = 2
-            for _d in pd.bdate_range(start=fecha_inicio_ventana_real,
-                                      end=min(fecha_t, fecha_cierre),
-                                      freq=BDAY_PE):
-                _d_lookback = _d - _H_MIN * BDAY_PE
-                _rows = df_hist[
-                    (df_hist["fecha_t"] == _d_lookback) & (df_hist["h"] == _H_MIN)
-                ]
-                if not _rows.empty:
-                    retiro_pasado += float(_rows["target"].values[0])
+            q01_acum = float(preds[OVERLAY_TAU_REFERENCIA][mask_ventana].sum())
+            if q01_acum >= 0 or abs(q01_acum) < 1e-6:
+                meta_rows.append({
+                    "fecha_t": fecha_t, "cierre_fecha": fecha_cierre,
+                    "h_cierre": h_cierre, "n_inciertos": n_inciertos,
+                    "peor_total": peor_total, "retiro_conocido": retiro_pasado,
+                    "retiro_pasado": retiro_pasado, "retiro_t2": 0.0,
+                    "peor_restante": peor_usado,
+                    "q_tau_acum": q01_acum, "factor_f": 1.0, "overlay_activo": False,
+                    "razon_no_activo": "q_tau>=0_o_nulo",
+                })
+                if dentro_ventana:
+                    logger.info(
+                        f"[OVERLAY] {fecha_t.date()} [IN] | cierre: {fecha_cierre.date()} "
+                        f"h=[{h_inicio_mask},{h_cierre}] n_inc={n_inciertos} | "
+                        f"Q{int(OVERLAY_TAU_REFERENCIA*100):02d}_acum={q01_acum:+.0f} >= 0 "
+                        f"— modelo predice flujo positivo, f=1.0 (sin ajuste multiplicativo)"
+                    )
+                continue
 
-        peor_usado = (
-            max(0.0, peor_total + retiro_pasado) if dentro_ventana else peor_total
-        )
-        if peor_usado < 1e-6:
-            meta_rows.append({
-                "fecha_t": fecha_t, "cierre_fecha": fecha_cierre,
-                "h_cierre": h_cierre, "n_inciertos": n_inciertos,
-                "peor_total": peor_total, "retiro_conocido": retiro_pasado,
-                "retiro_pasado": retiro_pasado, "retiro_t2": 0.0,
-                "peor_restante": 0.0,
-                "q_tau_acum": 0.0, "factor_f": 1.0, "overlay_activo": False,
-                "razon_no_activo": "peor_consumido",
-            })
-            continue
+            # f = peor_usado / |Q05_acum| — misma lógica IN/OUT para cada cierre
+            f = peor_usado / abs(q01_acum)
+            if f <= 1.0:
+                meta_rows.append({
+                    "fecha_t": fecha_t, "cierre_fecha": fecha_cierre,
+                    "h_cierre": h_cierre, "n_inciertos": n_inciertos,
+                    "peor_total": peor_total, "retiro_conocido": retiro_pasado,
+                    "retiro_pasado": retiro_pasado, "retiro_t2": 0.0,
+                    "peor_restante": peor_usado,
+                    "q_tau_acum": q01_acum, "factor_f": f, "overlay_activo": False,
+                    "razon_no_activo": "f<=1",
+                })
+                continue
 
-        q01_acum = float(preds[OVERLAY_TAU_REFERENCIA][mask_ventana].sum())
-        if q01_acum >= 0 or abs(q01_acum) < 1e-6:
+            for tau in preds_adj:
+                preds_adj[tau][mask_ventana] *= f
+
             meta_rows.append({
                 "fecha_t": fecha_t, "cierre_fecha": fecha_cierre,
                 "h_cierre": h_cierre, "n_inciertos": n_inciertos,
                 "peor_total": peor_total, "retiro_conocido": retiro_pasado,
                 "retiro_pasado": retiro_pasado, "retiro_t2": 0.0,
                 "peor_restante": peor_usado,
-                "q_tau_acum": q01_acum, "factor_f": 1.0, "overlay_activo": False,
-                "razon_no_activo": "q_tau>=0_o_nulo",
+                "q_tau_acum": q01_acum, "factor_f": f, "overlay_activo": True,
+                "razon_no_activo": "",
             })
-            # Dentro de la ventana: Q05 >= 0 implica que el modelo no predice retiros
-            # netos para los días restantes. El overlay multiplicativo no puede
-            # estresar valores positivos → se registra pero sin ajuste.
-            if dentro_ventana:
-                _zona = "IN"
-                logger.info(
-                    f"[OVERLAY] {fecha_t.date()} [{_zona}] | cierre: {fecha_cierre.date()} "
-                    f"h=[{h_inicio_mask},{h_cierre}] n_inc={n_inciertos} | "
-                    f"Q{int(OVERLAY_TAU_REFERENCIA*100):02d}_acum={q01_acum:+.0f} >= 0 "
-                    f"— modelo predice flujo positivo, f=1.0 (sin ajuste multiplicativo)"
-                )
-            continue
 
-        # Fuera de la ventana: f = peor_total / |Q05_acum_7días|
-        # Dentro de la ventana: f = peor_restante / |Q05_acum_restante|
-        # En ambos casos peor_usado y Q05_acum cubren el mismo conjunto de días.
-        f = peor_usado / abs(q01_acum)
-        if f <= 1.0:
-            meta_rows.append({
-                "fecha_t": fecha_t, "cierre_fecha": fecha_cierre,
-                "h_cierre": h_cierre, "n_inciertos": n_inciertos,
-                "peor_total": peor_total, "retiro_conocido": retiro_pasado,
-                "retiro_pasado": retiro_pasado, "retiro_t2": 0.0,
-                "peor_restante": peor_usado,
-                "q_tau_acum": q01_acum, "factor_f": f, "overlay_activo": False,
-                "razon_no_activo": "f<=1",
-            })
-            continue
-
-        for tau in preds_adj:
-            preds_adj[tau][mask_ventana] *= f
-
-        meta_rows.append({
-            "fecha_t": fecha_t, "cierre_fecha": fecha_cierre,
-            "h_cierre": h_cierre, "n_inciertos": n_inciertos,
-            "peor_total": peor_total, "retiro_conocido": retiro_pasado,
-            "retiro_pasado": retiro_pasado, "retiro_t2": 0.0,
-            "peor_restante": peor_usado,
-            "q_tau_acum": q01_acum, "factor_f": f, "overlay_activo": True,
-            "razon_no_activo": "",
-        })
-
-        _zona = "IN" if dentro_ventana else "OUT"
-        logger.info(
-            f"[OVERLAY] {fecha_t.date()} [{_zona}] | cierre: {fecha_cierre.date()} "
-            f"h=[{h_inicio_mask},{h_cierre}] n_inc={n_inciertos} | "
-            f"Q{int(OVERLAY_TAU_REFERENCIA*100):02d}_acum={q01_acum:+.0f} | "
-            f"peor={peor_total:,.0f} | flujo_neto={retiro_pasado:+,.0f} | "
-            f"peor_restante={peor_usado:,.0f} | f={f:.3f}"
-        )
+            _zona = "IN" if dentro_ventana else "OUT"
+            logger.info(
+                f"[OVERLAY] {fecha_t.date()} [{_zona}] | cierre: {fecha_cierre.date()} "
+                f"h=[{h_inicio_mask},{h_cierre}] n_inc={n_inciertos} | "
+                f"Q{int(OVERLAY_TAU_REFERENCIA*100):02d}_acum={q01_acum:+.0f} | "
+                f"peor={peor_total:,.0f} | flujo_neto={retiro_pasado:+,.0f} | "
+                f"peor_restante={peor_usado:,.0f} | f={f:.3f}"
+            )
 
     return preds_adj, meta_rows
 
