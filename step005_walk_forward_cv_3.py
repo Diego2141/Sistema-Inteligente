@@ -2581,7 +2581,13 @@ def _aplicar_overlay_sobreencaje(
         if fecha_t.month in [3, 6, 9, 12]:
             _prox_bday = fecha_t + BDAY_PE
             if _prox_bday.month != fecha_t.month:
-                continue  # fecha_t == cierre trimestral → sin overlay
+                # fecha_t ES el cierre trimestral: la ventana ya venció, no hay
+                # predicciones futuras en el trimestre → sin overlay.
+                logger.info(
+                    f"[OVERLAY] {fecha_t.date()} — DIA CIERRE TRIMESTRAL "
+                    f"(prox BDay={_prox_bday.date()}): ventana cerrada, sin ajuste"
+                )
+                continue
 
         bh = pd.bdate_range(
             start=fecha_t + BDAY_PE,
@@ -2682,6 +2688,17 @@ def _aplicar_overlay_sobreencaje(
                 "q_tau_acum": q01_acum, "factor_f": 1.0, "overlay_activo": False,
                 "razon_no_activo": "q_tau>=0_o_nulo",
             })
+            # Dentro de la ventana: Q05 >= 0 implica que el modelo no predice retiros
+            # netos para los días restantes. El overlay multiplicativo no puede
+            # estresar valores positivos → se registra pero sin ajuste.
+            if dentro_ventana:
+                _zona = "IN"
+                logger.info(
+                    f"[OVERLAY] {fecha_t.date()} [{_zona}] | cierre: {fecha_cierre.date()} "
+                    f"h=[{h_inicio_mask},{h_cierre}] n_inc={n_inciertos} | "
+                    f"Q{int(OVERLAY_TAU_REFERENCIA*100):02d}_acum={q01_acum:+.0f} >= 0 "
+                    f"— modelo predice flujo positivo, f=1.0 (sin ajuste multiplicativo)"
+                )
             continue
 
         # Fuera de la ventana: f = peor_total / |Q05_acum_7días|
