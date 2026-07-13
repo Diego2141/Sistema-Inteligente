@@ -2572,14 +2572,8 @@ def _aplicar_overlay_sobreencaje(
         if pd.Timestamp(fecha_t).normalize() in _feriados_set:
             continue
 
-        # Leer peor_total una vez por fecha_t (valor más reciente disponible en el Excel).
-        # Si Q4 aún no tiene entrada propia, hereda el último valor disponible (Q3),
-        # que es el comportamiento correcto: "comenzar siendo el estimado del trimestre anterior".
-        disponibles = df_aj.index[df_aj.index <= fecha_t]
-        if len(disponibles) == 0:
-            continue
-        peor_total_base = float(df_aj.loc[disponibles[-1], "peor_total"])
-        if peor_total_base <= 0:
+        # Guard rápido: si no hay ninguna fila del Excel antes de fecha_t, saltar.
+        if not (df_aj.index <= fecha_t).any():
             continue
 
         # Log informativo si fecha_t es el propio cierre trimestral.
@@ -2627,12 +2621,30 @@ def _aplicar_overlay_sobreencaje(
                 _diffs = [abs((d - fecha_cierre).days) for d in bh_list]
                 h_cierre = _diffs.index(min(_diffs)) + 1
 
-            # peor_total para este cierre: en el futuro se puede diferenciar por
-            # trimestre si el Excel tiene columnas adicionales (ej. peor_q3, peor_q4).
-            # Por ahora se usa el valor base leído al inicio del loop fecha_t.
-            peor_total = peor_total_base
-
             h_inicio = max(1, h_cierre - OVERLAY_VENTANA_DH + 1)
+
+            # Si la ventana entera cae fuera del horizonte de predicción (h > 75),
+            # no hay cuantiles disponibles → saltar este cierre.
+            if h_inicio > 75:
+                continue
+
+            # peor_total específico para el tipo de trimestre de este cierre.
+            # Filtra el Excel por el mismo mes de cierre (3=Mar, 6=Jun, 9=Sep, 12=Dic)
+            # y toma el valor más reciente ≤ fecha_t.
+            # Si no hay histórico del mismo trimestre, cae al último disponible
+            # (que corresponde al cierre anterior: el comportamiento "heredar Q3 para Q4").
+            _mes_cierre = pd.Timestamp(fecha_cierre).month
+            _disp_q = df_aj.index[
+                (df_aj.index.month == _mes_cierre) & (df_aj.index <= fecha_t)
+            ]
+            if len(_disp_q) > 0:
+                peor_total = float(df_aj.loc[_disp_q[-1], "peor_total"])
+            else:
+                # Sin histórico del mismo mes de cierre: heredar el más reciente global
+                _disp_g = df_aj.index[df_aj.index <= fecha_t]
+                peor_total = float(df_aj.loc[_disp_g[-1], "peor_total"])
+            if peor_total <= 0:
+                continue
 
             fecha_inicio_ventana_real = fecha_cierre - (OVERLAY_VENTANA_DH - 1) * BDAY_PE
             dentro_ventana = (pd.Timestamp(fecha_t) >= fecha_inicio_ventana_real)
