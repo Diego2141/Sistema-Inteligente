@@ -2609,9 +2609,13 @@ def _aplicar_overlay_sobreencaje(
         mask_origen = (fechas_t == fecha_t)
 
         # ── Procesar CADA cierre trimestral de forma independiente ────────────
-        # Cada cierre tiene su propia ventana de 7 DH, su propio factor f, y
-        # su propia fila en meta_rows. Los factores no se solapan porque cada
-        # horizonte h pertenece a exactamente un cierre trimestral.
+        # Tracking para extensión cuando C2 queda fuera del horizonte h=75:
+        # si la ventana de C2 está en h>75, se extiende el factor de C1 al
+        # resto del horizonte [h_cierre_C1+1 .. 75] como mejor estimado.
+        _last_applied_f  = None   # factor activo del último cierre procesado
+        _last_h_cierre   = 0      # h_cierre del último cierre procesado
+        _last_peor_total = 0.0
+
         for fecha_cierre in cierres_proy:
 
             # h correspondiente a este cierre en el vector de proyección
@@ -2623,16 +2627,37 @@ def _aplicar_overlay_sobreencaje(
 
             h_inicio = max(1, h_cierre - OVERLAY_VENTANA_DH + 1)
 
-            # Si la ventana entera cae fuera del horizonte de predicción (h > 75),
-            # no hay cuantiles disponibles → saltar este cierre.
+            # Si la ventana entera cae fuera del horizonte de predicción (h_inicio > 75):
+            # extender el factor de C1 a h=[_last_h_cierre+1 .. 75], que es el
+            # mejor estimado disponible para el cierre futuro no visible aún.
             if h_inicio > 75:
+                if _last_applied_f is not None and _last_h_cierre < 75:
+                    h_ext_ini = _last_h_cierre + 1
+                    mask_ext  = mask_origen & (h_arr >= h_ext_ini) & (h_arr <= 75)
+                    if mask_ext.any():
+                        for tau in preds_adj:
+                            preds_adj[tau][mask_ext] *= _last_applied_f
+                        n_ext = int(mask_ext.sum())
+                        meta_rows.append({
+                            "fecha_t": fecha_t, "cierre_fecha": fecha_cierre,
+                            "h_cierre": h_cierre, "n_inciertos": n_ext,
+                            "peor_total": _last_peor_total,
+                            "retiro_conocido": 0.0, "retiro_pasado": 0.0,
+                            "retiro_t2": 0.0, "peor_restante": _last_peor_total,
+                            "q_tau_acum": np.nan, "factor_f": _last_applied_f,
+                            "overlay_activo": True, "razon_no_activo": "ext_f_c1",
+                        })
+                        logger.info(
+                            f"[OVERLAY] {fecha_t.date()} [EXT] | cierre: {fecha_cierre.date()} "
+                            f"(ventana h=[{h_inicio},{h_cierre}] fuera de h=75) | "
+                            f"extendiendo f_C1={_last_applied_f:.3f} a h=[{h_ext_ini},75]"
+                        )
                 continue
 
             # peor_total específico para el tipo de trimestre de este cierre.
             # Filtra el Excel por el mismo mes de cierre (3=Mar, 6=Jun, 9=Sep, 12=Dic)
             # y toma el valor más reciente ≤ fecha_t.
-            # Si no hay histórico del mismo trimestre, cae al último disponible
-            # (que corresponde al cierre anterior: el comportamiento "heredar Q3 para Q4").
+            # Si no hay histórico del mismo trimestre, hereda el último disponible.
             _mes_cierre = pd.Timestamp(fecha_cierre).month
             _disp_q = df_aj.index[
                 (df_aj.index.month == _mes_cierre) & (df_aj.index <= fecha_t)
@@ -2640,10 +2665,10 @@ def _aplicar_overlay_sobreencaje(
             if len(_disp_q) > 0:
                 peor_total = float(df_aj.loc[_disp_q[-1], "peor_total"])
             else:
-                # Sin histórico del mismo mes de cierre: heredar el más reciente global
                 _disp_g = df_aj.index[df_aj.index <= fecha_t]
                 peor_total = float(df_aj.loc[_disp_g[-1], "peor_total"])
             if peor_total <= 0:
+                _last_h_cierre = h_cierre
                 continue
 
             fecha_inicio_ventana_real = fecha_cierre - (OVERLAY_VENTANA_DH - 1) * BDAY_PE
@@ -2657,16 +2682,13 @@ def _aplicar_overlay_sobreencaje(
             if not mask_ventana.any():
                 h_disponibles = h_arr[mask_origen & (h_arr <= h_cierre)]
                 if len(h_disponibles) == 0:
+                    _last_h_cierre = h_cierre
                     continue
                 h_fb = h_disponibles[np.abs(h_disponibles - h_cierre).argmin()]
                 mask_ventana = mask_origen & (h_arr == h_fb)
                 n_inciertos  = 1
 
             # ── Netting: flujo neto realizado en la ventana de ESTE cierre ────
-            # Solo aplica cuando fecha_t está dentro de la ventana de 7 DH.
-            # Flujos positivos (depósitos) AUMENTAN peor_restante: la contraparte
-            # puede retirar más en los días restantes para compensar.
-            # La matriz tiene h_min=2: target en (fecha_t=T, h=2) = flujo en T+2BDay.
             retiro_pasado = 0.0
             if dentro_ventana and df_hist is not None:
                 _H_MIN = 2
@@ -2693,6 +2715,7 @@ def _aplicar_overlay_sobreencaje(
                     "q_tau_acum": 0.0, "factor_f": 1.0, "overlay_activo": False,
                     "razon_no_activo": "peor_consumido",
                 })
+                _last_h_cierre = h_cierre
                 continue
 
             q01_acum = float(preds[OVERLAY_TAU_REFERENCIA][mask_ventana].sum())
@@ -2713,6 +2736,7 @@ def _aplicar_overlay_sobreencaje(
                         f"Q{int(OVERLAY_TAU_REFERENCIA*100):02d}_acum={q01_acum:+.0f} >= 0 "
                         f"— modelo predice flujo positivo, f=1.0 (sin ajuste multiplicativo)"
                     )
+                _last_h_cierre = h_cierre
                 continue
 
             # f = peor_usado / |Q05_acum| — misma lógica IN/OUT para cada cierre
@@ -2727,6 +2751,7 @@ def _aplicar_overlay_sobreencaje(
                     "q_tau_acum": q01_acum, "factor_f": f, "overlay_activo": False,
                     "razon_no_activo": "f<=1",
                 })
+                _last_h_cierre = h_cierre
                 continue
 
             for tau in preds_adj:
@@ -2750,6 +2775,11 @@ def _aplicar_overlay_sobreencaje(
                 f"peor={peor_total:,.0f} | flujo_neto={retiro_pasado:+,.0f} | "
                 f"peor_restante={peor_usado:,.0f} | f={f:.3f}"
             )
+
+            # Actualizar tracking para extensión a C2 si queda fuera de h=75
+            _last_applied_f  = f
+            _last_h_cierre   = h_cierre
+            _last_peor_total = peor_total
 
     return preds_adj, meta_rows
 
