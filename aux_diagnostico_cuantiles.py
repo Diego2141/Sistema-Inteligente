@@ -15,11 +15,24 @@ trimestrales dentro del horizonte de proyección h=1..75:
   - Cierre C2: el siguiente (ej. Dic 31 si fecha_t es Sep 18) — puede no existir
                 si el cierre más cercano está suficientemente lejos.
 
-Cada cierre tiene su propia ventana de 7 DH, su propio factor f (IN/OUT), y
-una fila independiente en overlay_meta. Las ventanas no se solapan.
+Cada cierre tiene su propia máscara de h y su propio factor f (IN/OUT), con las
+siguientes reglas de rango:
+
+  IN  (fecha_t dentro de los últimos 7 DH del cierre):
+        h_inicio = 1, h_fin = h_cierre   → cubre todos los días restantes
+
+  OUT primer cierre (sin cierre anterior en el horizonte):
+        h_inicio = h_cierre − 6, h_fin = h_cierre   → ventana de 7 DH
+
+  OUT cierre posterior (C2 con C1 ya procesado, ambos en h≤75):
+        h_inicio = h_cierre_C1 + 1, h_fin = h_cierre_C2
+        Los flujos intermedios entre cierres también contribuyen a la
+        posición acumulada de Q2; el factor se calcula y aplica al rango
+        completo. n_inciertos refleja este rango extendido (puede ser >>7).
 
 Edge case: si h_cierre_C2 > 75, la ventana cae fuera del horizonte de predicción;
-el overlay aplica el factor solo a h=75 (fallback) — se reporta en Diagnostico.
+se extiende el factor de C1 a h=[h_cierre_C1+1..75] (zona EXT) — se reporta en
+Diagnostico.
 
 SHEETS
 ------
@@ -143,8 +156,8 @@ def _meta_por_cierre(df_meta: pd.DataFrame) -> pd.DataFrame:
     df = df_meta.copy()
     df["fecha_t"]      = pd.to_datetime(df["fecha_t"])
     df["cierre_fecha"] = pd.to_datetime(df["cierre_fecha"])
-    # h_inicio_mask: dentro=1, fuera=h_cierre-6 (approx OVERLAY_VENTANA_DH=7)
-    # Lo inferimos de n_inciertos y h_cierre si están disponibles
+    # h_inicio_mask = h_cierre - n_inciertos + 1 (derivado de lo que step005 guardó)
+    # IN→h_inicio=1; OUT primer cierre→h_inicio=h_cierre-6; OUT_ext C2→h_inicio=h_C1+1
     if "n_inciertos" in df.columns and "h_cierre" in df.columns:
         df["h_inicio_mask"] = df["h_cierre"] - df["n_inciertos"] + 1
     return df
@@ -189,6 +202,14 @@ def _sheet_diagnostico(df_meta: pd.DataFrame) -> pd.DataFrame:
         ("  Interpretación",
          "C2 con h_cierre>75: se extiende el factor de C1 a h=[h_cierre_C1+1..75] (zona EXT). "
          "Normal para fechas muy cercanas al cierre anterior."),
+        ("", ""),
+        ("CASO: OUT_ext (C2 dentro de h≤75 con C1 previo)",
+         str(int((df_meta.get("n_inciertos", pd.Series(dtype=float)) > 7).sum()
+                 - (df_meta.get("razon_no_activo", pd.Series(dtype=str)) == "ext_f_c1").sum()))
+         + " filas donde C2 cae dentro de h≤75 y su máscara OUT se extiende desde "
+           "h_cierre_C1+1 hasta h_cierre_C2 (zona OUT_ext). "
+           "Ocurre cuando fecha_t está a ≤10 DH del primer cierre. "
+           "El factor cubre el rango completo entre cierres; n_inciertos refleja el tamaño extendido."),
         ("", ""),
         ("EDGE CASE: h_cierre_lt_hmin",
          str((df_meta.get("razon_no_activo", pd.Series()) == "h_cierre_lt_hmin").sum())
@@ -437,15 +458,21 @@ def _sheet_resumen_factores(df_meta: pd.DataFrame) -> pd.DataFrame:
     df["rank"] = df.groupby("fecha_t").cumcount() + 1   # 1=C1, 2=C2
 
     def _zona(row):
-        """Inferir IN / OUT / EXT desde n_inciertos y razon_no_activo."""
+        """Inferir IN / OUT / OUT_ext / EXT desde n_inciertos y razon_no_activo."""
         razon = str(row.get("razon_no_activo", ""))
         if razon == "ext_f_c1":
             return "EXT"
         n   = row.get("n_inciertos", 7)
         h_c = row.get("h_cierre", 0)
-        # si n_inciertos == h_cierre la ventana empieza en h=1 → estamos DENTRO
-        if pd.notna(n) and pd.notna(h_c) and int(n) == int(h_c):
-            return "IN"
+        if pd.notna(n) and pd.notna(h_c):
+            n, h_c = int(n), int(h_c)
+            # ventana empieza en h=1 → estamos DENTRO
+            if n == h_c:
+                return "IN"
+            # OUT primer cierre: ventana de exactamente 7 DH (o menos si h_cierre<7)
+            # OUT cierre posterior: n_inciertos >> 7 porque cubre desde h_C1+1 hasta h_C2
+            if n > 7:
+                return "OUT_ext"
         return "OUT"
 
     c1 = df[df["rank"] == 1].set_index("fecha_t")
