@@ -2674,8 +2674,15 @@ def _aplicar_overlay_sobreencaje(
             fecha_inicio_ventana_real = fecha_cierre - (OVERLAY_VENTANA_DH - 1) * BDAY_PE
             dentro_ventana = (pd.Timestamp(fecha_t) >= fecha_inicio_ventana_real)
 
-            # mask_ventana y n_inciertos para ESTE cierre
-            h_inicio_mask = 1 if dentro_ventana else h_inicio
+            # mask_ventana y n_inciertos para ESTE cierre.
+            # OUT con cierre previo procesado: cubrir desde h_cierre_C1+1 hasta h_cierre
+            # (los flujos intermedios entre cierres también contribuyen al Q2).
+            if dentro_ventana:
+                h_inicio_mask = 1
+            elif _last_h_cierre > 0:
+                h_inicio_mask = _last_h_cierre + 1
+            else:
+                h_inicio_mask = h_inicio  # primer cierre sin antecesor: ventana de 7 DH
             mask_ventana  = mask_origen & (h_arr >= h_inicio_mask) & (h_arr <= h_cierre)
             n_inciertos   = max(1, h_cierre - h_inicio_mask + 1)
 
