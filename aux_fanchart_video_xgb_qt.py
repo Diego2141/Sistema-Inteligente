@@ -657,8 +657,9 @@ def animar(frames, ylim1, ylim3, banco):
         f = frames[i]
         ax1.cla(); ax3.cla()
 
+        _hs = f["hs"]
         for ax, ylim in [(ax1, ylim1), (ax3, ylim3)]:
-            ax.set_xlim(hs.min() - 1, hs.max() + 1)
+            ax.set_xlim(_hs.min() - 1, _hs.max() + 1)
             ax.set_ylim(*ylim)
             ax.axhline(0, color="black", lw=0.7, ls="--", alpha=0.35)
             ax.grid(True, alpha=0.25)
@@ -668,45 +669,45 @@ def animar(frames, ylim1, ylim3, banco):
         ax3.set_xlabel("Horizonte h (días hábiles desde t)", fontsize=11)
 
         # ── Subplot diario ────────────────────────────────────────────────
-        ax1.fill_between(hs, f["q01"], f["q99"], alpha=0.12, color=COLOR)
-        ax1.fill_between(hs, f["q05"], f["q95"], alpha=0.28, color=COLOR)
-        ax1.plot(hs, f["q05"], color=COLOR, lw=1.0, ls=":", alpha=0.7)
-        ax1.plot(hs, f["q95"], color=COLOR, lw=1.0, ls=":", alpha=0.7)
+        ax1.fill_between(_hs, f["q01"], f["q99"], alpha=0.12, color=COLOR)
+        ax1.fill_between(_hs, f["q05"], f["q95"], alpha=0.28, color=COLOR)
+        ax1.plot(_hs, f["q05"], color=COLOR, lw=1.0, ls=":", alpha=0.7)
+        ax1.plot(_hs, f["q95"], color=COLOR, lw=1.0, ls=":", alpha=0.7)
         if has_mean and "mean" in f:
-            ax1.plot(hs, f["q50"], color="crimson", lw=1.5, ls="--", zorder=5, alpha=0.8)
-            ax1.plot(hs, f["mean"], color="darkred", lw=2.5, zorder=6)
+            ax1.plot(_hs, f["q50"], color="crimson", lw=1.5, ls="--", zorder=5, alpha=0.8)
+            ax1.plot(_hs, f["mean"], color="darkred", lw=2.5, zorder=6)
         else:
-            ax1.plot(hs, f["q50"], color="crimson", lw=2.0, zorder=5)
+            ax1.plot(_hs, f["q50"], color="crimson", lw=2.0, zorder=5)
         if has_s4 and "s4_q50" in f:
-            ax1.fill_between(hs, f["s4_q05"], f["s4_q95"],
+            ax1.fill_between(_hs, f["s4_q05"], f["s4_q95"],
                              alpha=0.10, color="darkorange")
-            ax1.plot(hs, f["s4_q50"], color="darkorange", lw=1.8,
+            ax1.plot(_hs, f["s4_q50"], color="darkorange", lw=1.8,
                      ls="--", zorder=4, alpha=0.85)
         if f["mask"].any():
-            ax1.plot(hs[f["mask"]], f["real"][f["mask"]], color="black", lw=2, zorder=7)
-            ax1.scatter(hs[f["mask"]], f["real"][f["mask"]], color="black", s=18, zorder=8)
+            ax1.plot(_hs[f["mask"]], f["real"][f["mask"]], color="black", lw=2, zorder=7)
+            ax1.scatter(_hs[f["mask"]], f["real"][f["mask"]], color="black", s=18, zorder=8)
         if f["h_max_r"] > 0:
             ax1.axvline(f["h_max_r"], color="red", lw=1.2, ls="--", alpha=0.7)
         ax1.legend(handles=legend_diario, loc="upper right", fontsize=9, framealpha=0.9)
 
         # ── Subplot acumulado ─────────────────────────────────────────────
-        ax3.fill_between(hs, f["cum_q01"], f["cum_q99"], alpha=0.12, color=COLOR)
-        ax3.fill_between(hs, f["cum_q05"], f["cum_q95"], alpha=0.28, color=COLOR)
-        ax3.plot(hs, f["cum_q05"], color=COLOR, lw=1.0, ls=":", alpha=0.7)
-        ax3.plot(hs, f["cum_q95"], color=COLOR, lw=1.0, ls=":", alpha=0.7)
+        ax3.fill_between(_hs, f["cum_q01"], f["cum_q99"], alpha=0.12, color=COLOR)
+        ax3.fill_between(_hs, f["cum_q05"], f["cum_q95"], alpha=0.28, color=COLOR)
+        ax3.plot(_hs, f["cum_q05"], color=COLOR, lw=1.0, ls=":", alpha=0.7)
+        ax3.plot(_hs, f["cum_q95"], color=COLOR, lw=1.0, ls=":", alpha=0.7)
         if has_mean and "cum_mean" in f:
-            ax3.plot(hs, f["cum_q50"], color="crimson", lw=1.5, ls="--", zorder=5, alpha=0.8)
-            ax3.plot(hs, f["cum_mean"], color="darkred", lw=2.5, zorder=6)
+            ax3.plot(_hs, f["cum_q50"], color="crimson", lw=1.5, ls="--", zorder=5, alpha=0.8)
+            ax3.plot(_hs, f["cum_mean"], color="darkred", lw=2.5, zorder=6)
         else:
-            ax3.plot(hs, f["cum_q50"], color="crimson", lw=2.0, zorder=5)
+            ax3.plot(_hs, f["cum_q50"], color="crimson", lw=2.0, zorder=5)
         if has_s4 and "s4_cum_q50" in f:
-            ax3.fill_between(hs, f["s4_cum_q05"], f["s4_cum_q95"],
+            ax3.fill_between(_hs, f["s4_cum_q05"], f["s4_cum_q95"],
                              alpha=0.10, color="darkorange")
-            ax3.plot(hs, f["s4_cum_q50"], color="darkorange", lw=1.8,
+            ax3.plot(_hs, f["s4_cum_q50"], color="darkorange", lw=1.8,
                      ls="--", zorder=4, alpha=0.85)
         if f["mask"].any():
-            ax3.plot(hs[f["mask"]], f["cum_r"][f["mask"]], color="black", lw=2, zorder=7)
-            ax3.scatter(hs[f["mask"]], f["cum_r"][f["mask"]], color="black", s=18, zorder=8)
+            ax3.plot(_hs[f["mask"]], f["cum_r"][f["mask"]], color="black", lw=2, zorder=7)
+            ax3.scatter(_hs[f["mask"]], f["cum_r"][f["mask"]], color="black", s=18, zorder=8)
         if f["h_max_r"] > 0:
             ax3.axvline(f["h_max_r"], color="red", lw=1.2, ls="--", alpha=0.7)
         ax3.legend(handles=legend_acum, loc="upper left", fontsize=9, framealpha=0.9)
