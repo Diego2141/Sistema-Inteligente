@@ -87,8 +87,9 @@ _fin_historico = (_hoy - pd.offsets.BDay(1)).strftime("%Y-%m-%d")
 FEATURES_EXCLUIR = [
     # ── Rojo: eliminar sin reemplazo ─────────────────────────────────────────
     "log_h",
-    "R_t0", "D_t0",
-    "R_t-1", "D_t-1", "R_t-2", "D_t-2", "R_t-3", "D_t-3",
+    # R_t0, D_t0, R_t-1, D_t-1 reincorporados: nivel absoluto de R/D en t y t-1
+    # son la señal autocorrelativa más directa para h cortos (2..15).
+    "R_t-2", "D_t-2", "R_t-3", "D_t-3",
     "R_t-5", "D_t-5", "R_t-22", "D_t-22",
     "sigma_R_5d", "sigma_D_5d", "ma_R_5d", "ma_D_5d",
     "sigma_R_22d", "sigma_D_22d", "ma_R_22d", "ma_D_22d",
@@ -99,6 +100,8 @@ FEATURES_EXCLUIR = [
     "EMBI_PERU_frac", "T10Y_frac", "VIX_frac",
     "dias_desde_cierre_mes", "pos_en_mes", "total_bdays_mes",
     "is_quincena", "is_cierre_encaje",
+    # Duplicado de es_post_feriado (int32, calendario PE+USA completo)
+    "is_post_feriado",
     # ── SADF: sin señal en episodios de stress (hit rate P95 < 5%) ───────────
     "sadf_vol_60d", "sadf_vol_120d", "sadf_vol_252d",
     # ── Azul: reemplazadas por transformación sin/cos o ratio ────────────────
