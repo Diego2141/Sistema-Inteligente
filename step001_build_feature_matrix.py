@@ -231,27 +231,61 @@ def build_peru_calendar(años, ruta_elecciones=None):
     """
     logger.info("PARTE 1: Construyendo calendario hábil peruano...")
 
+    # ── Base garantizada: AbstractHolidayCalendar con Easter hardcoded ──────────
+    # No depende de la librería 'holidays' para Jueves/Viernes Santo.
+    # Incluye todos los feriados fijos PE + US más los variables de Semana Santa.
+    from pandas.tseries.holiday import (
+        AbstractHolidayCalendar, Holiday, GoodFriday, USFederalHolidayCalendar,
+    )
+    from pandas.tseries.offsets import CustomBusinessDay, Day as _Day
+    from dateutil.relativedelta import Easter
+
+    _f0 = str(min(años)) + "-01-01"
+    _f1 = str(max(años)) + "-12-31"
+
+    class _PeruCalendar(AbstractHolidayCalendar):
+        rules = [
+            Holiday("AnioNuevo",   month=1,  day=1),
+            Holiday("JuevesSanto", month=1,  day=1, offset=[Easter(), _Day(-3)]),
+            GoodFriday,                              # Viernes Santo
+            Holiday("Trabajo",     month=5,  day=1),
+            Holiday("SanPedro",    month=6,  day=29),
+            Holiday("FiestasP1",   month=7,  day=28),
+            Holiday("FiestasP2",   month=7,  day=29),
+            Holiday("SantaRosa",   month=8,  day=30),
+            Holiday("Angamos",     month=10, day=8),
+            Holiday("TodosSantos", month=11, day=1),
+            Holiday("Inmaculada",  month=12, day=8),
+            Holiday("Nochebuena",  month=12, day=24),
+            Holiday("Navidad",     month=12, day=25),
+        ]
+
+    _hols_pe = set(_PeruCalendar().holidays(_f0, _f1).normalize())
+    _hols_us = set(USFederalHolidayCalendar().holidays(_f0, _f1).normalize())
+    _hols_base = _hols_pe | _hols_us
+
+    # ── Suplemento opcional: librería 'holidays' añade fechas adicionales ────────
+    # (p.e. feriados municipales, reemplazos por lunes, etc.)
+    # Si no está instalada se usa la base garantizada — Semana Santa siempre incluida.
     try:
-        import holidays
-        from pandas.tseries.offsets import CustomBusinessDay
-
-        peru_hols = holidays.Peru(years=años)
-        us_hols   = holidays.UnitedStates(years=años)
-
-        # Unión de feriados PE + US: un día no hábil si lo es en cualquiera de los dos países
-        joint_hols_keys = set(peru_hols.keys()) | set(us_hols.keys())
-        peru_holidays   = pd.to_datetime(sorted(joint_hols_keys))
-        peru_bday       = CustomBusinessDay(holidays=peru_holidays)
-
+        import holidays as _hlib
+        _sup_pe = set(pd.to_datetime(list(_hlib.Peru(years=años).keys())).normalize())
+        _sup_us = set(pd.to_datetime(list(_hlib.UnitedStates(years=años).keys())).normalize())
+        _hols_all = _hols_base | _sup_pe | _sup_us
         logger.info(
-            f"  Feriados cargados: {len(peru_hols)} PE + {len(us_hols)} US "
-            f"= {len(peru_holidays)} únicos en {min(años)}-{max(años)}"
+            f"  Feriados: {len(_hols_base)} base garantizada + "
+            f"{len(_hols_all) - len(_hols_base)} adicionales (librería 'holidays') "
+            f"= {len(_hols_all)} únicos en {min(años)}-{max(años)}"
         )
     except ImportError:
-        logger.warning("  Librería 'holidays' no instalada. Usando calendario sin feriados.")
-        from pandas.tseries.offsets import BDay
-        peru_bday = BDay()
-        peru_holidays = pd.DatetimeIndex([])
+        _hols_all = _hols_base
+        logger.warning(
+            f"  Librería 'holidays' no instalada — usando {len(_hols_base)} feriados "
+            f"base (PE+US fijos + Semana Santa). Instalar con: pip install holidays"
+        )
+
+    peru_holidays = pd.to_datetime(sorted(_hols_all))
+    peru_bday     = CustomBusinessDay(holidays=peru_holidays)
 
     # Elecciones presidenciales peruanas hardcodeadas 2000-2041
     # Fechas desde 2031 son estimadas (2do domingo de abril / 1er domingo de junio)
@@ -1847,6 +1881,22 @@ def build_feature_matrix(
 
     fechas_t = pd.DatetimeIndex(fechas_t)
 
+    # Eliminar feriados de fecha_t.
+    # El reindex de bancarios usa pd.bdate_range (Lun-Vie sin exclusión de feriados)
+    # para preservar los ceros de días festivos en los lags — correcto, el banco
+    # realmente tuvo 0 transacciones ese día. Pero esos días NO deben ser puntos
+    # de predicción: (a) target duplica al día hábil anterior porque peru_bday los
+    # salta al calcular fecha_th, y (b) todas sus features son cero o forward-fill.
+    if len(peru_holidays) > 0:
+        _n_antes = len(fechas_t)
+        fechas_t = fechas_t[~fechas_t.normalize().isin(peru_holidays.normalize())]
+        _n_feriados = _n_antes - len(fechas_t)
+        if _n_feriados:
+            logger.info(
+                f"    {banco}: {_n_feriados} fechas de feriados eliminadas de fecha_t "
+                f"({_n_antes} → {len(fechas_t)})"
+            )
+
     # ── 1. Grid (fecha_t × h) ────────────────────────────────────────────────
     hs = np.arange(h_min, h_max + 1)
     grid = pd.MultiIndex.from_product([fechas_t, hs], names=["fecha_t", "h"])
@@ -1869,10 +1919,29 @@ def build_feature_matrix(
     df["fecha_th"] = df.apply(get_th, axis=1)
     df = df.dropna(subset=["fecha_th"])
 
+    # ── 1b. Features de gap de calendario ───────────────────────────────────
+    # dias_desde_ultimo_habil: días calendarios desde el BDay anterior.
+    #   Lun normal = 3 | Lun post-Semana Santa = 5 | cualquier Mar-Vie = 1
+    # es_post_feriado: 1 si el gap es mayor a un fin de semana estándar (>3 días).
+    #   Señala al árbol que los flujos entrantes pueden incluir acumulación de feriados.
+    # Nota: al calcular sobre fechas_t ya filtradas de feriados, shift(1) apunta
+    # siempre al día hábil inmediato anterior, con el gap correcto.
+    _ft_sorted = fechas_t.sort_values()
+    _gap = pd.Series(
+        (_ft_sorted.to_series().diff().dt.days).fillna(1).astype(int).values,
+        index=_ft_sorted,
+        name="dias_desde_ultimo_habil",
+    )
+    _post_feriado = (_gap > 3).astype(int).rename("es_post_feriado")
+    _cal_gap_df = pd.DataFrame({"dias_desde_ultimo_habil": _gap,
+                                 "es_post_feriado": _post_feriado})
+
     # ── 2. Features bancarias (merge por fecha_t) ────────────────────────────
     bf = bank_features.get(banco, pd.DataFrame())
     if not bf.empty:
         df = df.merge(bf.add_prefix(""), left_on="fecha_t", right_index=True, how="left")
+
+    df = df.merge(_cal_gap_df, left_on="fecha_t", right_index=True, how="left")
 
     # ── 3. Datos bancarios → target ──────────────────────────────────────────
     tiene_bancarios = (
