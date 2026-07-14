@@ -235,10 +235,9 @@ def build_peru_calendar(años, ruta_elecciones=None):
     # No depende de la librería 'holidays' para Jueves/Viernes Santo.
     # Incluye todos los feriados fijos PE + US más los variables de Semana Santa.
     from pandas.tseries.holiday import (
-        AbstractHolidayCalendar, Holiday, GoodFriday, USFederalHolidayCalendar,
+        AbstractHolidayCalendar, Holiday, GoodFriday, USFederalHolidayCalendar, Easter,
     )
     from pandas.tseries.offsets import CustomBusinessDay, Day as _Day
-    from dateutil.relativedelta import Easter
 
     _f0 = str(min(años)) + "-01-01"
     _f1 = str(max(años)) + "-12-31"
