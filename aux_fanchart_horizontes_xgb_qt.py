@@ -23,6 +23,11 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
+from pandas.tseries.holiday import (
+    AbstractHolidayCalendar, Holiday, GoodFriday,
+    USFederalHolidayCalendar, Easter,
+)
+from pandas.tseries.offsets import CustomBusinessDay, Day as _Day
 
 # ── Rutas ─────────────────────────────────────────────────────────────────────
 BASE_SISTEMA      = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente")
@@ -31,6 +36,11 @@ DIR_OUTPUT        = BASE_SISTEMA / "2. Output" / "aux_fanchart_horizontes_xgb_qt
 DIR_OUTPUT.mkdir(parents=True, exist_ok=True)
 
 BANCO = "SISTEMA"
+
+# ── Exportación Excel ─────────────────────────────────────────────────────────
+EXPORTAR_EXCEL = True   # True = genera Excel al final del script; False = solo PNGs
+RUTA_EXCEL = (BASE_SISTEMA / "2. Output" / "aux_fanchart_horizontes_xgb_qt"
+              / "fanchart_datos.xlsx")
 
 # ── Parámetros del loop ───────────────────────────────────────────────────────
 PASO_FECHAS    = 2     # cada 2 días hábiles; usar 1 para todas las fechas
@@ -174,6 +184,180 @@ def graficar(resultado: pd.DataFrame, fecha_origen: pd.Timestamp, banco: str,
     print(f"  [{idx}/{total}] Guardado: {nombre}")
 
 
+# ── Exportación Excel ─────────────────────────────────────────────────────────
+
+def _build_bday() -> CustomBusinessDay:
+    """Calendario hábil PE+USA idéntico al de step001 (AbstractHolidayCalendar + Easter)."""
+    _f0, _f1 = "2009-01-01", "2042-12-31"
+
+    class _PeruCal(AbstractHolidayCalendar):
+        rules = [
+            Holiday("AnioNuevo",   month=1,  day=1),
+            Holiday("JuevesSanto", month=1,  day=1, offset=[Easter(), _Day(-3)]),
+            GoodFriday,
+            Holiday("Trabajo",     month=5,  day=1),
+            Holiday("SanPedro",    month=6,  day=29),
+            Holiday("FiestasP1",   month=7,  day=28),
+            Holiday("FiestasP2",   month=7,  day=29),
+            Holiday("SantaRosa",   month=8,  day=30),
+            Holiday("Angamos",     month=10, day=8),
+            Holiday("TodosSantos", month=11, day=1),
+            Holiday("Inmaculada",  month=12, day=8),
+            Holiday("Nochebuena",  month=12, day=24),
+            Holiday("Navidad",     month=12, day=25),
+        ]
+
+    hols = set(_PeruCal().holidays(_f0, _f1).normalize())
+    hols |= set(USFederalHolidayCalendar().holidays(_f0, _f1).normalize())
+    return CustomBusinessDay(holidays=sorted(hols))
+
+
+def _calc_fecha_th(df: pd.DataFrame, bday: CustomBusinessDay) -> pd.DataFrame:
+    """
+    Agrega columna fecha_th a df.
+    Para cada fecha_t única genera los h_max días hábiles futuros y los mapea
+    a cada fila por su valor de h.
+    """
+    h_max = int(df["h"].max())
+    th_map: dict = {}
+    for t in df["fecha_t"].unique():
+        ts = pd.Timestamp(t)
+        fechas = pd.date_range(start=ts + bday, periods=h_max, freq=bday)
+        th_map[ts] = {h + 1: fechas[h] for h in range(len(fechas))}
+
+    df = df.copy()
+    df["fecha_th"] = df.apply(
+        lambda r: th_map.get(r["fecha_t"], {}).get(r["h"], pd.NaT), axis=1
+    )
+    return df
+
+
+def _cargar_ambos_parquets(banco: str) -> dict:
+    """Carga base y overlay concatenando todos los archivos disponibles."""
+    result = {}
+    for tipo in ("base", "overlay"):
+        candidatos = sorted(DIR_PREDS_STEP005.glob(f"*/preds_{tipo}_{banco}_*.parquet"))
+        if not candidatos:
+            result[tipo] = None
+            continue
+        dfs = []
+        for ruta in candidatos:
+            try:
+                _df = pd.read_parquet(ruta)
+                _df["fecha_t"] = pd.to_datetime(_df["fecha_t"])
+                dfs.append(_df)
+            except Exception as e:
+                print(f"  [EXCEL/{tipo}] Error leyendo {ruta.name}: {e}")
+        if not dfs:
+            result[tipo] = None
+            continue
+        df = pd.concat(dfs, ignore_index=True) if len(dfs) > 1 else dfs[0]
+        key_cols = [c for c in ["fecha_t", "h", "banco", "fold"] if c in df.columns]
+        df = (df.drop_duplicates(subset=key_cols, keep="last")
+                .sort_values(["fecha_t", "h"])
+                .reset_index(drop=True))
+        result[tipo] = df
+        print(f"  [EXCEL/{tipo}] {len(candidatos)} archivo(s) | "
+              f"{len(df):,} filas | {df['fecha_t'].nunique()} fechas_t")
+    return result
+
+
+def _preparar_hoja(df: pd.DataFrame, bday: CustomBusinessDay) -> pd.DataFrame:
+    """Agrega fecha_th, reordena columnas y convierte a millones USD."""
+    df = _calc_fecha_th(df, bday)
+
+    base_cols = ["fecha_t", "fecha_th", "h"]
+    if "fold" in df.columns:
+        base_cols.append("fold")
+
+    q_cols     = [c for c in ["q01", "q05", "q50", "q95", "q99"] if c in df.columns]
+    extra_cols = [c for c in ["mean"] if c in df.columns]
+    val_cols   = q_cols + extra_cols + (["target"] if "target" in df.columns else [])
+
+    df = df[base_cols + val_cols].copy()
+    for col in val_cols:
+        df[col] = df[col] / 1_000_000   # → millones USD
+
+    return df
+
+
+def _hoja_resumen(df_base, df_overlay) -> pd.DataFrame:
+    """Una fila por (fecha_t, fuente) con estadísticas de cobertura."""
+    partes = []
+    for df, label in [(df_base, "base"), (df_overlay, "overlay")]:
+        if df is None or df.empty:
+            continue
+        g = df.groupby("fecha_t")
+        res = pd.DataFrame({
+            "fecha_t"       : g["fecha_t"].first(),
+            "fecha_th_min"  : g["fecha_th"].min(),
+            "fecha_th_max"  : g["fecha_th"].max(),
+            "h_min"         : g["h"].min(),
+            "h_max"         : g["h"].max(),
+            "n_horizontes"  : g["h"].count(),
+            "n_realizados"  : g["target"].apply(lambda x: x.notna().sum())
+                              if "target" in df.columns else np.nan,
+        }).reset_index(drop=True)
+        if "target" in df.columns:
+            res["pct_realizados"] = (
+                res["n_realizados"] / res["n_horizontes"] * 100
+            ).round(1)
+        if "q50" in df.columns:
+            q50_h1 = (df[df["h"] == df["h"].min()]
+                      .set_index("fecha_t")["q50"])
+            res["q50_h_min_MM"] = res["fecha_t"].map(q50_h1)
+        res["fuente"] = label
+        partes.append(res)
+    if not partes:
+        return pd.DataFrame()
+    return pd.concat(partes, ignore_index=True).sort_values(["fecha_t", "fuente"])
+
+
+def exportar_excel(banco: str = BANCO, ruta: Path = RUTA_EXCEL) -> None:
+    print("\n── Exportación Excel ────────────────────────────────────────────────")
+    print("  Construyendo calendario hábil PE+USA...")
+    bday = _build_bday()
+
+    print("  Cargando parquets base y overlay...")
+    preds = _cargar_ambos_parquets(banco)
+
+    hojas = {}
+    for tipo in ("base", "overlay"):
+        if preds[tipo] is None:
+            print(f"  [{tipo.upper()}] Sin datos — hoja omitida")
+            continue
+        print(f"  Calculando fecha_th para hoja '{tipo}'...")
+        hojas[tipo] = _preparar_hoja(preds[tipo], bday)
+
+    if not hojas:
+        print("  ⚠  Sin datos de predicción. Verificar DIR_PREDS_STEP005.")
+        return
+
+    hojas["resumen"] = _hoja_resumen(
+        hojas.get("base"),
+        hojas.get("overlay"),
+    )
+
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+    print(f"  Escribiendo Excel → {ruta}")
+    with pd.ExcelWriter(ruta, engine="openpyxl",
+                        datetime_format="YYYY-MM-DD") as writer:
+        for nombre, df_hoja in hojas.items():
+            df_hoja.to_excel(writer, sheet_name=nombre, index=False)
+            ws = writer.sheets[nombre]
+            for col_cells in ws.columns:
+                ancho = max(
+                    (len(str(c.value)) if c.value is not None else 0)
+                    for c in col_cells
+                )
+                ws.column_dimensions[col_cells[0].column_letter].width = min(ancho + 2, 28)
+            print(f"    Hoja '{nombre}': {df_hoja.shape[0]:,} filas × {df_hoja.shape[1]} cols")
+
+    print(f"  ✓ Excel guardado correctamente.")
+    print(f"    Columnas: fecha_t | fecha_th | h | [fold] | Q01..Q99 | target (MM USD)")
+    print(f"    Hojas   : base · overlay · resumen")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     df_preds = cargar_parquet(BANCO)
@@ -196,3 +380,6 @@ if __name__ == "__main__":
             print(f"  [{i}/{len(fechas_selec)}] Saltando {fecha_origen.date()}: {e}")
 
     print(f"\n[OK] Todos los gráficos guardados en: {DIR_OUTPUT}")
+
+    if EXPORTAR_EXCEL:
+        exportar_excel(banco=BANCO, ruta=RUTA_EXCEL)
