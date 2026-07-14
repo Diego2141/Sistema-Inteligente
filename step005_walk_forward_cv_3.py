@@ -255,7 +255,7 @@ OVERLAY_CONOCIMIENTO_ANTICIPADO = 2   # T+N: flujos conocidos con N dias habiles
 # Preferencia: librería `holidays` (calcula feriados variables como Thanksgiving,
 # Viernes Santo, MLK Day, etc.). Si no está instalada, se usa una lista curada
 # con los feriados fijos más relevantes para la ventana de diciembre.
-_ANOS_FERIADOS = range(2018, 2032)
+_ANOS_FERIADOS = range(2009, 2042)  # alineado con step001 (años_calendario)
 
 try:
     import holidays as _hlib
