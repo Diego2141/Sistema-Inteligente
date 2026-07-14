@@ -304,7 +304,7 @@ def _hoja_resumen(df_base, df_overlay) -> pd.DataFrame:
             ).round(1)
         if "q50" in df.columns:
             q50_h1 = (df[df["h"] == df["h"].min()]
-                      .set_index("fecha_t")["q50"])
+                      .groupby("fecha_t")["q50"].first())
             res["q50_h_min_MM"] = res["fecha_t"].map(q50_h1)
         res["fuente"] = label
         partes.append(res)
