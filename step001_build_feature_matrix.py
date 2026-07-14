@@ -1956,8 +1956,27 @@ def build_feature_matrix(
     else:
         df["target"] = np.nan
 
+    # ── 3b. Recalcular R_conf_t1/R_conf_t2/D_conf_t1 sin feriados ───────────
+    # build_bank_features calcula shift(-1/-2) sobre el índice denso (bdate_range,
+    # Lun-Vie incluyendo feriados) → en fechas pre-feriado el shift aterriza en el
+    # feriado (R=0) en lugar del siguiente día hábil real.
+    # Solución: filtrar feriados del índice antes de hacer shift, luego mapear a fecha_t.
+    if tiene_bancarios and len(peru_holidays) > 0:
+        _df_bk = df_bancarios[[f"{banco}_R", f"{banco}_D"]].copy()
+        _df_bk.columns = ["R", "D"]
+        _hols_norm = peru_holidays.normalize()
+        _df_nohol = _df_bk[~_df_bk.index.normalize().isin(_hols_norm)]
+        _r_conf_t1 = _df_nohol["R"].shift(-1)
+        _r_conf_t2 = _df_nohol["R"].shift(-2)
+        _d_conf_t1 = _df_nohol["D"].shift(-1)
+        for _col, _ser in [("R_conf_t1", _r_conf_t1),
+                            ("R_conf_t2", _r_conf_t2),
+                            ("D_conf_t1", _d_conf_t1)]:
+            if _col in df.columns:
+                df[_col] = df["fecha_t"].map(_ser)
+
     # ── 4. Confirmados ───────────────────────────────────────────────────────
-    # Base: valores calculados en build_bank_features (shift -1/-2 sobre realizados)
+    # Base: valores calculados arriba (shift -1/-2 sobre realizados sin feriados)
     # Override: si existen confirmados operativos reales (correos), reemplazan la fila exacta
     if not df_confirmados.empty and "banco" in df_confirmados.columns and "fecha" in df_confirmados.columns:
         conf = df_confirmados[df_confirmados["banco"] == banco].set_index("fecha")
