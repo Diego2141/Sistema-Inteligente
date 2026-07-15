@@ -1901,7 +1901,7 @@ def build_feature_matrix(
     banco_encaje="BBVA",         # banco al que aplican esas features
     bbva_encaje_feat=None,       # pd.DataFrame(index=fecha_t) avance/exceso desde aux_encaje_2
     ccovn_features=None,         # pd.DataFrame(index=fecha_t) con saldos CC+OVN para todos los bancos
-    dias_no_habiles_adicionales=None,  # lista de fechas str "YYYY-MM-DD" (decretos, APEC, etc.)
+    dias_no_habiles_adicionales=None,  # lista de Timestamps (auto-detectados + manual PARAMS)
 ):
     """
     Construye el dataset de entrenamiento para un banco de forma vectorizada.
@@ -2215,20 +2215,60 @@ def build_full_matrix(
     # SISTEMA va primero en la lista para poder validarlo de forma aislada
     lista_bancos_full = [NOMBRE_SISTEMA] + list(lista_bancos)
 
-    # Anular días no hábiles adicionales en bancarios ANTES de calcular bank_features.
-    # Los ceros de APEC 2016 y puentes gubernamentales corrompen lags y rolling stats;
-    # NaN hace que pandas los omita en shift/rolling sin propagar el error a filas vecinas.
-    _extra_nohab = params.get("dias_no_habiles_adicionales")
-    if _extra_nohab and not df_bancarios.empty:
-        _extra_ts = pd.DatetimeIndex(pd.to_datetime(_extra_nohab).normalize())
+    # ── Auto-detección de días no hábiles adicionales ────────────────────────
+    # Perú declara "puentes" por decreto supremo (DS) varios días al año: previos
+    # a Fiestas Patrias, Navidad, Año Nuevo, APEC, etc. Estos días NO aparecen en
+    # ningún calendario estándar (PE ni US), pero el sistema bancario reporta R=D=0.
+    #
+    # Criterio: si SISTEMA_R == 0 Y SISTEMA_D == 0, el sistema bancario completo
+    # no operó ese día → debe tratarse igual que un feriado estándar.
+    # Se complementa con la lista manual de PARAMS para casos donde los datos fuente
+    # pudieran tener un valor residual no cero por error de captura.
+    #
+    # Impacto si no se corrige: lags (R_t0, D_t0, R_t-1, D_t-1) y rolling features
+    # (ma_flujo_5d, sigma_flujo_ratio, flujo_neto_sum_5d, etc.) se contaminan con
+    # ceros artificiales, enseñando al modelo un estado que no existe.
+    _dias_extra_set = set()
+
+    # 1. Auto-detección desde datos SISTEMA
+    if not df_bancarios.empty:
+        _sis_r_col = f"{NOMBRE_SISTEMA}_R"
+        _sis_d_col = f"{NOMBRE_SISTEMA}_D"
+        if _sis_r_col in df_bancarios.columns and _sis_d_col in df_bancarios.columns:
+            _zero_mask = (df_bancarios[_sis_r_col] == 0) & (df_bancarios[_sis_d_col] == 0)
+            _zero_dates = df_bancarios.index[_zero_mask].normalize()
+            _hols_norm  = peru_holidays.normalize()
+            _auto_extra = _zero_dates[~_zero_dates.isin(_hols_norm)]
+            if len(_auto_extra):
+                _dias_extra_set.update(_auto_extra.tolist())
+                logger.info(
+                    f"  Auto-detectados {len(_auto_extra)} días no hábiles adicionales "
+                    f"(SISTEMA_R=SISTEMA_D=0, fuera del calendario PE+USA): "
+                    + ", ".join(str(d.date()) for d in sorted(_auto_extra))
+                )
+
+    # 2. Lista manual de PARAMS (override / casos con valor residual no cero)
+    _manual_extra = params.get("dias_no_habiles_adicionales", [])
+    if _manual_extra:
+        _manual_ts = pd.DatetimeIndex(pd.to_datetime(_manual_extra).normalize())
+        _new_manual = [d for d in _manual_ts if d not in _dias_extra_set]
+        if _new_manual:
+            _dias_extra_set.update(_new_manual)
+            logger.info(
+                f"  {len(_new_manual)} días adicionales desde PARAMS[dias_no_habiles_adicionales]: "
+                + ", ".join(str(d.date()) for d in sorted(_new_manual))
+            )
+
+    # 3. Anular en bancarios y propagar a datos_manuales ANTES de calcular bank_features
+    if _dias_extra_set and not df_bancarios.empty:
+        _extra_ts   = pd.DatetimeIndex(sorted(_dias_extra_set))
         _mask_extra = df_bancarios.index.normalize().isin(_extra_ts)
         if _mask_extra.any():
             df_bancarios = df_bancarios.copy()
             df_bancarios.loc[_mask_extra, :] = np.nan
             datos_manuales["bancarios"] = df_bancarios
             logger.info(
-                f"  Bancarios: {_mask_extra.sum()} días no hábiles adicionales anulados "
-                f"({[str(d.date()) for d in df_bancarios.index[_mask_extra]]})"
+                f"  Bancarios: {_mask_extra.sum()} días no hábiles adicionales anulados (NaN)"
             )
 
     # Pre-calcular features bancarias (una serie por banco, bajo consumo de RAM)
@@ -2307,7 +2347,7 @@ def build_full_matrix(
             banco_encaje=banco_encaje,
             bbva_encaje_feat=bbva_encaje_feat,  # avance/exceso desde aux_encaje_2 (días calendario)
             ccovn_features=ccovn_feat,      # saldos CC+OVN en BCR (aplican a todos los bancos)
-            dias_no_habiles_adicionales=params.get("dias_no_habiles_adicionales"),
+            dias_no_habiles_adicionales=sorted(_dias_extra_set) if _dias_extra_set else None,
         )
         if df_banco_mat.empty:
             continue
