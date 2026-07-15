@@ -93,6 +93,7 @@ FEATURES_EXCLUIR = [
     "R_t-5", "D_t-5", "R_t-22", "D_t-22",
     "sigma_R_5d", "sigma_D_5d", "ma_R_5d", "ma_D_5d",
     "sigma_R_22d", "sigma_D_22d", "ma_R_22d", "ma_D_22d",
+    "delta_VIX",
     "delta_R", "delta_D",
     "VIX_ma22", "TC_PEN_USD", "delta_TC",
     "EMBI_PERU", "delta_EMBI", "garch_vol_embi",
@@ -104,6 +105,11 @@ FEATURES_EXCLUIR = [
     "is_post_feriado",
     # ── SADF: sin señal en episodios de stress (hit rate P95 < 5%) ───────────
     "sadf_vol_60d", "sadf_vol_120d", "sadf_vol_252d",
+    # ── Encaje: variables intermedias / con leakage ───────────────────────────
+    "encaje_lag1", "exceso_lag1", "faltante_lag1", "techo_10h",
+    "techo_restante_lag1", "proporcion_usada", "encaje_urgencia_lag1",
+    # ── HMM: estado de régimen (inestable en ventana corta) ──────────────────
+    "hmm_estado",
     # ── Azul: reemplazadas por transformación sin/cos o ratio ────────────────
     "sigma_flujo_5d", "sigma_flujo_20d",              # → sigma_flujo_ratio
     "tc_vol_5d", "tc_vol_22d",                        # → tc_vol_ratio
