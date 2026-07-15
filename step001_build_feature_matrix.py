@@ -508,7 +508,7 @@ def load_encaje_data(params):
             logger.warning("  EncajeD.xlsx: no se encontró columna de fecha.")
             return pd.DataFrame()
 
-        df["fecha"] = pd.to_datetime(df[fecha_col])
+        df["fecha"] = pd.to_datetime(df[fecha_col]).dt.normalize()
         df = df.set_index("fecha").sort_index()
 
         # Conservar solo columnas numéricas relevantes
@@ -1409,6 +1409,9 @@ def build_encaje_features(df_encaje, peru_bday):
       techo_restante_lag1 : techo_10h - retiro_acum_mes(t-1)
                             = presupuesto de retiro aún disponible
       proporcion_usada    : retiro_acum_mes(t-1) / techo_10h (0 si techo=0)
+      encaje_urgencia_lag1: faltante(t-1) / días_hábiles_restantes_en_mes(t-1)
+                            = tasa diaria de acumulación requerida para cerrar el mes.
+                            Colapsa la interacción faltante × tiempo en una sola variable.
 
     Retorna DataFrame indexado por fecha, alineado con los datos de encaje.
     """
@@ -1484,6 +1487,31 @@ def build_encaje_features(df_encaje, peru_bday):
     resultado["proporcion_usada"] = (
         retiro_acum_mes.abs() / resultado["techo_10h"].replace(0, np.nan)
     ).clip(0, None)
+
+    # ── 6. Urgencia de encaje: tasa de acumulación diaria requerida ──────────
+    # encaje_urgencia = faltante(t-1) / días_hábiles_restantes_en_mes(t-1)
+    # Normaliza el monto faltante por el tiempo disponible: lo que el tesorero
+    # calcula como "cuánto debo depositar en BCR por día hábil para cerrar el mes".
+    # El árbol no puede derivar esto eficientemente solo desde faltante_lag1 y
+    # dias_al_cierre_mes (requiere split en dos dimensiones; este feature lo colapsa).
+    # Solo tiene valor para el banco que tiene faltante real (banco_encaje = BBVA);
+    # para SISTEMA queda en NaN junto con faltante_lag1.
+    dias_habiles_restantes = pd.Series(np.nan, index=df.index)
+    for periodo, grupo in encaje.groupby(encaje.index.to_period("M")):
+        inicio = periodo.start_time
+        if inicio.month == 12:
+            fin = pd.Timestamp(year=inicio.year + 1, month=1, day=1) - pd.Timedelta(days=1)
+        else:
+            fin = pd.Timestamp(year=inicio.year, month=inicio.month + 1, day=1) - pd.Timedelta(days=1)
+        bdays_mes = pd.bdate_range(start=inicio, end=fin, freq=peru_bday)
+        for fecha in grupo.index:
+            dias_restantes = (bdays_mes > fecha).sum()
+            if fecha in dias_habiles_restantes.index:
+                dias_habiles_restantes.loc[fecha] = max(dias_restantes, 1)
+
+    resultado["encaje_urgencia_lag1"] = (
+        faltante_raw.shift(1) / dias_habiles_restantes.shift(1).replace(0, np.nan)
+    ).clip(lower=0)
 
     n_validos = resultado["faltante_lag1"].notna().sum()
     logger.info(
