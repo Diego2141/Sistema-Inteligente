@@ -2241,11 +2241,6 @@ def build_full_matrix(
             _auto_extra = _zero_dates[~_zero_dates.isin(_hols_norm)]
             if len(_auto_extra):
                 _dias_extra_set.update(_auto_extra.tolist())
-                logger.info(
-                    f"  Auto-detectados {len(_auto_extra)} días no hábiles adicionales "
-                    f"(SISTEMA_R=SISTEMA_D=0, fuera del calendario PE+USA): "
-                    + ", ".join(str(d.date()) for d in sorted(_auto_extra))
-                )
 
     # 2. Lista manual de PARAMS (override / casos con valor residual no cero)
     _manual_extra = params.get("dias_no_habiles_adicionales", [])
@@ -2254,10 +2249,51 @@ def build_full_matrix(
         _new_manual = [d for d in _manual_ts if d not in _dias_extra_set]
         if _new_manual:
             _dias_extra_set.update(_new_manual)
-            logger.info(
-                f"  {len(_new_manual)} días adicionales desde PARAMS[dias_no_habiles_adicionales]: "
-                + ", ".join(str(d.date()) for d in sorted(_new_manual))
+
+    # Imprimir tabla de días detectados
+    if _dias_extra_set and not df_bancarios.empty:
+        _sis_r_col = f"{NOMBRE_SISTEMA}_R"
+        _sis_d_col = f"{NOMBRE_SISTEMA}_D"
+        _dias_sorted = sorted(_dias_extra_set)
+        _n_manual = len([
+            d for d in _dias_extra_set
+            if d in pd.DatetimeIndex(pd.to_datetime(params.get("dias_no_habiles_adicionales", [])).normalize())
+            and d not in (
+                _zero_dates[~_zero_dates.isin(_hols_norm)]
+                if "_zero_dates" in dir() else []
             )
+        ])
+        print("\n" + "=" * 72)
+        print(f"  DÍAS NO LABORABLES ADICIONALES DETECTADOS: {len(_dias_sorted)}")
+        print(f"  (SISTEMA_R=SISTEMA_D=0, fuera del calendario PE+USA)")
+        print("=" * 72)
+        _dias_semana = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
+        print(f"  {'Fecha':<14} {'Día':<5}  {'R_t-1 (MM USD)':>16}  {'D_t-1 (MM USD)':>16}  {'Fuente'}")
+        print(f"  {'-'*14} {'-'*5}  {'-'*16}  {'-'*16}  {'-'*20}")
+        for _f in _dias_sorted:
+            _f_ts = pd.Timestamp(_f)
+            _dia  = _dias_semana[_f_ts.weekday()]
+            _prev = df_bancarios.index[df_bancarios.index < _f_ts]
+            if len(_prev) and _sis_r_col in df_bancarios.columns:
+                _r_ant = df_bancarios.loc[_prev[-1], _sis_r_col] / 1e6
+                _d_ant = df_bancarios.loc[_prev[-1], _sis_d_col] / 1e6
+                _r_str = f"{_r_ant:>14,.1f}"
+                _d_str = f"{_d_ant:>14,.1f}"
+            else:
+                _r_str = f"{'N/D':>14}"
+                _d_str = f"{'N/D':>14}"
+            _manual_flag = (
+                _f_ts.normalize() in pd.DatetimeIndex(
+                    pd.to_datetime(params.get("dias_no_habiles_adicionales", [])).normalize()
+                ) if params.get("dias_no_habiles_adicionales") else False
+            )
+            _fuente = "manual+auto" if _manual_flag else "auto"
+            print(f"  {str(_f_ts.date()):<14} {_dia:<5}  {_r_str}  {_d_str}  {_fuente}")
+        print("=" * 72 + "\n")
+        logger.info(
+            f"  {len(_dias_sorted)} días no hábiles adicionales detectados "
+            f"({len(_manual_extra)} en PARAMS, resto auto-detectados)"
+        )
 
     # 3. Anular en bancarios y propagar a datos_manuales ANTES de calcular bank_features
     if _dias_extra_set and not df_bancarios.empty:
