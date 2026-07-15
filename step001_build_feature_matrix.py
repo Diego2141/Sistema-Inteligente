@@ -2029,16 +2029,26 @@ def build_feature_matrix(
     else:
         df["target"] = np.nan
 
-    # ── 3b. Recalcular R_conf_t1/R_conf_t2/D_conf_t1 sin feriados ───────────
+    # ── 3b. Recalcular R_conf_t1/R_conf_t2/D_conf_t1 sin feriados ni días extra ─
     # build_bank_features calcula shift(-1/-2) sobre el índice denso (bdate_range,
     # Lun-Vie incluyendo feriados) → en fechas pre-feriado el shift aterriza en el
     # feriado (R=0) en lugar del siguiente día hábil real.
-    # Solución: filtrar feriados del índice antes de hacer shift, luego mapear a fecha_t.
-    if tiene_bancarios and len(peru_holidays) > 0:
+    # Adicionalmente, los días no hábiles adicionales (APEC, puentes) fueron anulados
+    # con NaN en df_bancarios → si el siguiente bday es un día extra, shift(-1) da NaN.
+    # Solución: filtrar AMBOS conjuntos del índice antes de hacer shift.
+    if tiene_bancarios:
         _df_bk = df_bancarios[[f"{banco}_R", f"{banco}_D"]].copy()
         _df_bk.columns = ["R", "D"]
-        _hols_norm = peru_holidays.normalize()
-        _df_nohol = _df_bk[~_df_bk.index.normalize().isin(_hols_norm)]
+        # Excluir feriados estándar PE+USA
+        _all_excl = peru_holidays.normalize() if len(peru_holidays) > 0 \
+                    else pd.DatetimeIndex([])
+        # Excluir también días no hábiles adicionales (decretos, APEC, puentes)
+        if dias_no_habiles_adicionales:
+            _extra_norm = pd.DatetimeIndex(
+                pd.to_datetime(dias_no_habiles_adicionales).normalize()
+            )
+            _all_excl = _all_excl.union(_extra_norm)
+        _df_nohol = _df_bk[~_df_bk.index.normalize().isin(_all_excl)]
         _r_conf_t1 = _df_nohol["R"].shift(-1)
         _r_conf_t2 = _df_nohol["R"].shift(-2)
         _d_conf_t1 = _df_nohol["D"].shift(-1)
@@ -2314,6 +2324,11 @@ def build_full_matrix(
             )
 
     # Pre-calcular features bancarias (una serie por banco, bajo consumo de RAM)
+    # IMPORTANTE: pasar df_banco.dropna() excluye los días no hábiles adicionales
+    # (que fueron anulados con NaN arriba) ANTES de calcular rolling/shift.
+    # Sin esto, un solo día NaN contamina rolling(66) durante 66 días posteriores
+    # y shift(-1) contamina el día anterior. Con dropna() el índice queda gappeado
+    # pero pandas rolling/shift opera sobre las filas presentes → no hay propagación.
     bank_features_dict = {}
     for banco in lista_bancos_full:
         if not df_bancarios.empty and f"{banco}_R" in df_bancarios.columns:
@@ -2321,7 +2336,7 @@ def build_full_matrix(
                 columns={f"{banco}_R": "R", f"{banco}_D": "D"}
             )
             bank_features_dict[banco] = build_bank_features(
-                df_banco,
+                df_banco.dropna(),
                 params["lags_cortos"],
                 params["lag_semana"],
                 params["lag_mes"],
@@ -2347,7 +2362,10 @@ def build_full_matrix(
         _r = f"{NOMBRE_SISTEMA}_R"
         _d = f"{NOMBRE_SISTEMA}_D"
         if _r in df_bancarios.columns and _d in df_bancarios.columns:
-            flujo_neto_sistema = df_bancarios[_d] - df_bancarios[_r]
+            # dropna: excluye días no hábiles adicionales anulados para que
+            # las rolling/shift de build_ccovn_features no se contaminen con NaN
+            _sis_clean = df_bancarios[[_r, _d]].dropna()
+            flujo_neto_sistema = _sis_clean[_d] - _sis_clean[_r]
     ccovn_feat = build_ccovn_features(df_ccovn, peru_bday,
                                       flujo_sistema=flujo_neto_sistema)
 
