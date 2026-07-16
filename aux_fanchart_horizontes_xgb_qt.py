@@ -297,13 +297,17 @@ def _preparar_hoja(df: pd.DataFrame, bday: CustomBusinessDay) -> pd.DataFrame:
     else:
         df["fecha_th"] = pd.NaT
 
-    # Rellenar filas con NaT usando el calendario (parquets viejos sin fecha_th,
-    # o mezcla de parquets nuevos y viejos donde solo algunos tienen el valor).
-    _nat_mask = df["fecha_th"].isna()
-    if _nat_mask.any():
-        _df_fill = _calc_fecha_th(df[_nat_mask].copy(), bday)
-        df.loc[_nat_mask, "fecha_th"] = _df_fill["fecha_th"].values
-        df["fecha_th"] = pd.to_datetime(df["fecha_th"])
+    # NO rellenar NaT con el calendario de _build_bday(): ese calendario no incluye
+    # los días no hábiles adicionales auto-detectados por step001, por lo que
+    # computa fecha_th con un desplazamiento de +1 día en periodos con puentes.
+    # Mezclar fechas correctas (del parquet) con fechas del calendario incorrecto
+    # hace que la misma fecha_th agrupe targets de dos días distintos en Excel.
+    # Si quedan NaT es porque el parquet fue generado antes del fix 7827417:
+    # volver a correr step001 + step005 para obtener fecha_th datetime64[ns] correcto.
+    if df["fecha_th"].isna().any():
+        n_nat = int(df["fecha_th"].isna().sum())
+        print(f"  [AVISO] {n_nat} filas sin fecha_th (parquet antiguo). "
+              f"Re-correr step001 + step005 para corregir.")
 
     base_cols = ["fecha_t", "fecha_th", "h"]
     if "fold" in df.columns:
