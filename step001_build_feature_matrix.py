@@ -1945,22 +1945,14 @@ def build_feature_matrix(
             )
 
     # Días no hábiles adicionales (decretos gobierno: APEC 2016, puentes, etc.)
-    # No pertenecen a ningún calendario estándar, pero el sistema bancario no operó.
-    # (a) Se anulan en df_bancarios → los lags/rolling no incorporan falsos ceros.
-    # (b) Se excluyen de fechas_t → no generan filas en la matriz de entrenamiento.
+    # Se excluyen de fechas_t → no generan filas en la matriz de entrenamiento.
+    # NO se nullifica df_bancarios: esos días tienen R=D=0 reales → target=0 correcto.
+    # La contaminación de features (shift/rolling) se evita en build_all_matrices
+    # mediante drop explícito sobre _peru_bdays_idx antes de llamar a build_bank_features.
     if dias_no_habiles_adicionales:
         _extra_ts = pd.DatetimeIndex(
             pd.to_datetime(dias_no_habiles_adicionales).normalize()
         )
-        if not df_bancarios.empty:
-            _bancarios_mask = df_bancarios.index.normalize().isin(_extra_ts)
-            if _bancarios_mask.any():
-                df_bancarios = df_bancarios.copy()
-                df_bancarios.loc[_bancarios_mask, :] = np.nan
-                logger.info(
-                    f"    {banco}: {_bancarios_mask.sum()} días no hábiles adicionales "
-                    f"anulados en bancarios ({list(df_bancarios.index[_bancarios_mask].date)})"
-                )
         _n_antes = len(fechas_t)
         fechas_t = fechas_t[~fechas_t.normalize().isin(_extra_ts)]
         _n_extra = _n_antes - len(fechas_t)
