@@ -2311,23 +2311,11 @@ def build_full_matrix(
             f"({len(_manual_extra)} en PARAMS, resto auto-detectados)"
         )
 
-    # 3. Anular en bancarios y propagar a datos_manuales ANTES de calcular bank_features
-    if _dias_extra_set and not df_bancarios.empty:
-        _extra_ts   = pd.DatetimeIndex(sorted(_dias_extra_set))
-        _mask_extra = df_bancarios.index.normalize().isin(_extra_ts)
-        if _mask_extra.any():
-            df_bancarios = df_bancarios.copy()
-            df_bancarios.loc[_mask_extra, :] = np.nan
-            datos_manuales["bancarios"] = df_bancarios
-            logger.info(
-                f"  Bancarios: {_mask_extra.sum()} días no hábiles adicionales anulados (NaN)"
-            )
-
-    # Índice de días hábiles PE+USA — base para limpiar bancarios antes de features.
-    # bdate_range (Mon-Fri) incluye feriados PE/US con fill_value=0; peru_bday los excluye.
-    # Reindexar a _peru_bdays_idx garantiza que shift(1/−1) y rolling(N) operen solo
-    # sobre días realmente operativos: sin feriados (valor 0 incorrecto) ni días no
-    # hábiles adicionales (nullificados a NaN arriba → eliminados por dropna).
+    # 3. Índice de días hábiles PE+USA para features (excluye feriados PE/USA via peru_bday).
+    # NO se nullifica df_bancarios: los días no hábiles adicionales tienen R=D=0
+    # en el sistema real → target = 0 − 0 = 0, que es el valor correcto para entrenar.
+    # Los días no hábiles se excluyen SOLO del cómputo de features (shift/rolling)
+    # mediante drop explícito sobre _peru_bdays_idx.
     _peru_bdays_idx = (
         pd.bdate_range(
             start=df_bancarios.index.min(),
@@ -2335,6 +2323,11 @@ def build_full_matrix(
             freq=peru_bday,
         )
         if not df_bancarios.empty else pd.DatetimeIndex([])
+    )
+    # Fechas no hábiles adicionales (auto-detectadas + manuales) a excluir de features
+    _extra_ts_drop = (
+        pd.DatetimeIndex(sorted(_dias_extra_set))
+        if _dias_extra_set else pd.DatetimeIndex([])
     )
 
     # Pre-calcular features bancarias (una serie por banco, bajo consumo de RAM)
@@ -2344,10 +2337,14 @@ def build_full_matrix(
             df_banco = df_bancarios[[f"{banco}_R", f"{banco}_D"]].rename(
                 columns={f"{banco}_R": "R", f"{banco}_D": "D"}
             )
-            # 1. Reindex a peru_bday → excluye feriados PE+USA (que tienen R=D=0 en bdate_range)
-            # 2. dropna() → excluye días no hábiles adicionales (nullificados con NaN arriba)
-            # Resultado: índice con solo días operativos reales; shift/rolling sin contaminación
-            df_banco_feat = df_banco.reindex(_peru_bdays_idx).dropna()
+            # Reindex a peru_bday → excluye feriados PE+USA
+            # Drop explícito de días no hábiles adicionales → shift/rolling sin contaminación
+            df_banco_feat = df_banco.reindex(_peru_bdays_idx)
+            if len(_extra_ts_drop):
+                _to_drop = _extra_ts_drop.intersection(df_banco_feat.index)
+                if len(_to_drop):
+                    df_banco_feat = df_banco_feat.drop(index=_to_drop)
+            df_banco_feat = df_banco_feat.dropna()
             bank_features_dict[banco] = build_bank_features(
                 df_banco_feat,
                 params["lags_cortos"],
@@ -2375,9 +2372,13 @@ def build_full_matrix(
         _r = f"{NOMBRE_SISTEMA}_R"
         _d = f"{NOMBRE_SISTEMA}_D"
         if _r in df_bancarios.columns and _d in df_bancarios.columns:
-            # Reindex a peru_bday + dropna: excluye feriados (R=D=0) y días no
-            # hábiles adicionales (NaN) para que build_ccovn_features no se contamine
-            _sis_clean = df_bancarios[[_r, _d]].reindex(_peru_bdays_idx).dropna()
+            # Reindex a peru_bday + drop días no hábiles adicionales + dropna
+            _sis_clean = df_bancarios[[_r, _d]].reindex(_peru_bdays_idx)
+            if len(_extra_ts_drop):
+                _to_drop_sis = _extra_ts_drop.intersection(_sis_clean.index)
+                if len(_to_drop_sis):
+                    _sis_clean = _sis_clean.drop(index=_to_drop_sis)
+            _sis_clean = _sis_clean.dropna()
             flujo_neto_sistema = _sis_clean[_d] - _sis_clean[_r]
     ccovn_feat = build_ccovn_features(df_ccovn, peru_bday,
                                       flujo_sistema=flujo_neto_sistema)
