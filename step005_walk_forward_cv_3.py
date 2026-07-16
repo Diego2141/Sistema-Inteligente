@@ -1257,9 +1257,13 @@ def preparar_fold_data(df, fold, cols_feat):
     y_test         = df_test.loc[mte,  "target"].copy()
     h_test         = df_test.loc[mte,  "h"].values
     fechas_t_test  = pd.to_datetime(df_test.loc[mte, "fecha_t"].values)
-    fecha_th_test  = (pd.to_datetime(df_test.loc[mte, "fecha_th"].values)
-                      if "fecha_th" in df_test.columns else
-                      pd.DatetimeIndex([pd.NaT] * mte.sum()))
+    if "fecha_th" in df_test.columns:
+        _fth = pd.to_datetime(df_test.loc[mte, "fecha_th"].values)
+        if getattr(_fth, "tz", None) is not None:
+            _fth = _fth.tz_convert(None)   # UTC-aware → naive, preserva el valor
+        fecha_th_test = _fth
+    else:
+        fecha_th_test = pd.DatetimeIndex([pd.NaT] * int(mte.sum()))
 
     # Convertir columnas pandas ExtensionArray (Int8, boolean, etc.) a float64
     # para compatibilidad con XGBoost DMatrix (no acepta dtype object/nullable)

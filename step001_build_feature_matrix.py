@@ -1980,7 +1980,7 @@ def build_feature_matrix(
         idx = row["h"] - 1
         return fechas[idx] if idx < len(fechas) else pd.NaT
 
-    df["fecha_th"] = df.apply(get_th, axis=1)
+    df["fecha_th"] = pd.to_datetime(df.apply(get_th, axis=1))  # object→datetime64[ns], sin tz
     df = df.dropna(subset=["fecha_th"])
 
     # ── 1b. Features de gap de calendario ───────────────────────────────────

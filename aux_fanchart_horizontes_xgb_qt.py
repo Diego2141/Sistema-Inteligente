@@ -245,6 +245,11 @@ def _cargar_ambos_parquets(banco: str) -> dict:
             try:
                 _df = pd.read_parquet(ruta)
                 _df["fecha_t"] = pd.to_datetime(_df["fecha_t"])
+                if "fecha_th" in _df.columns:
+                    _fth = pd.to_datetime(_df["fecha_th"])
+                    if getattr(_fth.dt, "tz", None) is not None:
+                        _fth = _fth.dt.tz_convert(None)
+                    _df["fecha_th"] = _fth
                 dfs.append(_df)
             except Exception as e:
                 print(f"  [EXCEL/{tipo}] Error leyendo {ruta.name}: {e}")
@@ -273,7 +278,10 @@ def _preparar_hoja(df: pd.DataFrame, bday: CustomBusinessDay) -> pd.DataFrame:
         df = _calc_fecha_th(df, bday)
     else:
         df = df.copy()
-        df["fecha_th"] = pd.to_datetime(df["fecha_th"])
+        _fth = pd.to_datetime(df["fecha_th"])
+        if getattr(_fth.dt, "tz", None) is not None:
+            _fth = _fth.dt.tz_convert(None)  # quita UTC si PyArrow lo infirió
+        df["fecha_th"] = _fth
 
     base_cols = ["fecha_t", "fecha_th", "h"]
     if "fold" in df.columns:
