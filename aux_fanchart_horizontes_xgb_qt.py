@@ -297,17 +297,25 @@ def _preparar_hoja(df: pd.DataFrame, bday: CustomBusinessDay) -> pd.DataFrame:
     else:
         df["fecha_th"] = pd.NaT
 
-    # NO rellenar NaT con el calendario de _build_bday(): ese calendario no incluye
-    # los días no hábiles adicionales auto-detectados por step001, por lo que
-    # computa fecha_th con un desplazamiento de +1 día en periodos con puentes.
-    # Mezclar fechas correctas (del parquet) con fechas del calendario incorrecto
-    # hace que la misma fecha_th agrupe targets de dos días distintos en Excel.
-    # Si quedan NaT es porque el parquet fue generado antes del fix 7827417:
-    # volver a correr step001 + step005 para obtener fecha_th datetime64[ns] correcto.
-    if df["fecha_th"].isna().any():
-        n_nat = int(df["fecha_th"].isna().sum())
-        print(f"  [AVISO] {n_nat} filas sin fecha_th (parquet antiguo). "
-              f"Re-correr step001 + step005 para corregir.")
+    # Estrategia para NaT en fecha_th:
+    # - Si TODOS los valores son NaT (parquet antiguo sin la columna): rellenar con
+    #   _calc_fecha_th es seguro porque no hay mezcla de calendarios → targets consistentes.
+    # - Si ALGUNOS son válidos y OTROS son NaT (parquet mixto: generado con step005
+    #   parcialmente actualizado): NO rellenar. El calendario de _build_bday() le falta
+    #   los ~44 días no hábiles auto-detectados por step001 → shift de +1 día en puentes
+    #   → la misma fecha_th agrupa targets de dos días distintos. Advertir y dejar NaT.
+    _nat_mask = df["fecha_th"].isna()
+    if _nat_mask.all():
+        # Parquet completamente antiguo — relleno uniforme, sin mezcla
+        _df_fill = _calc_fecha_th(df.copy(), bday)
+        df["fecha_th"] = _df_fill["fecha_th"].values
+        df["fecha_th"] = pd.to_datetime(df["fecha_th"])
+        print(f"  [AVISO] fecha_th calculada con calendario básico (parquet antiguo). "
+              f"Re-correr step001 + step005 para usar el calendario extendido correcto.")
+    elif _nat_mask.any():
+        n_nat = int(_nat_mask.sum())
+        print(f"  [AVISO] {n_nat} filas con fecha_th=NaT en parquet mixto. "
+              f"Re-correr step001 + step005 para corregir (no se rellena para evitar mezcla de calendarios).")
 
     base_cols = ["fecha_t", "fecha_th", "h"]
     if "fold" in df.columns:
