@@ -292,15 +292,24 @@ def _preparar_hoja(df: pd.DataFrame, bday: CustomBusinessDay) -> pd.DataFrame:
     con calendar extendido de step001).  Solo recalcula con bday cuando falta,
     para mantener compatibilidad con parquets antiguos.
     """
-    if "fecha_th" not in df.columns or df["fecha_th"].isna().all():
-        # Fallback: recalcular desde el calendario
-        df = _calc_fecha_th(df, bday)   # ya produce datetime64[ns]
-    else:
-        df = df.copy()
+    df = df.copy()
+
+    # Convertir / strip-timezone si la columna ya existe
+    if "fecha_th" in df.columns:
         _fth = pd.to_datetime(df["fecha_th"])
         if getattr(_fth.dt, "tz", None) is not None:
-            _fth = _fth.dt.tz_convert(None)  # quita UTC si PyArrow lo infirió
+            _fth = _fth.dt.tz_convert(None)
         df["fecha_th"] = _fth
+    else:
+        df["fecha_th"] = pd.NaT
+
+    # Rellenar filas con NaT usando el calendario (parquets viejos sin fecha_th,
+    # o mezcla de parquets nuevos y viejos donde solo algunos tienen el valor).
+    _nat_mask = df["fecha_th"].isna()
+    if _nat_mask.any():
+        _df_fill = _calc_fecha_th(df[_nat_mask].copy(), bday)
+        df.loc[_nat_mask, "fecha_th"] = _df_fill["fecha_th"].values
+        df["fecha_th"] = pd.to_datetime(df["fecha_th"])
 
     base_cols = ["fecha_t", "fecha_th", "h"]
     if "fold" in df.columns:
