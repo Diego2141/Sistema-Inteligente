@@ -2303,20 +2303,29 @@ def build_full_matrix(
             f"({len(_manual_extra)} en PARAMS, resto auto-detectados)"
         )
 
-    # 3. Índice de días hábiles PE+USA para features (excluye feriados PE/USA via peru_bday).
-    # NO se nullifica df_bancarios: los días no hábiles adicionales tienen R=D=0
-    # en el sistema real → target = 0 − 0 = 0, que es el valor correcto para entrenar.
-    # Los días no hábiles se excluyen SOLO del cómputo de features (shift/rolling)
-    # mediante drop explícito sobre _peru_bdays_idx.
+    # 3. Calendario extendido: peru_bday + días no hábiles adicionales (puentes, APEC…).
+    # Usado para _peru_bdays_idx (features shift/rolling) Y para fecha_th en build_feature_matrix.
+    # Garantiza que fecha_th nunca caiga en un día no hábil adicional: si cayera, el target
+    # sería 0 (R=D=0 real) pero la "distancia real" al próximo día operativo es mayor,
+    # de modo que el target corresponde a otro horizonte efectivo, rompiendo la semántica de h.
+    if _dias_extra_set:
+        _extra_hols = pd.DatetimeIndex(sorted(_dias_extra_set))
+        _all_hols   = peru_holidays.normalize().union(_extra_hols.normalize())
+        peru_bday_ext = CustomBusinessDay(holidays=_all_hols)
+    else:
+        peru_bday_ext = peru_bday
+
+    # Índice de días hábiles PE+USA sin días no hábiles adicionales.
+    # peru_bday_ext ya los excluye → shift/rolling no se contamina con R=D=0 de esos días.
     _peru_bdays_idx = (
         pd.bdate_range(
             start=df_bancarios.index.min(),
             end=df_bancarios.index.max(),
-            freq=peru_bday,
+            freq=peru_bday_ext,
         )
         if not df_bancarios.empty else pd.DatetimeIndex([])
     )
-    # Fechas no hábiles adicionales (auto-detectadas + manuales) a excluir de features
+    # _extra_ts_drop: fallback explícito (por si algún día cae fuera del rango de _all_hols)
     _extra_ts_drop = (
         pd.DatetimeIndex(sorted(_dias_extra_set))
         if _dias_extra_set else pd.DatetimeIndex([])
@@ -2403,7 +2412,7 @@ def build_full_matrix(
             datos_manuales=datos_manuales,
             macro_features=macro_features,
             bank_features=bank_features_dict,
-            peru_bday=peru_bday,
+            peru_bday=peru_bday_ext,   # calendario extendido: excluye también días no hábiles adicionales
             peru_holidays=peru_holidays,
             fechas_elecciones=fechas_elecciones,
             h_min=params["h_min"],
