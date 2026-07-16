@@ -2163,9 +2163,9 @@ def build_feature_matrix(
                     f"{df.shape[1]} columnas finales")
 
     # ── Reordenar columnas ───────────────────────────────────────────────────
-    cols_id    = [c for c in ["fecha_t", "banco", "h", "log_h"] if c in df.columns]
-    cols_resto = [c for c in df.columns if c not in cols_id + ["fecha_th"]]
-    df = df[cols_id + cols_resto].drop(columns=["fecha_th"], errors="ignore")
+    cols_id    = [c for c in ["fecha_t", "banco", "h", "log_h", "fecha_th"] if c in df.columns]
+    cols_resto = [c for c in df.columns if c not in set(cols_id)]
+    df = df[cols_id + cols_resto]
 
     # Reporte NaN
     total = len(df)

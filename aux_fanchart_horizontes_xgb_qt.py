@@ -263,8 +263,17 @@ def _cargar_ambos_parquets(banco: str) -> dict:
 
 
 def _preparar_hoja(df: pd.DataFrame, bday: CustomBusinessDay) -> pd.DataFrame:
-    """Agrega fecha_th, reordena columnas y convierte a millones USD."""
-    df = _calc_fecha_th(df, bday)
+    """Reordena columnas y convierte a millones USD.
+
+    Usa fecha_th del parquet cuando está disponible (generado por step005 >= v3
+    con calendar extendido de step001).  Solo recalcula con bday cuando falta,
+    para mantener compatibilidad con parquets antiguos.
+    """
+    if "fecha_th" not in df.columns or df["fecha_th"].isna().all():
+        df = _calc_fecha_th(df, bday)
+    else:
+        df = df.copy()
+        df["fecha_th"] = pd.to_datetime(df["fecha_th"])
 
     base_cols = ["fecha_t", "fecha_th", "h"]
     if "fold" in df.columns:
@@ -326,7 +335,9 @@ def exportar_excel(banco: str = BANCO, ruta: Path = RUTA_EXCEL) -> None:
         if preds[tipo] is None:
             print(f"  [{tipo.upper()}] Sin datos — hoja omitida")
             continue
-        print(f"  Calculando fecha_th para hoja '{tipo}'...")
+        _has_th = "fecha_th" in preds[tipo].columns and not preds[tipo]["fecha_th"].isna().all()
+        print(f"  Preparando hoja '{tipo}' "
+              f"({'fecha_th del parquet' if _has_th else 'recalculando fecha_th'})...")
         hojas[tipo] = _preparar_hoja(preds[tipo], bday)
 
     if not hojas:

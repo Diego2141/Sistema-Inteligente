@@ -1191,10 +1191,12 @@ def preparar_fold_data(df, fold, cols_feat):
     """
     Retorna:
       X_train, y_train, X_val, y_val, X_test, y_test,
-      h_train, h_val, h_test, fechas_t_test
+      h_train, h_val, h_test, fechas_t_test, fecha_th_test
 
     fechas_t_test: array de pd.Timestamp con la fecha de origen de cada fila
     de TEST -- necesario para construir los fan charts por snapshot.
+    fecha_th_test: array de pd.Timestamp con la fecha proyectada de cada fila
+    de TEST -- tomada directamente de la matriz (sin recomputar el calendario).
     """
     train_start = fold["train_start"]
     train_end   = fold["train_end"]
@@ -1255,6 +1257,9 @@ def preparar_fold_data(df, fold, cols_feat):
     y_test         = df_test.loc[mte,  "target"].copy()
     h_test         = df_test.loc[mte,  "h"].values
     fechas_t_test  = pd.to_datetime(df_test.loc[mte, "fecha_t"].values)
+    fecha_th_test  = (pd.to_datetime(df_test.loc[mte, "fecha_th"].values)
+                      if "fecha_th" in df_test.columns else
+                      pd.DatetimeIndex([pd.NaT] * mte.sum()))
 
     # Convertir columnas pandas ExtensionArray (Int8, boolean, etc.) a float64
     # para compatibilidad con XGBoost DMatrix (no acepta dtype object/nullable)
@@ -1265,7 +1270,7 @@ def preparar_fold_data(df, fold, cols_feat):
             _df[ext_cols] = _df[ext_cols].astype("float64")
 
     return (X_train, y_train, X_val, y_val, X_test, y_test,
-            h_train, h_val, h_test, fechas_t_test)
+            h_train, h_val, h_test, fechas_t_test, fecha_th_test)
 
 
 ###############################################################################
@@ -3075,7 +3080,7 @@ def evaluar_banco(banco: str):
              X_val,   y_val,
              X_test,  y_test,
              h_train, h_val, h_test,
-             fechas_t_test) = preparar_fold_data(df, fold, cols_feat)
+             fechas_t_test, fecha_th_test) = preparar_fold_data(df, fold, cols_feat)
         except Exception as e:
             logger.warning(f"  Fold {fold['fold']}: error preparando datos -- {e}")
             continue
@@ -3193,11 +3198,12 @@ def evaluar_banco(banco: str):
 
         # -- Scaffolding compartido ------------------------------------------------
         _scaffold = pd.DataFrame({
-            "banco"  : banco,
-            "fold"   : fold["fold"],
-            "fecha_t": pd.DatetimeIndex(fechas_t_test),
-            "h"      : h_test,
-            "target" : y_test.values,
+            "banco"   : banco,
+            "fold"    : fold["fold"],
+            "fecha_t" : pd.DatetimeIndex(fechas_t_test),
+            "fecha_th": pd.DatetimeIndex(fecha_th_test),
+            "h"       : h_test,
+            "target"  : y_test.values,
         })
 
         # Predicciones base (sin overlay)
