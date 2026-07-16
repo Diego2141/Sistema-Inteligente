@@ -2303,6 +2303,67 @@ def build_full_matrix(
             f"({len(_manual_extra)} en PARAMS, resto auto-detectados)"
         )
 
+    # Auto-whitelist: fechas clasificadas como "feriado" en el calendario (PE+USA
+    # estándar o auto-detectadas) donde SISTEMA realmente operó (R > 0 ó D > 0).
+    # Causas típicas:
+    #   - Nochebuena (Dec 24) hardcodeada pero banco abierto varios años
+    #   - US Federal holidays "observados" (viernes previo a sábado festivo):
+    #     Veterans Day, Independence Day, Juneteenth, New Year's Eve observado, etc.
+    #     La banca peruana no cierra por estos feriados observados de EEUU.
+    #   - Feriados PE estándar (FiestasP2, Angamos) donde el banco operó ese año
+    #
+    # Se remueven de peru_holidays y _dias_extra_set ANTES de construir peru_bday_ext,
+    # para que queden válidos tanto como fecha_t (filas de entrenamiento) como
+    # como fecha_th (fechas objetivo con target real).
+    _dias_si_habiles: set = set()
+    if not df_bancarios.empty and f"{NOMBRE_SISTEMA}_R" in df_bancarios.columns:
+        _sis_r_col_wl = f"{NOMBRE_SISTEMA}_R"
+        _sis_d_col_wl = f"{NOMBRE_SISTEMA}_D"
+        _sis_operated = (
+            (df_bancarios[_sis_r_col_wl] > 0) | (df_bancarios[_sis_d_col_wl] > 0)
+        )
+        _operated_dates_wl = df_bancarios.index[_sis_operated].normalize()
+        _hols_norm_wl   = set(peru_holidays.normalize())
+        _extra_norm_wl  = {pd.Timestamp(d).normalize() for d in _dias_extra_set}
+        _all_excl_wl    = _hols_norm_wl | _extra_norm_wl
+        _false_excl     = set(_operated_dates_wl) & _all_excl_wl
+        if _false_excl:
+            _dias_si_habiles.update(_false_excl)
+
+    # Whitelist manual desde PARAMS (override adicional)
+    _manual_si = params.get("dias_si_habiles", [])
+    if _manual_si:
+        _dias_si_habiles.update(
+            pd.DatetimeIndex(pd.to_datetime(_manual_si).normalize()).tolist()
+        )
+
+    if _dias_si_habiles:
+        _si_idx = pd.DatetimeIndex(sorted(_dias_si_habiles))
+        _si_dates_str = [pd.Timestamp(d).strftime("%Y-%m-%d") for d in sorted(_dias_si_habiles)]
+        print("\n" + "=" * 72)
+        print(f"  AUTO-WHITELIST: {len(_dias_si_habiles)} fechas 'feriado' con actividad SISTEMA")
+        print("  → restauradas como días hábiles (excluidas del calendario)")
+        print("=" * 72)
+        for _d_wl in sorted(_dias_si_habiles):
+            _t_wl = pd.Timestamp(_d_wl)
+            _in_hols  = _t_wl.normalize() in set(peru_holidays.normalize())
+            _in_extra = _t_wl.normalize() in {pd.Timestamp(x).normalize() for x in _dias_extra_set}
+            _fuente_wl = ("feriado_PE_USA" if _in_hols else "") + \
+                         (" dias_extra" if _in_extra else "")
+            print(f"  {_t_wl.date()}  [{_fuente_wl.strip()}]")
+        print("=" * 72 + "\n")
+        logger.info(
+            f"  Auto-whitelist: {len(_dias_si_habiles)} fechas restauradas como hábiles "
+            f"({_si_dates_str})"
+        )
+        # Limpiar peru_holidays
+        peru_holidays = peru_holidays[
+            ~peru_holidays.normalize().isin(_si_idx.normalize())
+        ]
+        # Limpiar _dias_extra_set
+        _si_norm_set = {pd.Timestamp(d).normalize() for d in _dias_si_habiles}
+        _dias_extra_set -= _si_norm_set
+
     # 3. Calendario extendido: peru_bday + días no hábiles adicionales (puentes, APEC…).
     # Usado para _peru_bdays_idx (features shift/rolling) Y para fecha_th en build_feature_matrix.
     # Garantiza que fecha_th nunca caiga en un día no hábil adicional: si cayera, el target
