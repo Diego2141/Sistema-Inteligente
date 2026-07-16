@@ -248,30 +248,24 @@ def _cargar_ambos_parquets(banco: str) -> dict:
         if not candidatos:
             result[tipo] = None
             continue
-        dfs = []
-        for ruta in candidatos:
-            try:
-                _df = pd.read_parquet(ruta)
-                _df["fecha_t"] = pd.to_datetime(_df["fecha_t"])
-                if "fecha_th" in _df.columns:
-                    _fth = pd.to_datetime(_df["fecha_th"])
-                    if getattr(_fth.dt, "tz", None) is not None:
-                        _fth = _fth.dt.tz_convert(None)
-                    _df["fecha_th"] = _fth
-                dfs.append(_df)
-            except Exception as e:
-                print(f"  [EXCEL/{tipo}] Error leyendo {ruta.name}: {e}")
-        if not dfs:
+        # Usar solo el parquet más reciente (igual que cargar_parquet para gráficos).
+        # Cada run de step005 genera un parquet completo con todo el histórico de test;
+        # acumular parquets de distintos runs mezcla fecha_th de calendarios distintos
+        # → el mismo fecha_th aparece con targets diferentes al filtrar en Excel.
+        ruta = candidatos[-1]
+        try:
+            df = pd.read_parquet(ruta)
+            df["fecha_t"] = pd.to_datetime(df["fecha_t"])
+            if "fecha_th" in df.columns:
+                _fth = pd.to_datetime(df["fecha_th"])
+                if getattr(_fth.dt, "tz", None) is not None:
+                    _fth = _fth.dt.tz_convert(None)
+                df["fecha_th"] = _fth
+        except Exception as e:
+            print(f"  [EXCEL/{tipo}] Error leyendo {ruta.name}: {e}")
             result[tipo] = None
             continue
-        df = pd.concat(dfs, ignore_index=True) if len(dfs) > 1 else dfs[0]
-        # 1. Eliminar duplicados exactos (mismo parquet cargado dos veces)
-        key_cols = [c for c in ["fecha_t", "h", "banco", "fold"] if c in df.columns]
-        df = df.drop_duplicates(subset=key_cols, keep="last")
-        # 2. Para cada (fecha_t, h, banco), conservar solo el fold más reciente.
-        #    En walk-forward CV una misma fecha puede aparecer en varios folds;
-        #    el fold con mayor número usa más datos de entrenamiento → es el más
-        #    representativo para la vista de Excel filtrada por fecha_th.
+        # Para cada (fecha_t, h, banco), conservar solo el fold más reciente.
         dedup2 = [c for c in ["fecha_t", "h", "banco"] if c in df.columns]
         if "fold" in df.columns and dedup2:
             df = (df.sort_values(dedup2 + ["fold"])
@@ -279,7 +273,7 @@ def _cargar_ambos_parquets(banco: str) -> dict:
         df = df.sort_values(["fecha_t", "h"]).reset_index(drop=True)
         result[tipo] = df
         n_folds = df["fold"].nunique() if "fold" in df.columns else "?"
-        print(f"  [EXCEL/{tipo}] {len(candidatos)} archivo(s) | "
+        print(f"  [EXCEL/{tipo}] {ruta.name} | "
               f"{len(df):,} filas | {df['fecha_t'].nunique()} fechas_t | "
               f"{n_folds} fold(s) en datos")
     return result
