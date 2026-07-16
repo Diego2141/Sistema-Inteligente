@@ -2309,9 +2309,10 @@ def build_full_matrix(
     # sería 0 (R=D=0 real) pero la "distancia real" al próximo día operativo es mayor,
     # de modo que el target corresponde a otro horizonte efectivo, rompiendo la semántica de h.
     if _dias_extra_set:
+        from pandas.tseries.offsets import CustomBusinessDay as _CBD
         _extra_hols = pd.DatetimeIndex(sorted(_dias_extra_set))
         _all_hols   = peru_holidays.normalize().union(_extra_hols.normalize())
-        peru_bday_ext = CustomBusinessDay(holidays=_all_hols)
+        peru_bday_ext = _CBD(holidays=_all_hols)
     else:
         peru_bday_ext = peru_bday
 
