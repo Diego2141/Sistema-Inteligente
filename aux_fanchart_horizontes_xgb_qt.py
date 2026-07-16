@@ -214,21 +214,29 @@ def _build_bday() -> CustomBusinessDay:
 
 def _calc_fecha_th(df: pd.DataFrame, bday: CustomBusinessDay) -> pd.DataFrame:
     """
-    Agrega columna fecha_th a df.
-    Para cada fecha_t única genera los h_max días hábiles futuros y los mapea
-    a cada fila por su valor de h.
+    Agrega / recalcula columna fecha_th con dtype datetime64[ns].
+    Usa merge vectorizado en lugar de apply para garantizar el dtype correcto
+    (apply con Timestamps produce object, que openpyxl no escribe como fecha).
     """
     h_max = int(df["h"].max())
-    th_map: dict = {}
-    for t in df["fecha_t"].unique():
-        ts = pd.Timestamp(t)
-        fechas = pd.date_range(start=ts + bday, periods=h_max, freq=bday)
-        th_map[ts] = {h + 1: fechas[h] for h in range(len(fechas))}
+    fechas_t_unicas = pd.DatetimeIndex(df["fecha_t"].unique())
+
+    records = []
+    for t in fechas_t_unicas:
+        fechas = pd.date_range(start=t + bday, periods=h_max, freq=bday)
+        for h_idx, fth in enumerate(fechas, start=1):
+            records.append((t, h_idx, fth))
+
+    th_df = pd.DataFrame(records, columns=["fecha_t", "h", "fecha_th"])
+    th_df["fecha_th"] = pd.to_datetime(th_df["fecha_th"])        # datetime64[ns]
+    th_df["h"] = th_df["h"].astype(int)
 
     df = df.copy()
-    df["fecha_th"] = df.apply(
-        lambda r: th_map.get(r["fecha_t"], {}).get(r["h"], pd.NaT), axis=1
-    )
+    # Drop fecha_th si ya existe (viene como NaT desde el parquet)
+    df = df.drop(columns=["fecha_th"], errors="ignore")
+    h_col = df["h"].astype(int)
+    df["h"] = h_col
+    df = df.merge(th_df, on=["fecha_t", "h"], how="left")
     return df
 
 
@@ -257,13 +265,23 @@ def _cargar_ambos_parquets(banco: str) -> dict:
             result[tipo] = None
             continue
         df = pd.concat(dfs, ignore_index=True) if len(dfs) > 1 else dfs[0]
+        # 1. Eliminar duplicados exactos (mismo parquet cargado dos veces)
         key_cols = [c for c in ["fecha_t", "h", "banco", "fold"] if c in df.columns]
-        df = (df.drop_duplicates(subset=key_cols, keep="last")
-                .sort_values(["fecha_t", "h"])
-                .reset_index(drop=True))
+        df = df.drop_duplicates(subset=key_cols, keep="last")
+        # 2. Para cada (fecha_t, h, banco), conservar solo el fold más reciente.
+        #    En walk-forward CV una misma fecha puede aparecer en varios folds;
+        #    el fold con mayor número usa más datos de entrenamiento → es el más
+        #    representativo para la vista de Excel filtrada por fecha_th.
+        dedup2 = [c for c in ["fecha_t", "h", "banco"] if c in df.columns]
+        if "fold" in df.columns and dedup2:
+            df = (df.sort_values(dedup2 + ["fold"])
+                    .drop_duplicates(subset=dedup2, keep="last"))
+        df = df.sort_values(["fecha_t", "h"]).reset_index(drop=True)
         result[tipo] = df
+        n_folds = df["fold"].nunique() if "fold" in df.columns else "?"
         print(f"  [EXCEL/{tipo}] {len(candidatos)} archivo(s) | "
-              f"{len(df):,} filas | {df['fecha_t'].nunique()} fechas_t")
+              f"{len(df):,} filas | {df['fecha_t'].nunique()} fechas_t | "
+              f"{n_folds} fold(s) en datos")
     return result
 
 
@@ -275,7 +293,8 @@ def _preparar_hoja(df: pd.DataFrame, bday: CustomBusinessDay) -> pd.DataFrame:
     para mantener compatibilidad con parquets antiguos.
     """
     if "fecha_th" not in df.columns or df["fecha_th"].isna().all():
-        df = _calc_fecha_th(df, bday)
+        # Fallback: recalcular desde el calendario
+        df = _calc_fecha_th(df, bday)   # ya produce datetime64[ns]
     else:
         df = df.copy()
         _fth = pd.to_datetime(df["fecha_th"])
