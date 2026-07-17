@@ -413,14 +413,27 @@ def _cargar_ambos_parquets(banco: str) -> dict:
 
             df["h"] = df["h"].astype(int)
             # Eliminar columnas que vienen de la matriz (se reemplazarán)
-            df = df.drop(columns=["fecha_th", "target"], errors="ignore")
+            df = df.drop(columns=["fecha_th", "target", "target_t0"], errors="ignore")
             df = df.merge(_mapping, on=["fecha_t", "h"], how="left")
+
+            # ── target_t0: valor realizado D-R en la fecha de ORIGEN (fecha_t) ──
+            # Construir lookup {fecha → realized_DR} desde los pares (fecha_th, target)
+            # del mapping. Las fechas de origen son días hábiles que también aparecen
+            # como fechas pronosticadas en filas de otras fechas anteriores.
+            _realized = (
+                _mapping.dropna(subset=["target"])
+                .drop_duplicates(subset=["fecha_th"])
+                .set_index("fecha_th")["target"]
+            )
+            df["target_t0"] = df["fecha_t"].map(_realized)
 
             n_fth   = int(df["fecha_th"].notna().sum())
             n_tgt   = int(df["target"].notna().sum())
+            n_t0    = int(df["target_t0"].notna().sum())
             n_total = len(df)
-            print(f"  [EXCEL/{tipo}] fecha_th de matriz: {n_fth:,}/{n_total:,} | "
-                  f"target de matriz: {n_tgt:,}/{n_total:,}"
+            print(f"  [EXCEL/{tipo}] fecha_th: {n_fth:,}/{n_total:,} | "
+                  f"target: {n_tgt:,}/{n_total:,} | "
+                  f"target_t0: {n_t0:,}/{n_total:,}"
                   + (" ✓" if n_fth == n_total else
                      f" ({n_total - n_fth} sin cubrir — h muy grande o fecha futura)"))
 
@@ -473,7 +486,10 @@ def _preparar_hoja(df: pd.DataFrame, bday: CustomBusinessDay) -> pd.DataFrame:
 
     q_cols     = [c for c in ["q01", "q05", "q50", "q95", "q99"] if c in df.columns]
     extra_cols = [c for c in ["mean"] if c in df.columns]
-    val_cols   = q_cols + extra_cols + (["target"] if "target" in df.columns else [])
+    # target    = D(fecha_th) − R(fecha_th): realizado en la fecha PRONOSTICADA
+    # target_t0 = D(fecha_t)  − R(fecha_t):  realizado en la fecha de ORIGEN
+    tgt_cols = [c for c in ["target", "target_t0"] if c in df.columns]
+    val_cols = q_cols + extra_cols + tgt_cols
 
     df = df[base_cols + val_cols].copy()
     for col in val_cols:
@@ -557,7 +573,9 @@ def exportar_excel(banco: str = BANCO, ruta: Path = RUTA_EXCEL) -> None:
             print(f"    Hoja '{nombre}': {df_hoja.shape[0]:,} filas × {df_hoja.shape[1]} cols")
 
     print(f"  ✓ Excel guardado correctamente.")
-    print(f"    Columnas: fecha_t | fecha_th | h | [fold] | Q01..Q99 | target (MM USD)")
+    print(f"    Columnas: fecha_t | fecha_th | h | [fold] | Q01..Q99 | target | target_t0 (MM USD)"
+          f"\n    target    = D(fecha_th) − R(fecha_th): realizado en fecha PRONOSTICADA"
+          f"\n    target_t0 = D(fecha_t)  − R(fecha_t):  realizado en fecha de ORIGEN")
     print(f"    Hojas   : base · overlay · resumen")
 
 
