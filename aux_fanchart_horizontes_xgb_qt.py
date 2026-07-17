@@ -218,45 +218,113 @@ def _build_bday() -> CustomBusinessDay:
 
 def _cargar_fecha_th_from_matriz(banco: str) -> "pd.DataFrame | None":
     """
-    Lee (fecha_t, h, fecha_th) de la matriz de features generada por step001.
+    Construye el mapping (fecha_t × h → fecha_th) usando la secuencia exacta de
+    días hábiles de step001, sin necesidad de un calendario externo.
 
-    step001 construye fecha_th con el calendario extendido (PE+USA + ~44 días
-    no hábiles auto-detectados).  _build_bday() no conoce esos 44 días y
-    produce un shift de +1 día en periodos de puente, haciendo que la misma
-    fecha_th en Excel muestre targets de dos días distintos.
+    Estrategia (en orden de prioridad):
 
-    Retorna DataFrame [fecha_t, h, fecha_th] sin NaT, o None si la matriz
-    no existe o no contiene fecha_th.
+    1. Columna fecha_th en la matriz (disponible si step001 >= commit que guarda
+       fecha_th).  Más rápido y directo.
+
+    2. Derivación desde la secuencia de fecha_t únicas.  Las fechas únicas de
+       fecha_t en la matriz son exactamente los días hábiles del calendario
+       extendido de step001 (PE+USA + ~44 días no hábiles auto-detectados).
+       fecha_th(fecha_t, h) = el h-ésimo elemento tras fecha_t en esa secuencia.
+       Matemáticamente equivalente a lo que hace step001, sin ningún calendario.
+       NOTA: cubre solo hasta la última fecha_t de la matriz; para h muy grandes
+       desde fechas recientes puede devolver NaT (cubierto por el fallback en
+       _preparar_hoja).
+
+    Retorna DataFrame [fecha_t, h, fecha_th] (sin NaT), o None si la matriz
+    no existe o no se puede leer.
     """
     if not RUTA_MATRIZ.exists():
+        print(f"  [AVISO] Matriz de features no encontrada en {RUTA_MATRIZ}. "
+              f"Se usará calendario básico (puede haber shift de 1 día en puentes).")
         return None
+
+    # ── Intento 1: leer fecha_th directamente ────────────────────────────────
     try:
         df_m = pd.read_parquet(
             RUTA_MATRIZ,
             columns=["fecha_t", "h", "fecha_th"],
             filters=[("banco", "==", banco)],
         )
+        df_m["fecha_t"] = pd.to_datetime(df_m["fecha_t"])
+        _fth = pd.to_datetime(df_m["fecha_th"])
+        if getattr(_fth.dt, "tz", None) is not None:
+            _fth = _fth.dt.tz_convert(None)
+        df_m["fecha_th"] = _fth
+        df_m["h"] = df_m["h"].astype(int)
+        df_m = df_m.dropna(subset=["fecha_th"])
+        if not df_m.empty:
+            df_m = (df_m[["fecha_t", "h", "fecha_th"]]
+                    .drop_duplicates(subset=["fecha_t", "h"]))
+            print(f"  [MATRIZ] fecha_th leída directamente de la matriz: "
+                  f"{len(df_m):,} pares (fecha_t, h)")
+            return df_m
+        # Columna existe pero todo NaT → caer al intento 2
+        print("  [MATRIZ] fecha_th en la matriz es todo NaT; "
+              "derivando desde secuencia de días hábiles...")
+    except Exception:
+        # Columna fecha_th no existe en la matriz (generada antes del fix de dtype)
+        pass
+
+    # ── Intento 2: derivar fecha_th desde la secuencia de fecha_t únicas ────
+    try:
+        df_m2 = pd.read_parquet(
+            RUTA_MATRIZ,
+            columns=["fecha_t", "h"],
+            filters=[("banco", "==", banco)],
+        )
     except Exception as e:
-        print(f"  [AVISO] No se pudo leer la matriz de features ({e}); "
-              f"se usará calendario básico para fecha_th.")
+        print(f"  [AVISO] No se pudo leer la matriz de features: {e}. "
+              f"Se usará calendario básico.")
         return None
 
-    df_m["fecha_t"] = pd.to_datetime(df_m["fecha_t"])
-    _fth = pd.to_datetime(df_m["fecha_th"])
-    if getattr(_fth.dt, "tz", None) is not None:
-        _fth = _fth.dt.tz_convert(None)
-    df_m["fecha_th"] = _fth
-    df_m["h"] = df_m["h"].astype(int)
+    df_m2["fecha_t"] = pd.to_datetime(df_m2["fecha_t"])
+    df_m2["h"]       = df_m2["h"].astype(int)
 
-    df_m = df_m.dropna(subset=["fecha_th"])
-    if df_m.empty:
-        print("  [AVISO] La matriz de features no tiene fecha_th válidos. "
-              "Re-correr step001 con el código actual.")
+    # Secuencia ordenada de días hábiles = unique(fecha_t) de la matriz.
+    # Es exactamente el conjunto que step001 usó para generar las filas, por lo
+    # que fecha_t[i] + h pasos → fecha_t[i + h] es idéntico al cálculo de step001.
+    dias_habiles = np.sort(df_m2["fecha_t"].unique())   # numpy array de datetime64
+    n_dias = len(dias_habiles)
+
+    if n_dias == 0:
+        print("  [AVISO] La matriz de features no contiene filas para este banco.")
         return None
 
-    df_m = df_m[["fecha_t", "h", "fecha_th"]].drop_duplicates(subset=["fecha_t", "h"])
-    print(f"  [MATRIZ] fecha_th extendida cargada: {len(df_m):,} pares (fecha_t, h)")
-    return df_m
+    # Diccionario posición: Timestamp → índice en días_habiles
+    pos_dict = {pd.Timestamp(d): i for i, d in enumerate(dias_habiles)}
+
+    # Pares únicos (fecha_t, h) que necesitamos mapear
+    pares = df_m2[["fecha_t", "h"]].drop_duplicates().copy()
+    pares = pares.sort_values(["fecha_t", "h"]).reset_index(drop=True)
+
+    # Vectorizado: índice de fecha_t + h → índice de fecha_th
+    ft_idx = pares["fecha_t"].map(pos_dict)          # posición en días_habiles
+    th_idx = ft_idx + pares["h"]                     # posición objetivo
+    valido = (ft_idx.notna()) & (th_idx < n_dias)
+
+    pares["fecha_th"] = pd.NaT
+    if valido.any():
+        th_positions = th_idx[valido].astype(int).values
+        pares.loc[valido, "fecha_th"] = pd.DatetimeIndex(
+            dias_habiles[th_positions]
+        )
+    pares["fecha_th"] = pd.to_datetime(pares["fecha_th"])
+
+    pares = pares.dropna(subset=["fecha_th"])
+    n_cubiertos = len(pares)
+    n_total_pares = len(df_m2[["fecha_t", "h"]].drop_duplicates())
+    rango = (f"{pd.Timestamp(dias_habiles[0]).date()} → "
+             f"{pd.Timestamp(dias_habiles[-1]).date()}")
+    print(f"  [MATRIZ] fecha_th derivada de secuencia hábil: "
+          f"{n_cubiertos:,}/{n_total_pares:,} pares cubiertos | "
+          f"días hábiles: {n_dias} ({rango})")
+
+    return pares[["fecha_t", "h", "fecha_th"]] if not pares.empty else None
 
 
 def _calc_fecha_th(df: pd.DataFrame, bday: CustomBusinessDay) -> pd.DataFrame:
@@ -330,12 +398,26 @@ def _cargar_ambos_parquets(banco: str) -> dict:
                     .drop_duplicates(subset=dedup2, keep="last"))
         df = df.sort_values(["fecha_t", "h"]).reset_index(drop=True)
 
-        # ── Enriquecer fecha_th desde la matriz de features (fuente 2) ──────────
-        # Aplica incluso si el parquet ya tiene algunas fecha_th válidas, para
-        # garantizar que la totalidad del DataFrame use el calendario extendido.
-        # La matriz es la misma fuente que usó step001 para calcular los targets,
-        # por lo que matriz-fecha_th y target son siempre coherentes.
+        # ── Enriquecer fecha_th desde la matriz de features ─────────────────────
+        # Siempre reemplaza fecha_th del parquet de predicciones con el valor
+        # de la matriz: garantiza coherencia total entre target y fecha_th porque
+        # ambos provienen del mismo calendario extendido de step001.
+        #
+        # Además filtra filas cuya fecha_t NO aparece en la matriz: son predicciones
+        # de un run anterior de step005 en el que ese día era hábil, pero la versión
+        # actual de step001 ya no lo incluye (día detectado como no operativo).
+        # Esas filas tienen targets calculados con un calendario distinto y causan
+        # inconsistencias (dos targets distintos para la misma fecha_th en Excel).
         if _fth_matriz is not None:
+            _valid_ft = set(_fth_matriz["fecha_t"].unique())
+            _stale_mask = ~df["fecha_t"].isin(_valid_ft)
+            if _stale_mask.any():
+                n_stale = int(_stale_mask.sum())
+                ft_stale = sorted(df.loc[_stale_mask, "fecha_t"].dt.date.unique())
+                print(f"  [EXCEL/{tipo}] Eliminando {n_stale} filas con fecha_t "
+                      f"no hábil según la matriz actual: {ft_stale}")
+                df = df[~_stale_mask].copy()
+
             df = df.drop(columns=["fecha_th"], errors="ignore")
             df["h"] = df["h"].astype(int)
             df = df.merge(_fth_matriz, on=["fecha_t", "h"], how="left")
@@ -343,7 +425,7 @@ def _cargar_ambos_parquets(banco: str) -> dict:
             n_total  = len(df)
             if n_filled < n_total:
                 print(f"  [EXCEL/{tipo}] fecha_th de matriz: {n_filled:,}/{n_total:,} "
-                      f"({n_total - n_filled} sin cubrir — re-correr step001 si persiste)")
+                      f"({n_total - n_filled} sin cubrir — h muy grande o fecha futura)")
             else:
                 print(f"  [EXCEL/{tipo}] fecha_th de matriz: {n_filled:,}/{n_total:,} ✓")
 
