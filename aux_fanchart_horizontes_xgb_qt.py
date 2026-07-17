@@ -35,6 +35,10 @@ DIR_PREDS_STEP005 = BASE_SISTEMA / "2. Output" / "step005_wfcv_v3"
 DIR_OUTPUT        = BASE_SISTEMA / "2. Output" / "aux_fanchart_horizontes_xgb_qt"
 DIR_OUTPUT.mkdir(parents=True, exist_ok=True)
 
+# Matriz de features (step001) — fuente autoritativa de fecha_th con calendario extendido.
+# Confidencial: no se commitea (.gitignore). Se lee solo para extraer fecha_th.
+RUTA_MATRIZ = BASE_SISTEMA / "1. Data" / "Clean" / "matriz_features.parquet"
+
 BANCO = "SISTEMA"
 
 # ── Exportación Excel ─────────────────────────────────────────────────────────
@@ -212,6 +216,49 @@ def _build_bday() -> CustomBusinessDay:
     return CustomBusinessDay(holidays=sorted(hols))
 
 
+def _cargar_fecha_th_from_matriz(banco: str) -> "pd.DataFrame | None":
+    """
+    Lee (fecha_t, h, fecha_th) de la matriz de features generada por step001.
+
+    step001 construye fecha_th con el calendario extendido (PE+USA + ~44 días
+    no hábiles auto-detectados).  _build_bday() no conoce esos 44 días y
+    produce un shift de +1 día en periodos de puente, haciendo que la misma
+    fecha_th en Excel muestre targets de dos días distintos.
+
+    Retorna DataFrame [fecha_t, h, fecha_th] sin NaT, o None si la matriz
+    no existe o no contiene fecha_th.
+    """
+    if not RUTA_MATRIZ.exists():
+        return None
+    try:
+        df_m = pd.read_parquet(
+            RUTA_MATRIZ,
+            columns=["fecha_t", "h", "fecha_th"],
+            filters=[("banco", "==", banco)],
+        )
+    except Exception as e:
+        print(f"  [AVISO] No se pudo leer la matriz de features ({e}); "
+              f"se usará calendario básico para fecha_th.")
+        return None
+
+    df_m["fecha_t"] = pd.to_datetime(df_m["fecha_t"])
+    _fth = pd.to_datetime(df_m["fecha_th"])
+    if getattr(_fth.dt, "tz", None) is not None:
+        _fth = _fth.dt.tz_convert(None)
+    df_m["fecha_th"] = _fth
+    df_m["h"] = df_m["h"].astype(int)
+
+    df_m = df_m.dropna(subset=["fecha_th"])
+    if df_m.empty:
+        print("  [AVISO] La matriz de features no tiene fecha_th válidos. "
+              "Re-correr step001 con el código actual.")
+        return None
+
+    df_m = df_m[["fecha_t", "h", "fecha_th"]].drop_duplicates(subset=["fecha_t", "h"])
+    print(f"  [MATRIZ] fecha_th extendida cargada: {len(df_m):,} pares (fecha_t, h)")
+    return df_m
+
+
 def _calc_fecha_th(df: pd.DataFrame, bday: CustomBusinessDay) -> pd.DataFrame:
     """
     Agrega / recalcula columna fecha_th con dtype datetime64[ns].
@@ -241,17 +288,25 @@ def _calc_fecha_th(df: pd.DataFrame, bday: CustomBusinessDay) -> pd.DataFrame:
 
 
 def _cargar_ambos_parquets(banco: str) -> dict:
-    """Carga base y overlay concatenando todos los archivos disponibles."""
+    """Carga base y overlay del parquet más reciente de step005.
+
+    Prioridad para fecha_th (de más a menos confiable):
+      1. Parquet de step005 con fecha_th ya propagado (step005 >= commit 7827417)
+      2. Matriz de features step001 (calendario extendido correcto)
+      3. _calc_fecha_th con calendario básico (fallback: puede haber shift de 1 día
+         en periodos de puente, causando múltiples targets por fecha_th en Excel)
+    """
+    # Cargar fecha_th de la matriz de features una sola vez para ambos tipos
+    _fth_matriz = _cargar_fecha_th_from_matriz(banco)
+
     result = {}
     for tipo in ("base", "overlay"):
         candidatos = sorted(DIR_PREDS_STEP005.glob(f"*/preds_{tipo}_{banco}_*.parquet"))
         if not candidatos:
             result[tipo] = None
             continue
-        # Usar solo el parquet más reciente (igual que cargar_parquet para gráficos).
-        # Cada run de step005 genera un parquet completo con todo el histórico de test;
-        # acumular parquets de distintos runs mezcla fecha_th de calendarios distintos
-        # → el mismo fecha_th aparece con targets diferentes al filtrar en Excel.
+        # Usar solo el parquet más reciente: cada run de step005 contiene el histórico
+        # completo; acumular runs mezclaría fecha_th de calendarios distintos.
         ruta = candidatos[-1]
         try:
             df = pd.read_parquet(ruta)
@@ -261,16 +316,37 @@ def _cargar_ambos_parquets(banco: str) -> dict:
                 if getattr(_fth.dt, "tz", None) is not None:
                     _fth = _fth.dt.tz_convert(None)
                 df["fecha_th"] = _fth
+            else:
+                df["fecha_th"] = pd.NaT
         except Exception as e:
             print(f"  [EXCEL/{tipo}] Error leyendo {ruta.name}: {e}")
             result[tipo] = None
             continue
+
         # Para cada (fecha_t, h, banco), conservar solo el fold más reciente.
         dedup2 = [c for c in ["fecha_t", "h", "banco"] if c in df.columns]
         if "fold" in df.columns and dedup2:
             df = (df.sort_values(dedup2 + ["fold"])
                     .drop_duplicates(subset=dedup2, keep="last"))
         df = df.sort_values(["fecha_t", "h"]).reset_index(drop=True)
+
+        # ── Enriquecer fecha_th desde la matriz de features (fuente 2) ──────────
+        # Aplica incluso si el parquet ya tiene algunas fecha_th válidas, para
+        # garantizar que la totalidad del DataFrame use el calendario extendido.
+        # La matriz es la misma fuente que usó step001 para calcular los targets,
+        # por lo que matriz-fecha_th y target son siempre coherentes.
+        if _fth_matriz is not None:
+            df = df.drop(columns=["fecha_th"], errors="ignore")
+            df["h"] = df["h"].astype(int)
+            df = df.merge(_fth_matriz, on=["fecha_t", "h"], how="left")
+            n_filled = int(df["fecha_th"].notna().sum())
+            n_total  = len(df)
+            if n_filled < n_total:
+                print(f"  [EXCEL/{tipo}] fecha_th de matriz: {n_filled:,}/{n_total:,} "
+                      f"({n_total - n_filled} sin cubrir — re-correr step001 si persiste)")
+            else:
+                print(f"  [EXCEL/{tipo}] fecha_th de matriz: {n_filled:,}/{n_total:,} ✓")
+
         result[tipo] = df
         n_folds = df["fold"].nunique() if "fold" in df.columns else "?"
         print(f"  [EXCEL/{tipo}] {ruta.name} | "
@@ -282,13 +358,15 @@ def _cargar_ambos_parquets(banco: str) -> dict:
 def _preparar_hoja(df: pd.DataFrame, bday: CustomBusinessDay) -> pd.DataFrame:
     """Reordena columnas y convierte a millones USD.
 
-    Usa fecha_th del parquet cuando está disponible (generado por step005 >= v3
-    con calendar extendido de step001).  Solo recalcula con bday cuando falta,
-    para mantener compatibilidad con parquets antiguos.
+    Prioridad de fecha_th (aplicada ANTES de llegar aquí, en _cargar_ambos_parquets):
+      1. Parquet step005 (propagado desde step001, >= commit 7827417)
+      2. Matriz de features step001 (calendario extendido correcto)
+    Si aún quedan NaT, esta función aplica el fallback de último recurso:
+      3. _calc_fecha_th con calendario básico (puede dar shift de 1 día en puentes)
     """
     df = df.copy()
 
-    # Convertir / strip-timezone si la columna ya existe
+    # Convertir / strip-timezone
     if "fecha_th" in df.columns:
         _fth = pd.to_datetime(df["fecha_th"])
         if getattr(_fth.dt, "tz", None) is not None:
@@ -297,25 +375,20 @@ def _preparar_hoja(df: pd.DataFrame, bday: CustomBusinessDay) -> pd.DataFrame:
     else:
         df["fecha_th"] = pd.NaT
 
-    # Estrategia para NaT en fecha_th:
-    # - Si TODOS los valores son NaT (parquet antiguo sin la columna): rellenar con
-    #   _calc_fecha_th es seguro porque no hay mezcla de calendarios → targets consistentes.
-    # - Si ALGUNOS son válidos y OTROS son NaT (parquet mixto: generado con step005
-    #   parcialmente actualizado): NO rellenar. El calendario de _build_bday() le falta
-    #   los ~44 días no hábiles auto-detectados por step001 → shift de +1 día en puentes
-    #   → la misma fecha_th agrupa targets de dos días distintos. Advertir y dejar NaT.
+    # Fallback de último recurso: ni el parquet ni la matriz tenían fecha_th.
+    # - Si TODOS son NaT: relleno uniforme con calendario básico (sin mezcla).
+    # - Si ALGUNOS son NaT: no rellenar para evitar mezcla de calendarios.
     _nat_mask = df["fecha_th"].isna()
     if _nat_mask.all():
-        # Parquet completamente antiguo — relleno uniforme, sin mezcla
         _df_fill = _calc_fecha_th(df.copy(), bday)
         df["fecha_th"] = _df_fill["fecha_th"].values
         df["fecha_th"] = pd.to_datetime(df["fecha_th"])
-        print(f"  [AVISO] fecha_th calculada con calendario básico (parquet antiguo). "
-              f"Re-correr step001 + step005 para usar el calendario extendido correcto.")
+        print(f"  [AVISO] fecha_th calculada con calendario básico (sin matriz disponible). "
+              f"Re-correr step001 para corregir posibles shifts en periodos de puente.")
     elif _nat_mask.any():
         n_nat = int(_nat_mask.sum())
-        print(f"  [AVISO] {n_nat} filas con fecha_th=NaT en parquet mixto. "
-              f"Re-correr step001 + step005 para corregir (no se rellena para evitar mezcla de calendarios).")
+        print(f"  [AVISO] {n_nat} filas con fecha_th=NaT tras enriquecimiento. "
+              f"Re-correr step001 + step005 para corregir.")
 
     base_cols = ["fecha_t", "fecha_th", "h"]
     if "fold" in df.columns:
