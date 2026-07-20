@@ -43,28 +43,34 @@ def pinball(y: np.ndarray, yhat: np.ndarray, tau: float) -> float:
 def cargar_preds(banco: str, tipo: str | None = None) -> pd.DataFrame:
     """Carga el parquet más reciente de step005_wfcv_v3.
 
-    Orden de preferencia si tipo=None:
-      1. preds_overlay_*   (incluye ajuste sobreencaje — el que usa aux_fanchart)
-      2. preds_base_*      (modelo puro, sin overlay)
+    Si tipo=None, busca cualquier parquet que contenga el nombre del banco.
+    Imprime todos los candidatos encontrados para facilitar el diagnóstico.
     """
-    tipos_a_probar = [tipo] if tipo else ["overlay", "base"]
-    ruta = None
-    tipo_encontrado = None
-    for t in tipos_a_probar:
-        candidatos = sorted(DIR_PREDS.glob(f"*/preds_{t}_{banco}_*.parquet"))
-        if candidatos:
-            ruta = candidatos[-1]
-            tipo_encontrado = t
-            break
+    # Listar TODOS los parquets disponibles (recursivo)
+    todos = sorted(DIR_PREDS.rglob("*.parquet"))
+    print(f"[INFO] Parquets encontrados en {DIR_PREDS.name}:")
+    if todos:
+        for p in todos:
+            print(f"         {p.relative_to(DIR_PREDS)}")
+    else:
+        print("         (ninguno)")
 
-    if ruta is None:
-        tipos_str = " ni ".join(f"preds_{t}_{banco}_*.parquet" for t in tipos_a_probar)
+    # Filtrar por banco
+    candidatos_banco = [p for p in todos if banco.lower() in p.name.lower()]
+
+    # Si se especificó tipo, filtrar también por tipo
+    if tipo:
+        candidatos_banco = [p for p in candidatos_banco if tipo in p.name]
+
+    if not candidatos_banco:
         raise FileNotFoundError(
-            f"No se encontró {tipos_str} en {DIR_PREDS}\n"
-            f"Asegúrate de haber corrido step005_walk_forward_cv_3.py primero."
+            f"No se encontró ningún parquet con '{banco}' en {DIR_PREDS}\n"
+            f"Parquets disponibles arriba. Ajusta la variable BANCO o TIPO_PARQUET."
         )
 
-    print(f"[INFO] Tipo de parquet detectado: '{tipo_encontrado}'")
+    ruta = candidatos_banco[-1]  # el más reciente por orden alfabético/fecha
+
+    print(f"[INFO] Usando: {ruta.name}")
     print(f"[INFO] Leyendo: {ruta.relative_to(BASE_SISTEMA)}")
     df = pd.read_parquet(ruta)
     df["fecha_t"]  = pd.to_datetime(df["fecha_t"])
