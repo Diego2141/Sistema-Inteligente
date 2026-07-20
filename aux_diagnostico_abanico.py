@@ -30,8 +30,8 @@ DIR_OUTPUT     = BASE_SISTEMA / "2. Output" / "aux_diagnostico_abanico"
 DIR_OUTPUT.mkdir(parents=True, exist_ok=True)
 
 BANCO          = "BancaLocal"
-TIPO_PARQUET   = "base"          # "base" o "overlay"
-FECHA_T_FIJA   = None            # None → usa la penúltima fecha_t disponible
+TIPO_PARQUET   = None   # None → autodetecta (prefiere "overlay", luego "base")
+FECHA_T_FIJA   = None   # None → usa una fecha_t del cuarto final del rango
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -40,40 +40,65 @@ def pinball(y: np.ndarray, yhat: np.ndarray, tau: float) -> float:
     return float(np.where(err >= 0, tau * err, (tau - 1) * err).mean())
 
 
-def cargar_preds(banco: str, tipo: str) -> pd.DataFrame:
-    candidatos = sorted(DIR_PREDS.glob(f"*/preds_{tipo}_{banco}_*.parquet"))
-    if not candidatos:
+def cargar_preds(banco: str, tipo: str | None = None) -> pd.DataFrame:
+    """Carga el parquet más reciente de step005_wfcv_v3.
+
+    Orden de preferencia si tipo=None:
+      1. preds_overlay_*   (incluye ajuste sobreencaje — el que usa aux_fanchart)
+      2. preds_base_*      (modelo puro, sin overlay)
+    """
+    tipos_a_probar = [tipo] if tipo else ["overlay", "base"]
+    ruta = None
+    tipo_encontrado = None
+    for t in tipos_a_probar:
+        candidatos = sorted(DIR_PREDS.glob(f"*/preds_{t}_{banco}_*.parquet"))
+        if candidatos:
+            ruta = candidatos[-1]
+            tipo_encontrado = t
+            break
+
+    if ruta is None:
+        tipos_str = " ni ".join(f"preds_{t}_{banco}_*.parquet" for t in tipos_a_probar)
         raise FileNotFoundError(
-            f"No se encontró preds_{tipo}_{banco}_*.parquet en {DIR_PREDS}"
+            f"No se encontró {tipos_str} en {DIR_PREDS}\n"
+            f"Asegúrate de haber corrido step005_walk_forward_cv_3.py primero."
         )
-    ruta = candidatos[-1]
+
+    print(f"[INFO] Tipo de parquet detectado: '{tipo_encontrado}'")
     print(f"[INFO] Leyendo: {ruta.relative_to(BASE_SISTEMA)}")
     df = pd.read_parquet(ruta)
     df["fecha_t"]  = pd.to_datetime(df["fecha_t"])
-    df["fecha_th"] = pd.to_datetime(df["fecha_th"])
+    if "fecha_th" in df.columns:
+        df["fecha_th"] = pd.to_datetime(df["fecha_th"])
     return df
 
 
 # ── Diagnóstico principal ─────────────────────────────────────────────────────
 def main() -> None:
-    preds = cargar_preds(BANCO, TIPO_PARQUET)
+    preds = cargar_preds(BANCO, TIPO_PARQUET)  # TIPO_PARQUET=None → autodetecta
     preds = preds.dropna(subset=["target", "q05", "q95", "q50"])
 
+    print(f"[INFO] Columnas disponibles: {list(preds.columns)}")
     print(f"[INFO] Filas cargadas: {len(preds):,}")
     print(f"[INFO] Horizontes disponibles: h={preds['h'].min()}–{preds['h'].max()}")
     print(f"[INFO] Fechas_t: {preds['fecha_t'].min().date()} → {preds['fecha_t'].max().date()}")
 
     # Ancho del intervalo y pinball por horizonte
     preds["ancho_90"] = preds["q95"] - preds["q05"]
-    preds["ancho_98"] = preds["q99"] - preds["q01"]
+    tiene_q01q99 = "q01" in preds.columns and "q99" in preds.columns
+    if tiene_q01q99:
+        preds["ancho_98"] = preds["q99"] - preds["q01"]
 
-    agg = preds.groupby("h").agg(
+    agg_dict = dict(
         var_target   = ("target", "var"),
         std_target   = ("target", "std"),
         ancho_90_med = ("ancho_90", "mean"),
-        ancho_98_med = ("ancho_98", "mean"),
         n            = ("target", "count"),
     )
+    if tiene_q01q99:
+        agg_dict["ancho_98_med"] = ("ancho_98", "mean")
+
+    agg = preds.groupby("h").agg(**agg_dict)
 
     # Pinball loss por horizonte (q05, q50, q95)
     pb_q05 = preds.groupby("h").apply(
@@ -112,7 +137,8 @@ def main() -> None:
                      np.sqrt(agg["var_target"]) * 1.2,
                      alpha=0.15, color="#2563EB")
     ax1_r.plot(hs, agg["ancho_90_med"] / 2, color="#DC2626", lw=2, ls="--", label="½ ancho Q05-Q95 (modelo)")
-    ax1_r.plot(hs, agg["ancho_98_med"] / 2, color="#F97316", lw=1, ls=":",  label="½ ancho Q01-Q99 (modelo)")
+    if "ancho_98_med" in agg.columns:
+        ax1_r.plot(hs, agg["ancho_98_med"] / 2, color="#F97316", lw=1, ls=":", label="½ ancho Q01-Q99 (modelo)")
     ax1.set_xlabel("Horizonte h (días hábiles)")
     ax1.set_ylabel("σ real target (MM USD)", color="#2563EB")
     ax1_r.set_ylabel("½ ancho modelo (MM USD)", color="#DC2626")
@@ -177,12 +203,14 @@ def main() -> None:
         ax4.text(0.5, 0.5, "Sin datos para la fecha de referencia",
                  ha="center", va="center", transform=ax4.transAxes)
     else:
-        ax4.fill_between(snap["h"], snap["q01"], snap["q99"],
-                         alpha=0.12, color="#2563EB", label="Q01-Q99")
+        if tiene_q01q99:
+            ax4.fill_between(snap["h"], snap["q01"], snap["q99"],
+                             alpha=0.12, color="#2563EB", label="Q01-Q99")
         ax4.fill_between(snap["h"], snap["q05"], snap["q95"],
                          alpha=0.30, color="#2563EB", label="Q05-Q95")
         ax4.plot(snap["h"], snap["q50"],  color="#1D4ED8", lw=2,   label="Q50 (mediana)")
-        ax4.plot(snap["h"], snap["mean"], color="#1D4ED8", lw=1.5, ls="--", label="Media")
+        if "mean" in snap.columns:
+            ax4.plot(snap["h"], snap["mean"], color="#1D4ED8", lw=1.5, ls="--", label="Media")
         if snap["target"].notna().any():
             ax4.scatter(snap["h"], snap["target"],
                         color="#DC2626", s=30, zorder=5, label="Target real")
