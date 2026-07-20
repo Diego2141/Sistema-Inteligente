@@ -548,6 +548,140 @@ def guardar_diag_y_plots(
 
 
 # ---------------------------------------------------------------------------
+# Metrics plots
+# ---------------------------------------------------------------------------
+
+def graficar_metricas(
+    df_res: pd.DataFrame,
+    dir_modo: Path,
+    banco: str,
+    fecha_hoy: str,
+) -> None:
+    """Genera figura con 4 paneles: RMSE, Pinball q50, todos los cuantiles, Coverage."""
+    try:
+        import matplotlib.pyplot as plt
+        import matplotlib.ticker as mticker
+    except ImportError:
+        log.warning("matplotlib no disponible — omitiendo gráficos de métricas")
+        return
+
+    folds      = sorted(df_res["fold"].unique())
+    cmap_folds = plt.cm.Set1
+    hs_all     = np.sort(df_res["h"].unique())
+
+    # Paleta de colores para cuantiles
+    tau_colors = {
+        "pinball_q01": "#6B21A8",
+        "pinball_q05": "#9333EA",
+        "pinball_q50": "#2563EB",
+        "pinball_q95": "#EA580C",
+        "pinball_q99": "#991B1B",
+    }
+
+    fig, axes = plt.subplots(2, 2, figsize=(18, 12),
+                             gridspec_kw={"hspace": 0.40, "wspace": 0.32})
+    fig.suptitle(
+        f"Métricas de desempeño por horizonte — {banco}\n"
+        f"cv4 DIRECT (1 modelo por h, h ∉ features)",
+        fontsize=13, fontweight="bold", y=0.99,
+    )
+
+    ax1, ax2, ax3, ax4 = axes.flat
+
+    # ── Panel 1: RMSE por h ──────────────────────────────────────────────────
+    for i, fold_num in enumerate(folds):
+        sub = df_res[df_res["fold"] == fold_num].sort_values("h")
+        ax1.plot(sub["h"], sub["rmse"] / 1e6, lw=1.5,
+                 color=cmap_folds(i / max(len(folds), 1)),
+                 alpha=0.7, label=f"Fold {fold_num}")
+    mean_rmse = df_res.groupby("h")["rmse"].mean()
+    ax1.plot(mean_rmse.index, mean_rmse.values / 1e6,
+             color="black", lw=2.5, label="Promedio folds", zorder=5)
+    ax1.set_title("RMSE por horizonte h", fontweight="bold")
+    ax1.set_xlabel("Horizonte h (días hábiles)")
+    ax1.set_ylabel("RMSE (MM USD)")
+    ax1.legend(fontsize=9)
+    ax1.grid(True, alpha=0.25)
+    ax1.xaxis.set_major_locator(mticker.MultipleLocator(10))
+
+    # ── Panel 2: Pinball q50 por h ───────────────────────────────────────────
+    for i, fold_num in enumerate(folds):
+        sub = df_res[df_res["fold"] == fold_num].sort_values("h")
+        if "pinball_q50" in sub.columns:
+            ax2.plot(sub["h"], sub["pinball_q50"] / 1e6, lw=1.5,
+                     color=cmap_folds(i / max(len(folds), 1)),
+                     alpha=0.7, label=f"Fold {fold_num}")
+    if "pinball_q50" in df_res.columns:
+        mean_pb50 = df_res.groupby("h")["pinball_q50"].mean()
+        ax2.plot(mean_pb50.index, mean_pb50.values / 1e6,
+                 color="black", lw=2.5, label="Promedio folds", zorder=5)
+    ax2.set_title("Pinball loss Q50 (mediana) por horizonte h", fontweight="bold")
+    ax2.set_xlabel("Horizonte h (días hábiles)")
+    ax2.set_ylabel("Pinball loss (MM USD)")
+    ax2.legend(fontsize=9)
+    ax2.grid(True, alpha=0.25)
+    ax2.xaxis.set_major_locator(mticker.MultipleLocator(10))
+
+    # ── Panel 3: Pinball todos los cuantiles (promedio de folds) ─────────────
+    pb_cols_present = [c for c in tau_colors if c in df_res.columns]
+    for col in pb_cols_present:
+        mean_pb = df_res.groupby("h")[col].mean()
+        label   = col.replace("pinball_q", "Q").replace("01", "01 (1%)")\
+                     .replace("05", "05 (5%)").replace("50", "50 (50%)")\
+                     .replace("95", "95 (95%)").replace("99", "99 (99%)")
+        ax3.plot(mean_pb.index, mean_pb.values / 1e6,
+                 color=tau_colors[col], lw=2.0, label=label)
+    ax3.set_title("Pinball loss por cuantil y horizonte (promedio folds)",
+                  fontweight="bold")
+    ax3.set_xlabel("Horizonte h (días hábiles)")
+    ax3.set_ylabel("Pinball loss (MM USD)")
+    ax3.legend(fontsize=9)
+    ax3.grid(True, alpha=0.25)
+    ax3.xaxis.set_major_locator(mticker.MultipleLocator(10))
+
+    # ── Panel 4: Cobertura empírica ──────────────────────────────────────────
+    has_cov = False
+    if "coverage_90" in df_res.columns:
+        mean_cov90 = df_res.groupby("h")["coverage_90"].mean()
+        ax4.plot(mean_cov90.index, mean_cov90.values,
+                 color="#059669", lw=2.0, label="Cobertura 90% [Q05-Q95]")
+        ax4.fill_between(mean_cov90.index, mean_cov90.values, 0.90,
+                         where=mean_cov90.values < 0.90,
+                         alpha=0.20, color="#DC2626", label="Bajo objetivo")
+        ax4.fill_between(mean_cov90.index, mean_cov90.values, 0.90,
+                         where=mean_cov90.values >= 0.90,
+                         alpha=0.15, color="#059669", label="Sobre objetivo")
+        ax4.axhline(0.90, color="#059669", lw=1.2, ls="--", alpha=0.6,
+                    label="Objetivo 90%")
+        has_cov = True
+    if "coverage_98" in df_res.columns:
+        mean_cov98 = df_res.groupby("h")["coverage_98"].mean()
+        ax4.plot(mean_cov98.index, mean_cov98.values,
+                 color="#7C3AED", lw=1.5, ls=":", label="Cobertura 98% [Q01-Q99]")
+        ax4.axhline(0.98, color="#7C3AED", lw=1.0, ls="--", alpha=0.5,
+                    label="Objetivo 98%")
+        has_cov = True
+    if not has_cov:
+        ax4.text(0.5, 0.5, "Sin datos de cobertura",
+                 ha="center", va="center", transform=ax4.transAxes, fontsize=11)
+    ax4.set_title("Cobertura empírica por horizonte h (promedio folds)",
+                  fontweight="bold")
+    ax4.set_xlabel("Horizonte h (días hábiles)")
+    ax4.set_ylabel("Cobertura empírica")
+    ax4.set_ylim(0.40, 1.05)
+    ax4.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:.0%}"))
+    ax4.legend(fontsize=9)
+    ax4.grid(True, alpha=0.25)
+    ax4.xaxis.set_major_locator(mticker.MultipleLocator(10))
+
+    ruta_fig = dir_modo / f"metricas_por_h_{banco}_{fecha_hoy}.png"
+    plt.savefig(ruta_fig, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    log.info("Gráfico de métricas: %s", ruta_fig.name)
+    print(f"[OK] Gráfico métricas guardado: {ruta_fig.name}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -763,6 +897,8 @@ def run(banco: str = BANCO) -> None:
         if "coverage_98" in df_res.columns:
             print("\nCobertura empírica 98% [Q01-Q99] media por grupo de horizonte:")
             print(df_res.groupby("h_grupo", observed=True)["coverage_98"].mean().map("{:.1%}".format))
+
+        graficar_metricas(df_res, DIR_MODO, banco, fecha_hoy)
     else:
         print("\n⚠  Sin métricas para guardar.")
 
