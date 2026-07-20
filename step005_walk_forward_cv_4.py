@@ -301,7 +301,26 @@ def run(banco: str = BANCO) -> None:
     # 1. Load data
     # ------------------------------------------------------------------
     print(f"\nCargando datos: {RUTA_MATRIZ}")
-    df = pd.read_parquet(RUTA_MATRIZ, filters=[("banco", "==", banco)])
+    try:
+        import pyarrow.parquet as pq
+        df = pq.read_table(
+            RUTA_MATRIZ,
+            filters=[("banco", "==", banco)],
+            memory_map=True,   # lee desde disco, reduce presión en RAM
+            pre_buffer=False,
+        ).to_pandas()
+    except MemoryError:
+        # Fallback: leer solo columnas esenciales + filtrar con pandas
+        print("  [AVISO] MemoryError — leyendo por columnas y filtrando con pandas")
+        import pyarrow.parquet as pq
+        schema = pq.read_schema(RUTA_MATRIZ)
+        all_cols = [f.name for f in schema]
+        df = pq.read_table(
+            RUTA_MATRIZ,
+            columns=all_cols,
+            memory_map=True,
+        ).to_pandas()
+        df = df[df["banco"] == banco].copy()
 
     df["fecha_t"] = pd.to_datetime(df["fecha_t"])
     if "fecha_th" in df.columns:
