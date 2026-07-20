@@ -94,7 +94,7 @@ def build_folds(df: pd.DataFrame) -> list[dict]:
     Returns a list of dicts with keys:
         fold, train_start, train_end, val_start, val_end, test_start, test_end
     """
-    all_bdays = np.array(sorted(df["fecha_t"].unique()))
+    all_bdays = np.array(sorted(df["fecha_t"].unique()), dtype="datetime64[ns]")
 
     if RECORTAR_INICIO_TRAIN:
         train_min = max(df["fecha_t"].min(), pd.Timestamp(TRAIN_INICIO_CUTOFF))
@@ -127,12 +127,12 @@ def build_folds(df: pd.DataFrame) -> list[dict]:
 
         # --- Purge gap between train and val ---
         # Find the index of the first business day >= val_start
-        idx_val = int(np.searchsorted(all_bdays, val_start))
+        idx_val = int(np.searchsorted(all_bdays, np.datetime64(val_start, "ns")))
         train_end_idx = max(0, idx_val - PURGE_DIAS_HAB - 1)
         train_end = pd.Timestamp(all_bdays[train_end_idx])
 
         # --- val_end: last business day before test_start (no purge val→test) ---
-        idx_test = int(np.searchsorted(all_bdays, test_start))
+        idx_test = int(np.searchsorted(all_bdays, np.datetime64(test_start, "ns")))
         val_end_idx = max(0, idx_test - 1)
         val_end = pd.Timestamp(all_bdays[val_end_idx])
 
