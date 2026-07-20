@@ -29,9 +29,11 @@ DIR_PREDS      = BASE_SISTEMA / "2. Output" / "step005_wfcv_v3"
 DIR_OUTPUT     = BASE_SISTEMA / "2. Output" / "aux_diagnostico_abanico"
 DIR_OUTPUT.mkdir(parents=True, exist_ok=True)
 
-BANCO          = "BancaLocal"
-TIPO_PARQUET   = None   # None → autodetecta (prefiere "overlay", luego "base")
-FECHA_T_FIJA   = None   # None → usa una fecha_t del cuarto final del rango
+BANCO          = "SISTEMA"   # nombre tal como aparece en el filename del parquet
+DIR_MODO       = None        # None → usa el subdirectorio más reciente con preds_base/overlay
+                             # Ejemplo: "xgb_qt_expanding_311"
+TIPO_PARQUET   = None        # None → prefiere "overlay", luego "base" (no fold-específicos)
+FECHA_T_FIJA   = None        # None → usa una fecha_t del cuarto final del rango
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -41,37 +43,43 @@ def pinball(y: np.ndarray, yhat: np.ndarray, tau: float) -> float:
 
 
 def cargar_preds(banco: str, tipo: str | None = None) -> pd.DataFrame:
-    """Carga el parquet más reciente de step005_wfcv_v3.
+    """Carga el parquet de predicciones consolidadas (todos los folds juntos).
 
-    Si tipo=None, busca cualquier parquet que contenga el nombre del banco.
-    Imprime todos los candidatos encontrados para facilitar el diagnóstico.
+    Lógica de selección:
+      1. Si DIR_MODO está definido, busca solo en ese subdirectorio.
+      2. Prefiere preds_overlay_* y preds_base_* (todos los folds concatenados).
+         Descarta preds_test_fold* (son por fold individual, sin cubrir todos los h).
+      3. De los candidatos válidos, usa el más reciente (mayor fecha en el nombre).
+      4. Si tipo está especificado, filtra además por "overlay" o "base".
     """
-    # Listar TODOS los parquets disponibles (recursivo)
-    todos = sorted(DIR_PREDS.rglob("*.parquet"))
-    print(f"[INFO] Parquets encontrados en {DIR_PREDS.name}:")
-    if todos:
-        for p in todos:
-            print(f"         {p.relative_to(DIR_PREDS)}")
-    else:
-        print("         (ninguno)")
+    raiz = DIR_PREDS / DIR_MODO if DIR_MODO else DIR_PREDS
+    todos = sorted(raiz.rglob("*.parquet"))
 
-    # Filtrar por banco
-    candidatos_banco = [p for p in todos if banco.lower() in p.name.lower()]
+    # Preferir archivos consolidados (preds_base / preds_overlay), descartar fold-específicos
+    consolidados = [
+        p for p in todos
+        if banco.lower() in p.name.lower()
+        and "fold" not in p.name.lower()
+        and ("preds_base" in p.name or "preds_overlay" in p.name)
+    ]
 
-    # Si se especificó tipo, filtrar también por tipo
     if tipo:
-        candidatos_banco = [p for p in candidatos_banco if tipo in p.name]
+        consolidados = [p for p in consolidados if tipo in p.name]
 
-    if not candidatos_banco:
+    if not consolidados:
+        # Fallback: cualquier parquet con el nombre del banco
+        consolidados = [p for p in todos if banco.lower() in p.name.lower()]
+        if tipo:
+            consolidados = [p for p in consolidados if tipo in p.name]
+
+    if not consolidados:
         raise FileNotFoundError(
-            f"No se encontró ningún parquet con '{banco}' en {DIR_PREDS}\n"
-            f"Parquets disponibles arriba. Ajusta la variable BANCO o TIPO_PARQUET."
+            f"No se encontró ningún parquet con '{banco}' en {raiz}.\n"
+            f"Ajusta BANCO (actualmente '{banco}') o DIR_MODO."
         )
 
-    ruta = candidatos_banco[-1]  # el más reciente por orden alfabético/fecha
-
-    print(f"[INFO] Usando: {ruta.name}")
-    print(f"[INFO] Leyendo: {ruta.relative_to(BASE_SISTEMA)}")
+    ruta = consolidados[-1]  # más reciente por orden alfabético (fecha en nombre)
+    print(f"[INFO] Usando: {ruta.relative_to(DIR_PREDS)}")
     df = pd.read_parquet(ruta)
     df["fecha_t"]  = pd.to_datetime(df["fecha_t"])
     if "fecha_th" in df.columns:
