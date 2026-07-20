@@ -57,16 +57,17 @@ MIN_TRAIN_ROWS      = 50
 
 # Fixed hyperparameters — user-adjustable
 HP: dict = {
-    "n_estimators"    : 150,   # reducido de 300 para menor uso de RAM
-    "max_depth"       : 4,
-    "learning_rate"   : 0.05,
+    "n_estimators"    : 100,   # reducido para menor RAM
+    "max_depth"       : 3,     # profundidad 3 en vez de 4: 2x menos nodos → 2x menos RAM
+    "learning_rate"   : 0.08,  # lr más alto para compensar menos árboles
     "subsample"       : 0.8,
     "colsample_bytree": 0.8,
     "min_child_weight": 5,
     "reg_alpha"       : 0.1,
     "reg_lambda"      : 1.0,
     "tree_method"     : "hist",
-    "n_jobs"          : 2,     # limitado a 2 cores; -1 multiplica RAM por n_cores
+    "max_bin"         : 64,    # histogramas de 64 bins vs 256 por defecto: 4x menos RAM
+    "n_jobs"          : 1,     # un solo thread: elimina buffers paralelos
     "random_state"    : 42,
 }
 
@@ -356,10 +357,15 @@ def run(banco: str = BANCO) -> None:
     # ------------------------------------------------------------------
     # 4. Walk-forward CV loop
     # ------------------------------------------------------------------
-    all_preds_base: list[pd.DataFrame] = []
-    resultados:     list[dict]         = []
-
+    resultados: list[dict] = []
     n_horizontes = H_MAX - H_MIN + 1
+
+    # Output dir created early so per-fold parquets can be written immediately
+    DIR_MODO = DIR_OUTPUT / f"fold{'_exp' if EXPANDING else '_roll'}"
+    DIR_MODO.mkdir(parents=True, exist_ok=True)
+    fecha_hoy = date.today().strftime("%Y%m%d")
+
+    fold_parquet_paths: list[Path] = []
 
     for fold in folds:
         t0_fold = time.time()
@@ -370,13 +376,13 @@ def run(banco: str = BANCO) -> None:
             f"test:  {fold['test_start'].date()}..{fold['test_end'].date()}"
         )
 
+        # Write each h directly to a list; concat and flush to disk per fold
         fold_scaffolds: list[pd.DataFrame] = []
         n_h_ok = 0
 
         for h_val in range(H_MIN, H_MAX + 1):
             df_h = df[df["h"] == h_val]
 
-            # Progress indicator every 10 horizons
             if h_val % 10 == 0:
                 elapsed_fold = (time.time() - t0_fold) / 60
                 print(
@@ -401,10 +407,8 @@ def run(banco: str = BANCO) -> None:
                 len(X_train), len(X_val), len(X_test),
             )
 
-            # Train models
             modelos = entrenar_modelos_h(X_train, y_train, HP)
 
-            # Build predictions scaffold
             _scaffold = pd.DataFrame({
                 "banco"   : banco,
                 "fold"    : fold["fold"],
@@ -421,23 +425,21 @@ def run(banco: str = BANCO) -> None:
             fold_scaffolds.append(_scaffold)
             n_h_ok += 1
 
-            # Metrics
-            preds_for_metrics = {
-                tau: m.predict(X_test) for tau, m in modelos.items()
-            }
-            metricas = calcular_metricas(
-                preds_for_metrics, y_test.values, h_val, fold["fold"]
-            )
-            resultados.append(metricas)
+            preds_for_metrics = {tau: m.predict(X_test) for tau, m in modelos.items()}
+            resultados.append(calcular_metricas(preds_for_metrics, y_test.values, h_val, fold["fold"]))
 
-            # Liberar modelos del horizonte actual antes del siguiente
             del modelos, X_train, y_train, X_val, y_val, X_test, y_test
             gc.collect()
 
-        # Concatenate all h-scaffolds for this fold
+        # Flush fold to disk immediately — don't accumulate all folds in RAM
         if fold_scaffolds:
             df_fold = pd.concat(fold_scaffolds, ignore_index=True)
-            all_preds_base.append(df_fold)
+            ruta_fold = DIR_MODO / f"preds_test_fold{fold['fold']:02d}_{banco}_{fecha_hoy}.parquet"
+            df_fold.to_parquet(ruta_fold, index=False)
+            fold_parquet_paths.append(ruta_fold)
+            print(f"  → Guardado: {ruta_fold.name}")
+            del df_fold, fold_scaffolds
+            gc.collect()
 
         elapsed_fold = (time.time() - t0_fold) / 60
         print(
@@ -447,30 +449,28 @@ def run(banco: str = BANCO) -> None:
         )
 
     # ------------------------------------------------------------------
-    # 5. Save predictions
+    # 5. Consolidate per-fold parquets into preds_base (read one by one)
     # ------------------------------------------------------------------
-    DIR_MODO = DIR_OUTPUT / f"fold{'_exp' if EXPANDING else '_roll'}"
-    DIR_MODO.mkdir(parents=True, exist_ok=True)
-    fecha_hoy = date.today().strftime("%Y%m%d")
+    col_order = ["banco", "fold", "fecha_t", "fecha_th", "h", "target",
+                 "q01", "q05", "q50", "q95", "q99", "mean"]
 
-    if all_preds_base:
-        df_all = pd.concat(all_preds_base, ignore_index=True)
-
-        # Ensure column order matches cv3 output (fanchart compatibility)
-        col_order = ["banco", "fold", "fecha_t", "fecha_th", "h", "target",
-                     "q01", "q05", "q50", "q95", "q99", "mean"]
-        # Add any extra columns at the end
-        extra_cols = [c for c in df_all.columns if c not in col_order]
-        col_order = [c for c in col_order if c in df_all.columns] + extra_cols
-        df_all = df_all[col_order]
+    if fold_parquet_paths:
+        chunks = []
+        for p in fold_parquet_paths:
+            chunk = pd.read_parquet(p)
+            extra = [c for c in chunk.columns if c not in col_order]
+            ordered = [c for c in col_order if c in chunk.columns] + extra
+            chunks.append(chunk[ordered])
+        df_all = pd.concat(chunks, ignore_index=True)
 
         ruta_preds = DIR_MODO / f"preds_base_{banco}_{fecha_hoy}.parquet"
         df_all.to_parquet(ruta_preds, index=False)
         print(f"\n✓ Guardado: {ruta_preds}  ({len(df_all):,} filas)")
         print(f"  Columnas: {list(df_all.columns)}")
+        del df_all, chunks
+        gc.collect()
     else:
         print("\n⚠  Sin predicciones para guardar.")
-        df_all = pd.DataFrame()
 
     # ------------------------------------------------------------------
     # 6. Save metrics
