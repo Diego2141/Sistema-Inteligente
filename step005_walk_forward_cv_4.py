@@ -101,26 +101,29 @@ def build_folds(df: pd.DataFrame) -> list[dict]:
     else:
         train_min = df["fecha_t"].min()
 
+    def _offset(years: float) -> pd.DateOffset:
+        """Convert fractional years to a DateOffset using months."""
+        months = round(years * 12)
+        return pd.DateOffset(months=months)
+
     # First test window starts after train + val
-    test_start = train_min + pd.DateOffset(
-        years=VENTANA_TRAIN_AÑOS + VENTANA_VAL_AÑOS
-    )
+    test_start = train_min + _offset(VENTANA_TRAIN_AÑOS + VENTANA_VAL_AÑOS)
 
     folds = []
     fold_num = 0
 
     while True:
-        test_end = test_start + pd.DateOffset(years=VENTANA_TEST_AÑOS) - pd.Timedelta(days=1)
+        test_end = test_start + _offset(VENTANA_TEST_AÑOS) - pd.Timedelta(days=1)
 
         if test_end > df["fecha_t"].max():
             break
 
-        val_start = test_start - pd.DateOffset(years=VENTANA_VAL_AÑOS)
+        val_start = test_start - _offset(VENTANA_VAL_AÑOS)
 
         if EXPANDING:
             train_start = train_min
         else:
-            train_start = val_start - pd.DateOffset(years=VENTANA_TRAIN_AÑOS)
+            train_start = val_start - _offset(VENTANA_TRAIN_AÑOS)
 
         # --- Purge gap between train and val ---
         # Find the index of the first business day >= val_start
@@ -152,7 +155,7 @@ def build_folds(df: pd.DataFrame) -> list[dict]:
             test_start.date(),  test_end.date(),
         )
 
-        test_start += pd.DateOffset(years=PASO_AÑOS)
+        test_start += _offset(PASO_AÑOS)
 
     return folds
 
