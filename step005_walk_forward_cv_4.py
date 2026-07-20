@@ -22,6 +22,13 @@ import numpy as np
 import pandas as pd
 import xgboost as xgb
 
+try:
+    import shap as _shap_lib
+    _SHAP_OK = True
+except ImportError:
+    _shap_lib = None
+    _SHAP_OK = False
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -76,6 +83,14 @@ COLS_EXCLUIR = {
     "fecha_t", "banco", "target", "fecha_th",
     "h", "log_h",
 }
+
+# ---------------------------------------------------------------------------
+# Feature diagnostics (gain / block-permutation / SHAP) per horizon
+# ---------------------------------------------------------------------------
+DIAG_FEATURES         = True   # False → skip (más rápido)
+DIAG_BLOCK_SIZE       = 5      # bloques pequeños: val solo tiene ~120 filas
+DIAG_N_REPEATS        = 3      # repeticiones por permutación
+DIAG_SHAP_MAX_SAMPLES = None   # None = todas las filas de val (~120)
 
 # ---------------------------------------------------------------------------
 # Helper functions
@@ -273,7 +288,7 @@ def calcular_metricas(
     fold_num: int,
 ) -> dict:
     """
-    Compute pinball loss per quantile tau and RMSE for the mean model.
+    Compute pinball loss per quantile tau, RMSE for mean, and empirical coverage.
 
     Returns a flat dict suitable for appending to a list before pd.DataFrame().
     """
@@ -289,7 +304,247 @@ def calcular_metricas(
             col_name  = f"pinball_q{int(tau * 100):02d}"
             row[col_name] = float(np.mean(pinball))
 
+    # Empirical coverage
+    if 0.05 in preds_dict and 0.95 in preds_dict:
+        row["coverage_90"] = float(
+            ((y_test >= preds_dict[0.05]) & (y_test <= preds_dict[0.95])).mean()
+        )
+    if 0.01 in preds_dict and 0.99 in preds_dict:
+        row["coverage_98"] = float(
+            ((y_test >= preds_dict[0.01]) & (y_test <= preds_dict[0.99])).mean()
+        )
+
     return row
+
+
+# ---------------------------------------------------------------------------
+# Feature diagnostics helpers
+# ---------------------------------------------------------------------------
+
+def _pinball(y: np.ndarray, yhat: np.ndarray, tau: float) -> float:
+    err = y - yhat
+    return float(np.where(err >= 0, tau * err, (tau - 1) * err).mean())
+
+
+def _diag_gain_h(modelos: dict, cols_feat: list[str]) -> pd.Series:
+    """Gain promedio entre cuantiles (in-sample, solo informativo)."""
+    acum = {f: 0.0 for f in cols_feat}
+    n = 0
+    for tau, model in modelos.items():
+        if tau == "mean":
+            continue
+        imp = model.get_booster().get_score(importance_type="gain")
+        for f in cols_feat:
+            acum[f] += float(imp.get(f, 0.0))
+        n += 1
+    if n:
+        acum = {f: v / n for f, v in acum.items()}
+    return pd.Series(acum, dtype=float)
+
+
+def _diag_perm_h(
+    modelos: dict,
+    X_val: pd.DataFrame,
+    y_val: np.ndarray,
+    cols_feat: list[str],
+) -> pd.Series:
+    """Block-permutation importance en VAL (OOS). Δpinball promedio entre cuantiles."""
+    X = X_val[cols_feat].reset_index(drop=True).copy()
+    y = np.asarray(y_val)
+    n = len(X)
+    bs = max(2, min(DIAG_BLOCK_SIZE, n // 3))
+    block_starts = np.arange(0, n, bs)
+    rng = np.random.default_rng(42)
+
+    acum = pd.Series(0.0, index=cols_feat)
+    n_tau = 0
+
+    for tau, model in modelos.items():
+        if tau == "mean":
+            continue
+        base_preds = model.predict(X)
+        base_loss  = _pinball(y, base_preds, tau)
+
+        feat_deltas: dict[str, float] = {}
+        for c in cols_feat:
+            orig = X[c].values.copy()
+            deltas = []
+            for _ in range(DIAG_N_REPEATS):
+                perm = rng.permutation(block_starts)
+                new_col = np.concatenate([orig[s:s + bs] for s in perm])[:n]
+                Xp = X.copy()
+                Xp[c] = new_col
+                deltas.append(_pinball(y, model.predict(Xp), tau) - base_loss)
+            feat_deltas[c] = float(np.mean(deltas))
+
+        acum = acum.add(pd.Series(feat_deltas), fill_value=0.0)
+        n_tau += 1
+
+    if n_tau:
+        acum /= n_tau
+    return acum
+
+
+def _diag_shap_h(
+    modelos: dict,
+    X_val: pd.DataFrame,
+    cols_feat: list[str],
+) -> pd.Series:
+    """SHAP |mean| en VAL (OOS), promedio entre cuantiles."""
+    if not _SHAP_OK:
+        return pd.Series(np.nan, index=cols_feat)
+
+    X = X_val[cols_feat].reset_index(drop=True)
+    if DIAG_SHAP_MAX_SAMPLES and len(X) > DIAG_SHAP_MAX_SAMPLES:
+        X = X.sample(DIAG_SHAP_MAX_SAMPLES, random_state=42)
+
+    acum = pd.Series(0.0, index=cols_feat)
+    n_tau = 0
+
+    for tau, model in modelos.items():
+        if tau == "mean":
+            continue
+        try:
+            explainer = _shap_lib.TreeExplainer(model)
+            sv = explainer.shap_values(X)
+            s = pd.Series(np.abs(sv).mean(axis=0), index=cols_feat)
+            acum = acum.add(s.fillna(0.0), fill_value=0.0)
+            n_tau += 1
+        except Exception as e:
+            log.debug("SHAP τ=%.2f falló: %s", tau, e)
+
+    if n_tau == 0:
+        return pd.Series(np.nan, index=cols_feat)
+    return acum / n_tau
+
+
+def diagnosticar_h(
+    modelos: dict,
+    X_val: pd.DataFrame,
+    y_val: np.ndarray,
+    cols_feat: list[str],
+    fold_num: int,
+    h_val: int,
+) -> dict:
+    """Devuelve dict {fold, h, gain_<feat>, perm_<feat>, shap_<feat>}."""
+    gain = _diag_gain_h(modelos, cols_feat)
+    perm = _diag_perm_h(modelos, X_val, y_val, cols_feat)
+    shp  = _diag_shap_h(modelos, X_val, cols_feat)
+
+    row: dict = {"fold": fold_num, "h": h_val}
+    for f in cols_feat:
+        row[f"gain_{f}"] = float(gain.get(f, 0.0))
+        row[f"perm_{f}"] = float(perm.get(f, 0.0))
+        row[f"shap_{f}"] = float(shp.get(f, np.nan))
+    return row
+
+
+def guardar_diag_y_plots(
+    diag_rows: list[dict],
+    cols_feat: list[str],
+    dir_modo: Path,
+    banco: str,
+    fecha_hoy: str,
+) -> None:
+    """Guarda CSVs y heatmaps (feature × h) para gain / perm / SHAP."""
+    if not diag_rows:
+        return
+
+    try:
+        import matplotlib.pyplot as plt
+        import matplotlib.ticker as mticker
+    except ImportError:
+        log.warning("matplotlib no disponible — omitiendo heatmaps")
+        return
+
+    df_d = pd.DataFrame(diag_rows)
+    ruta_csv = dir_modo / f"diag_features_por_h_{banco}_{fecha_hoy}.csv"
+    df_d.to_csv(ruta_csv, index=False)
+    log.info("CSV diagnóstico: %s", ruta_csv.name)
+
+    # Para cada señal, construir pivot feature × h (promedio de folds)
+    for senal, label in [("gain", "Gain (TRAIN)"),
+                          ("perm", "Block-Perm (VAL, OOS)"),
+                          ("shap", "SHAP |mean| (VAL, OOS)")]:
+        feat_cols = [c for c in df_d.columns if c.startswith(f"{senal}_")]
+        if not feat_cols:
+            continue
+        rename = {c: c[len(senal) + 1:] for c in feat_cols}
+        pivot = (
+            df_d[["h"] + feat_cols]
+            .rename(columns=rename)
+            .groupby("h")
+            .mean()
+            .T   # features como filas, h como columnas
+        )
+        # Ordenar features por importancia media descendente
+        pivot["_mean"] = pivot.mean(axis=1)
+        pivot = pivot.sort_values("_mean", ascending=False).drop(columns=["_mean"])
+        top_n = min(25, len(pivot))
+        pivot = pivot.iloc[:top_n]
+
+        # Normalizar por fila (por feature) para que el color sea comparativo
+        row_max = pivot.max(axis=1).replace(0, np.nan)
+        pivot_norm = pivot.div(row_max, axis=0).fillna(0.0)
+
+        hs = pivot_norm.columns.tolist()
+        fig, ax = plt.subplots(figsize=(max(10, len(hs) * 0.18), max(6, top_n * 0.42)))
+        im = ax.imshow(pivot_norm.values, aspect="auto", cmap="YlOrRd",
+                       vmin=0, vmax=1, interpolation="nearest")
+        plt.colorbar(im, ax=ax, label="Importancia norm. (0–1 por feature)")
+        ax.set_yticks(range(top_n))
+        ax.set_yticklabels(pivot_norm.index.tolist(), fontsize=7)
+        # Mostrar etiquetas solo cada 5 horizontes para no saturar
+        xtick_pos  = [i for i, h in enumerate(hs) if h % 5 == 0]
+        xtick_labs = [str(hs[i]) for i in xtick_pos]
+        ax.set_xticks(xtick_pos)
+        ax.set_xticklabels(xtick_labs, fontsize=8)
+        ax.set_xlabel("Horizonte h (días hábiles)", fontsize=10)
+        ax.set_title(
+            f"{label} — {banco}\n"
+            f"Top {top_n} features · cada fila normalizada a su propio máximo entre horizontes\n"
+            f"Leer por fila: ¿en qué h importa más este feature?",
+            fontweight="bold", fontsize=10,
+        )
+        plt.tight_layout()
+        ruta_fig = dir_modo / f"diag_heatmap_{senal}_por_h_{banco}_{fecha_hoy}.png"
+        plt.savefig(ruta_fig, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        log.info("Heatmap %s: %s", senal, ruta_fig.name)
+
+    # Gráfico de líneas: top-10 features (por perm promedio) vs h
+    perm_cols = [c for c in df_d.columns if c.startswith("perm_")]
+    if perm_cols:
+        rename_p = {c: c[5:] for c in perm_cols}
+        pivot_perm = (
+            df_d[["h"] + perm_cols].rename(columns=rename_p).groupby("h").mean().T
+        )
+        pivot_perm["_mean"] = pivot_perm.mean(axis=1)
+        top10 = pivot_perm.sort_values("_mean", ascending=False).head(10).drop(columns=["_mean"])
+        hs = top10.columns.tolist()
+
+        fig, ax = plt.subplots(figsize=(14, 5))
+        cmap = plt.cm.tab10
+        for i, feat in enumerate(top10.index):
+            ax.plot(hs, top10.loc[feat].values, lw=1.8, label=feat,
+                    color=cmap(i / 10), alpha=0.85)
+        ax.axhline(0, color="black", lw=0.7, ls="--", alpha=0.4)
+        ax.set_xlabel("Horizonte h (días hábiles)", fontsize=10)
+        ax.set_ylabel("Δ Pinball loss (perm VAL)", fontsize=10)
+        ax.set_title(
+            f"Block-Permutation importance por horizonte — Top 10 features — {banco}\n"
+            f"Un feature útil a h corto puede ser irrelevante a h largo (y vice versa)",
+            fontweight="bold", fontsize=10,
+        )
+        ax.legend(fontsize=8, bbox_to_anchor=(1.01, 1), loc="upper left")
+        ax.grid(True, alpha=0.25)
+        plt.tight_layout()
+        ruta_line = dir_modo / f"diag_perm_top10_por_h_{banco}_{fecha_hoy}.png"
+        plt.savefig(ruta_line, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        log.info("Líneas perm top-10: %s", ruta_line.name)
+
+    print(f"[OK] Diagnóstico features guardado en: {dir_modo}")
 
 
 # ---------------------------------------------------------------------------
@@ -358,6 +613,7 @@ def run(banco: str = BANCO) -> None:
     # 4. Walk-forward CV loop
     # ------------------------------------------------------------------
     resultados: list[dict] = []
+    diag_rows:  list[dict] = []
     n_horizontes = H_MAX - H_MIN + 1
 
     # Output dir created early so per-fold parquets can be written immediately
@@ -428,6 +684,12 @@ def run(banco: str = BANCO) -> None:
             preds_for_metrics = {tau: m.predict(X_test) for tau, m in modelos.items()}
             resultados.append(calcular_metricas(preds_for_metrics, y_test.values, h_val, fold["fold"]))
 
+            if DIAG_FEATURES:
+                diag_rows.append(
+                    diagnosticar_h(modelos, X_val, y_val, cols_feat,
+                                   fold["fold"], h_val)
+                )
+
             del modelos, X_train, y_train, X_val, y_val, X_test, y_test
             gc.collect()
 
@@ -493,8 +755,22 @@ def run(banco: str = BANCO) -> None:
         if "pinball_q50" in df_res.columns:
             print("\nPinball q50 medio por grupo de horizonte:")
             print(df_res.groupby("h_grupo", observed=True)["pinball_q50"].mean().round(4))
+
+        if "coverage_90" in df_res.columns:
+            print("\nCobertura empírica 90% [Q05-Q95] media por grupo de horizonte:")
+            print(df_res.groupby("h_grupo", observed=True)["coverage_90"].mean().map("{:.1%}".format))
+
+        if "coverage_98" in df_res.columns:
+            print("\nCobertura empírica 98% [Q01-Q99] media por grupo de horizonte:")
+            print(df_res.groupby("h_grupo", observed=True)["coverage_98"].mean().map("{:.1%}".format))
     else:
         print("\n⚠  Sin métricas para guardar.")
+
+    # ------------------------------------------------------------------
+    # 7. Feature diagnostics (gain / perm / SHAP per h)
+    # ------------------------------------------------------------------
+    if DIAG_FEATURES and diag_rows:
+        guardar_diag_y_plots(diag_rows, cols_feat, DIR_MODO, banco, fecha_hoy)
 
     total_min = (time.time() - t0_total) / 60
     print(f"\n{'='*60}")
