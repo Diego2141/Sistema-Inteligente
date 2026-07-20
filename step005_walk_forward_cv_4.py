@@ -12,6 +12,7 @@ Key difference vs cv3:
 
 from __future__ import annotations
 
+import gc
 import logging
 import time
 from datetime import date
@@ -56,7 +57,7 @@ MIN_TRAIN_ROWS      = 50
 
 # Fixed hyperparameters — user-adjustable
 HP: dict = {
-    "n_estimators"    : 300,
+    "n_estimators"    : 150,   # reducido de 300 para menor uso de RAM
     "max_depth"       : 4,
     "learning_rate"   : 0.05,
     "subsample"       : 0.8,
@@ -65,7 +66,7 @@ HP: dict = {
     "reg_alpha"       : 0.1,
     "reg_lambda"      : 1.0,
     "tree_method"     : "hist",
-    "n_jobs"          : -1,
+    "n_jobs"          : 2,     # limitado a 2 cores; -1 multiplica RAM por n_cores
     "random_state"    : 42,
 }
 
@@ -428,6 +429,10 @@ def run(banco: str = BANCO) -> None:
                 preds_for_metrics, y_test.values, h_val, fold["fold"]
             )
             resultados.append(metricas)
+
+            # Liberar modelos del horizonte actual antes del siguiente
+            del modelos, X_train, y_train, X_val, y_val, X_test, y_test
+            gc.collect()
 
         # Concatenate all h-scaffolds for this fold
         if fold_scaffolds:
