@@ -119,7 +119,11 @@ FEATURES_EXCLUIR = [
     "dia_semana",                                     # → dias_sem_sin/cos
     "mes",                                            # → mes_sin/cos
     "is_fin_anio",                                    # → dias_al_cierre_anio_sin/cos
-    "is_pre_eleccion", "is_post_eleccion",            # → elec_sin/cos
+    "is_pre_eleccion", "is_post_eleccion"#,            # → elec_sin/cos
+    "es_post_feriado","is_pre_feriado"
+    #"encaje_lag1","exceso_lag1","faltante_lag1","techo_10h",
+    #"techo_restante_lag1","proporcion_usada","encaje_urgencia_lag1",
+    #"hmm_estado"
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────

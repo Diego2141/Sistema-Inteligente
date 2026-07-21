@@ -49,7 +49,7 @@ RUTA_EXCEL = (BASE_SISTEMA / "2. Output" / "aux_fanchart_horizontes_xgb_qt"
 # ── Parámetros del loop ───────────────────────────────────────────────────────
 PASO_FECHAS    = 2     # cada 2 días hábiles; usar 1 para todas las fechas
 N_FECHAS_MAX   = None  # None = generar todos; ej: 6 para las 6 primeras fechas válidas
-MOSTRAR_OVERLAY = False  # False = predicciones base; True = con overlay sobreencaje
+MOSTRAR_OVERLAY = True  # False = predicciones base; True = con overlay sobreencaje
 
 COLOR_BANDA = "tomato"
 

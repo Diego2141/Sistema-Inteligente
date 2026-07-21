@@ -84,7 +84,7 @@ OVERLAY_SOBREENCAJE_ACTIVO = False
 
 # -- Parámetros del overlay ----------------------------------------------------
 UMBRAL_ACTIVACION     = 0.50   # ratio |retiro_7dh| / saldo_P95_mes para activar
-N_TRIMESTRES_LOOKBACK = 4      # cierres para la tabla Señal (display); el worst_ratio usa todo el historial
+N_TRIMESTRES_LOOKBACK = 5      # cierres para la tabla Señal (display); el worst_ratio usa todo el historial
 MIN_TRIMESTRES_ACTIVO = 1      # mín. trimestres (dentro del lookback) con ratio > umbral para activar
 VENTANA_RETIRO_DH     = 7      # días hábiles de la ventana antes del cierre
 FACTOR_SEGURIDAD      = 0.00   # margen extra sobre peor_B  (0.00->0.10 = 0%->10%)

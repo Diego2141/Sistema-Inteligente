@@ -78,7 +78,7 @@ COLOR = "tomato"  # distingue XGBoost QT de XGBoost estándar (darkorange) y Lig
 #   preds_base_{banco}_{fecha}.parquet    <- predicciones del modelo puro
 #   preds_overlay_{banco}_{fecha}.parquet <- con overlay sobreencaje aplicado
 # El video lee el parquet seleccionado; no aplica overlay propio.
-MOSTRAR_OVERLAY   = False   # False = base; True = con overlay sobreencaje
+MOSTRAR_OVERLAY   = True   # False = base; True = con overlay sobreencaje
 DIR_PREDS_STEP005 = BASE_SISTEMA / "2. Output" / "step005_wfcv_v3"
 
 

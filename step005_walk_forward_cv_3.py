@@ -102,13 +102,13 @@ EXPANDING = True
 # True  -> el train nunca empieza antes de TRAIN_INICIO_CUTOFF (nueva estrategia 2020)
 # False -> el train empieza desde el primer dato disponible
 RECORTAR_INICIO_TRAIN = True
-TRAIN_INICIO_CUTOFF   = "2020-01-01"
+TRAIN_INICIO_CUTOFF   = "2019-07-01"
 
 # -- Tamaños de ventana --------------------------------------------------------
 # EXPANDING=True : VENTANA_TRAIN_AÑOS es el mínimo inicial; crece PASO_AÑOS/fold
 # EXPANDING=False: VENTANA_TRAIN_AÑOS es el tamaño fijo (igual a v2)
 VENTANA_TRAIN_AÑOS  = 3      # años de TRAIN iniciales / fijos (mínimo desde 2020)
-VENTANA_VAL_AÑOS    = 0.5    # años de VAL (solo Optuna) -- 6 meses, igual que step004
+VENTANA_VAL_AÑOS    = 1    # años de VAL (solo Optuna) -- 6 meses, igual que step004
 VENTANA_TEST_AÑOS   = 1      # años de TEST (solo métricas OOS)
 PASO_AÑOS           = 1      # desplazamiento / crecimiento entre folds
 
@@ -160,9 +160,9 @@ S_MAX_FACTOR     = 1.00   # targets en escala raw (MM USD), no estandarizados ->
 # -- Trials Optuna -------------------------------------------------------------
 # True  -> número de trials varía por cuantil (TRIALS_POR_TAU)
 # False -> número fijo para todos los cuantiles (TRIALS_FLAT)
-ADAPTIVE_TRIALS  = True
+ADAPTIVE_TRIALS  = False
 
-TRIALS_FLAT      = 60        # usado cuando ADAPTIVE_TRIALS = False
+TRIALS_FLAT      = 90        # usado cuando ADAPTIVE_TRIALS = False
 
 TRIALS_POR_TAU   = {         # usado cuando ADAPTIVE_TRIALS = True
     # Llaves = round(tau, 1) para QUANTILES = [0.01, 0.05, 0.50, 0.95, 0.99]
@@ -189,7 +189,7 @@ COLS_EXCLUIR              = {
     # Para I(0) el FFD tiene d_opt~=0 -> T10Y_frac~=T10Y y EMBI_PERU_frac~=EMBI_PERU (redundantes).
     # Todas muestran gain~=1.0/perm~=0 en val -> overfitting por correlación espuria en train.
     # Se mantienen: delta_EMBI (shocks de corto plazo), garch_vol_embi (volatilidad del spread).
-    "T10Y", "T10Y_frac", "EMBI_PERU", "EMBI_PERU_frac",
+    #"T10Y", "T10Y_frac", "EMBI_PERU", "EMBI_PERU_frac",
 }
 
 # -- Límite de folds -----------------------------------------------------------
@@ -200,7 +200,7 @@ COLS_EXCLUIR              = {
 N_MAX_FOLDS = 9 if EXPANDING else 8
 
 # -- Selector de modelo --------------------------------------------------------
-MODELO_CV = "xgb"
+MODELO_CV = "xgb_qt"
 # Opciones: "xgb" | "lgbm" | "xgb_qt"
 assert MODELO_CV in ("xgb", "lgbm", "xgb_qt"), \
     f"MODELO_CV debe ser 'xgb', 'lgbm' o 'xgb_qt', recibido: {MODELO_CV!r}"
@@ -242,11 +242,11 @@ CQR_ALPHA        = 0.10   # miscoverage objetivo: 1 - cobertura deseada (90% -> 
 # -- Overlay sobreencaje (step007) --------------------------------------------
 # Requiere haber ejecutado step007 para generar saldos_retiros_bancos.xlsx.
 # El ajuste diario (peor_total) se lee desde la tab "Ajuste_diario" de ese archivo.
-OVERLAY_SOBREENCAJE             = False
+OVERLAY_SOBREENCAJE             = True
 RUTA_AJUSTE_OVERLAY             = BASE_SISTEMA / "2. Output" / "analisis_cc" / "saldos_retiros_bancos.xlsx"
 OVERLAY_VENTANA_DH              = 7   # dias habiles de la ventana de retiro (mismo valor que step007)
 OVERLAY_TAU_REFERENCIA          = 0.05  # quantil usado como denominador del factor
-OVERLAY_CONOCIMIENTO_ANTICIPADO = 2   # T+N: flujos conocidos con N dias habiles de antelacion
+OVERLAY_CONOCIMIENTO_ANTICIPADO = 0   # T+N: flujos conocidos con N dias habiles de antelacion
 
 # Calendario de días hábiles PER + USA para el overlay.
 # Se combinan ambos conjuntos de feriados porque los flujos D-R involucran

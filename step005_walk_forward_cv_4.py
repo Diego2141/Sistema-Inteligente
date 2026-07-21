@@ -78,7 +78,11 @@ N_ESTIMATORS_MAX      = 300   # techo de árboles; early stopping lo reduce en p
 EARLY_STOPPING_ROUNDS = 10    # parar si val loss no mejora en N rondas consecutivas
 
 USE_OPTUNA      = True   # False → HP fijos para todos los h (más rápido, sin optuna)
+<<<<<<< Updated upstream
 OPTUNA_N_TRIALS = 30     # trials por h representativo por fold
+=======
+OPTUNA_N_TRIALS = 50     # trials por h representativo por fold
+>>>>>>> Stashed changes
 
 # Grupos de h y sus representantes para Optuna (Opción C)
 # Un solo h "típico" por grupo → HP se buscan ahí y se transfieren a todo el grupo
