@@ -18,6 +18,37 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
+from pandas.tseries.holiday import (
+    AbstractHolidayCalendar, Holiday, GoodFriday,
+    USFederalHolidayCalendar, Easter,
+)
+from pandas.tseries.offsets import CustomBusinessDay, Day as _Day
+
+
+def _build_bday() -> CustomBusinessDay:
+    """Calendario hábil PE+USA idéntico al de step001 (AbstractHolidayCalendar + Easter)."""
+    _f0, _f1 = "2009-01-01", "2042-12-31"
+
+    class _PeruCal(AbstractHolidayCalendar):
+        rules = [
+            Holiday("AnioNuevo",   month=1,  day=1),
+            Holiday("JuevesSanto", month=1,  day=1, offset=[Easter(), _Day(-3)]),
+            GoodFriday,
+            Holiday("Trabajo",     month=5,  day=1),
+            Holiday("SanPedro",    month=6,  day=29),
+            Holiday("FiestasP1",   month=7,  day=28),
+            Holiday("FiestasP2",   month=7,  day=29),
+            Holiday("SantaRosa",   month=8,  day=30),
+            Holiday("Angamos",     month=10, day=8),
+            Holiday("TodosSantos", month=11, day=1),
+            Holiday("Inmaculada",  month=12, day=8),
+            Holiday("Nochebuena",  month=12, day=24),
+            Holiday("Navidad",     month=12, day=25),
+        ]
+
+    hols = set(_PeruCal().holidays(_f0, _f1).normalize())
+    hols |= set(USFederalHolidayCalendar().holidays(_f0, _f1).normalize())
+    return CustomBusinessDay(holidays=sorted(hols))
 
 # ── Rutas ─────────────────────────────────────────────────────────────────────
 BASE_SISTEMA = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente")
@@ -91,6 +122,27 @@ def _enriquecer_desde_matriz(df: pd.DataFrame, banco: str) -> pd.DataFrame:
         )
     else:
         mat["fecha_th"] = pd.to_datetime(mat["fecha_th"])
+
+    # Fallback con calendario PE+USA para filas que quedaron NaT
+    # (ocurre cuando fecha_t está cerca del final del histórico y h es grande,
+    #  por lo que th_idx supera el rango de la matriz)
+    nat_mask = mat["fecha_th"].isna()
+    if nat_mask.any():
+        bday = _build_bday()
+        fechas_nat = pd.DatetimeIndex(mat.loc[nat_mask, "fecha_t"].unique())
+        records = []
+        for ft in fechas_nat:
+            h_max_local = int(mat.loc[nat_mask & (mat["fecha_t"] == ft), "h"].max())
+            proj = pd.date_range(start=ft + bday, periods=h_max_local, freq=bday)
+            for h_idx, fth in enumerate(proj, start=1):
+                records.append((ft, h_idx, fth))
+        th_fill = (
+            pd.DataFrame(records, columns=["fecha_t", "h", "fecha_th"])
+            .astype({"h": int})
+        )
+        mat = mat.drop(columns=["fecha_th"]).merge(th_fill, on=["fecha_t", "h"], how="left")
+        mat["fecha_th"] = pd.to_datetime(mat["fecha_th"])
+        print(f"[OK] {nat_mask.sum():,} fecha_th completadas con calendario PE+USA")
 
     mapping = mat[["fecha_t", "h", "fecha_th", "target"]].drop_duplicates(
         subset=["fecha_t", "h"]
