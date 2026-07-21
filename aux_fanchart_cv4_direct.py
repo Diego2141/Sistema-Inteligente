@@ -14,6 +14,7 @@ y el nombre del banco en el filename es SISTEMA (no BancaLocal).
 """
 
 from pathlib import Path
+import logging
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -23,6 +24,10 @@ from pandas.tseries.holiday import (
     USFederalHolidayCalendar, Easter,
 )
 from pandas.tseries.offsets import CustomBusinessDay, Day as _Day
+
+# Silencia loggers internos de matplotlib que heredan el nivel DEBUG del root logger
+logging.getLogger("matplotlib").setLevel(logging.WARNING)
+logging.getLogger("PIL").setLevel(logging.WARNING)
 
 
 def _build_bday() -> CustomBusinessDay:
