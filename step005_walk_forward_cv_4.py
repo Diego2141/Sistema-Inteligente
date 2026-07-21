@@ -429,28 +429,31 @@ def _diag_perm_h(
 
 def _shap_compat_booster(model):
     """
-    Return a Booster whose predict() translates the deprecated ntree_limit
-    kwarg (removed in XGBoost >= 2.0) to iteration_range.
+    Patch xgb.Booster.predict at CLASS level (once per session) to translate
+    the deprecated ntree_limit kwarg to iteration_range (removed in XGBoost 2.0).
 
-    Early stopping sets best_ntree_limit on the Booster itself, not just on
-    the sklearn wrapper.  SHAP < 0.43 detects this attribute and calls
-    booster.predict(X, ntree_limit=N), which raises TypeError in XGBoost 2.0+.
-    Monkey-patching predict() on a fresh reference fixes it without altering
-    the original model or requiring a SHAP/XGBoost upgrade.
+    Why class-level, not instance-level:
+      SHAP < 0.43 has two distinct call sites for predict:
+        1. TreeExplainer.__init__ (expected_value)  — accesses via instance __dict__
+        2. _compute_tree_shap / assert_additivity   — calls xgb.Booster.predict(self, ...)
+           directly as a class method, bypassing instance attribute lookup.
+      An instance-level patch fixes site 1 but not site 2.  Patching the class
+      method once fixes both sites for all Booster instances without touching the
+      original XGBoost objects or requiring a library upgrade.
     """
-    booster = model.get_booster()
-    if not hasattr(booster, "best_ntree_limit"):
-        return booster  # no early stopping active; no patch needed
+    if not getattr(xgb.Booster, "_shap_ntree_patched", False):
+        _orig_cls = xgb.Booster.predict
 
-    _orig = booster.predict
+        def _compat(self, data, ntree_limit=None, **kw):
+            if ntree_limit is not None and "iteration_range" not in kw:
+                kw["iteration_range"] = (0, int(ntree_limit))
+            return _orig_cls(self, data, **kw)
 
-    def _predict_compat(data, ntree_limit=None, **kw):
-        if ntree_limit is not None and "iteration_range" not in kw:
-            kw["iteration_range"] = (0, int(ntree_limit))
-        return _orig(data, **kw)
+        xgb.Booster.predict = _compat
+        xgb.Booster._shap_ntree_patched = True
+        log.debug("xgb.Booster.predict parcheado para SHAP < 0.43 (una sola vez)")
 
-    booster.predict = _predict_compat
-    return booster
+    return model.get_booster()
 
 
 def _diag_shap_h(
