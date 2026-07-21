@@ -61,7 +61,7 @@ RUTA_MATRIZ  = BASE_SISTEMA / "1. Data" / "Clean" / "matriz_features.parquet"
 BANCO = "SISTEMA"
 
 # ── Parámetros ─────────────────────────────────────────────────────────────────
-PASO_FECHAS  = 2     # cada N días hábiles tomar una fecha de origen
+PASO_FECHAS  = 1     # cada N días hábiles tomar una fecha de origen
 N_FECHAS_MAX = None  # None = todos; ej: 10 para limitar cantidad de gráficos
 COLOR_BANDA  = "steelblue"   # distinto al rojo de cv3 para distinguir visualmente
 
