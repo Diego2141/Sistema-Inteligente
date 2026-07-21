@@ -29,6 +29,14 @@ except ImportError:
     _shap_lib = None
     _SHAP_OK = False
 
+try:
+    import optuna
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    _OPTUNA_OK = True
+except ImportError:
+    optuna = None
+    _OPTUNA_OK = False
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -62,19 +70,36 @@ PASO_AÑOS           = 1
 PURGE_DIAS_HAB      = 97   # h_max(75) + feature lookback(22)
 MIN_TRAIN_ROWS      = 50
 
-# Fixed hyperparameters — user-adjustable
+# ---------------------------------------------------------------------------
+# Early stopping + Optuna
+# ---------------------------------------------------------------------------
+N_ESTIMATORS_MAX      = 300   # techo de árboles; early stopping lo reduce en práctica
+EARLY_STOPPING_ROUNDS = 10    # parar si val loss no mejora en N rondas consecutivas
+
+USE_OPTUNA      = True   # False → HP fijos para todos los h (más rápido, sin optuna)
+OPTUNA_N_TRIALS = 25     # trials por h representativo por fold
+
+# Grupos de h y sus representantes para Optuna (Opción C)
+# Un solo h "típico" por grupo → HP se buscan ahí y se transfieren a todo el grupo
+H_GRUPOS: dict = {
+    "corto": (list(range(H_MIN, 21)),        10),   # h=2–20,  representante h=10
+    "medio": (list(range(21, 51)),           35),   # h=21–50, representante h=35
+    "largo": (list(range(51, H_MAX + 1)),    62),   # h=51–75, representante h=62
+}
+
+# Fixed hyperparameters — valores por defecto (Optuna sobreescribe los buscados)
 HP: dict = {
-    "n_estimators"    : 100,   # reducido para menor RAM
-    "max_depth"       : 3,     # profundidad 3 en vez de 4: 2x menos nodos → 2x menos RAM
-    "learning_rate"   : 0.08,  # lr más alto para compensar menos árboles
+    "n_estimators"    : N_ESTIMATORS_MAX,  # early stopping determina el real
+    "max_depth"       : 3,
+    "learning_rate"   : 0.08,
     "subsample"       : 0.8,
     "colsample_bytree": 0.8,
     "min_child_weight": 5,
     "reg_alpha"       : 0.1,
     "reg_lambda"      : 1.0,
     "tree_method"     : "hist",
-    "max_bin"         : 64,    # histogramas de 64 bins vs 256 por defecto: 4x menos RAM
-    "n_jobs"          : 1,     # un solo thread: elimina buffers paralelos
+    "max_bin"         : 64,
+    "n_jobs"          : 1,
     "random_state"    : 42,
 }
 
@@ -254,16 +279,20 @@ def preparar_fold_data_h(
 def entrenar_modelos_h(
     X_train: pd.DataFrame,
     y_train: pd.Series,
+    X_val: pd.DataFrame,
+    y_val: pd.Series,
     hp: dict,
 ) -> dict:
     """
     Train one XGBRegressor per quantile tau plus one for mean.
+    Uses early stopping on val when val is non-empty (Option A).
 
     Returns
     -------
     dict {tau (float | 'mean'): fitted XGBRegressor}
     """
     modelos: dict = {}
+    use_es = len(X_val) > 0   # early stopping requires a non-empty val set
 
     for tau in TAUS:
         m = xgb.XGBRegressor(
@@ -271,11 +300,27 @@ def entrenar_modelos_h(
             quantile_alpha=tau,
             **hp,
         )
-        m.fit(X_train, y_train, verbose=False)
+        if use_es:
+            m.fit(
+                X_train, y_train,
+                eval_set=[(X_val, y_val)],
+                early_stopping_rounds=EARLY_STOPPING_ROUNDS,
+                verbose=False,
+            )
+        else:
+            m.fit(X_train, y_train, verbose=False)
         modelos[tau] = m
 
     m_mean = xgb.XGBRegressor(objective="reg:squarederror", **hp)
-    m_mean.fit(X_train, y_train, verbose=False)
+    if use_es:
+        m_mean.fit(
+            X_train, y_train,
+            eval_set=[(X_val, y_val)],
+            early_stopping_rounds=EARLY_STOPPING_ROUNDS,
+            verbose=False,
+        )
+    else:
+        m_mean.fit(X_train, y_train, verbose=False)
     modelos["mean"] = m_mean
 
     return modelos
@@ -548,6 +593,100 @@ def guardar_diag_y_plots(
 
 
 # ---------------------------------------------------------------------------
+# Optuna HP search (Option C: representative h per group)
+# ---------------------------------------------------------------------------
+
+def optuna_tune_h(
+    h_rep: int,
+    df: pd.DataFrame,
+    fold: dict,
+    cols_feat: list[str],
+) -> dict:
+    """
+    Busca HP óptimos en el h representativo del grupo usando Optuna + early stopping.
+    Espacio de búsqueda: 7 HP de regularización/árbol; n_estimators lo decide early stopping.
+    Devuelve un HP dict completo listo para entrenar.
+    """
+    if not _OPTUNA_OK:
+        log.warning("optuna no instalado — usando HP fijos para h_rep=%d", h_rep)
+        return dict(HP)
+
+    df_h = df[df["h"] == h_rep]
+    try:
+        X_tr, y_tr, X_vl, y_vl, _, _, _, _ = preparar_fold_data_h(df_h, fold, cols_feat)
+    except ValueError as e:
+        log.warning("Optuna h_rep=%d fold=%d omitido: %s — usando HP fijos", h_rep, fold["fold"], e)
+        return dict(HP)
+
+    y_tr_arr = np.asarray(y_tr)
+    y_vl_arr = np.asarray(y_vl)
+
+    def objective(trial: "optuna.Trial") -> float:
+        hp_trial = {
+            # ── HP buscados ────────────────────────────────────────────────
+            "max_depth"       : trial.suggest_int(  "max_depth",         2,    5),
+            "min_child_weight": trial.suggest_int(  "min_child_weight",   3,   20),
+            "reg_alpha"       : trial.suggest_float("reg_alpha",         0.0,  2.0),
+            "reg_lambda"      : trial.suggest_float("reg_lambda",        0.5,  5.0),
+            "learning_rate"   : trial.suggest_float("learning_rate",    0.03, 0.15, log=True),
+            "subsample"       : trial.suggest_float("subsample",         0.6,  1.0),
+            "colsample_bytree": trial.suggest_float("colsample_bytree",  0.5,  1.0),
+            # ── HP fijos ───────────────────────────────────────────────────
+            "n_estimators"    : N_ESTIMATORS_MAX,
+            "tree_method"     : "hist",
+            "max_bin"         : 64,
+            "n_jobs"          : 1,
+            "random_state"    : 42,
+        }
+        total_loss = 0.0
+        for tau in TAUS:
+            m = xgb.XGBRegressor(
+                objective="reg:quantileerror",
+                quantile_alpha=tau,
+                **hp_trial,
+            )
+            m.fit(
+                X_tr, y_tr_arr,
+                eval_set=[(X_vl, y_vl_arr)],
+                early_stopping_rounds=EARLY_STOPPING_ROUNDS,
+                verbose=False,
+            )
+            total_loss += _pinball(y_vl_arr, m.predict(X_vl), tau)
+        return total_loss / len(TAUS)   # media de pinball entre cuantiles
+
+    study = optuna.create_study(
+        direction="minimize",
+        sampler=optuna.samplers.TPESampler(seed=42),
+    )
+    study.optimize(objective, n_trials=OPTUNA_N_TRIALS, show_progress_bar=False)
+
+    best = study.best_params
+    log.info(
+        "Optuna fold=%d h_rep=%d → pinball_val=%.4f  %s",
+        fold["fold"], h_rep, study.best_value,
+        " ".join(f"{k}={v:.3g}" for k, v in best.items()),
+    )
+    return {
+        **best,                        # HP encontrados por Optuna
+        "n_estimators": N_ESTIMATORS_MAX,
+        "tree_method" : "hist",
+        "max_bin"     : 64,
+        "n_jobs"      : 1,
+        "random_state": 42,
+    }
+
+
+def get_hp_for_h(h_val: int, hp_grupos: dict) -> dict:
+    """Devuelve el HP dict del grupo correspondiente al horizonte h_val."""
+    if h_val <= 20:
+        return hp_grupos["corto"]
+    elif h_val <= 50:
+        return hp_grupos["medio"]
+    else:
+        return hp_grupos["largo"]
+
+
+# ---------------------------------------------------------------------------
 # Metrics plots
 # ---------------------------------------------------------------------------
 
@@ -766,6 +905,29 @@ def run(banco: str = BANCO) -> None:
             f"test:  {fold['test_start'].date()}..{fold['test_end'].date()}"
         )
 
+        # ── Optuna: buscar HP por grupo de h (Opción C) ──────────────────────
+        if USE_OPTUNA and _OPTUNA_OK:
+            print(f"  Buscando HP con Optuna ({OPTUNA_N_TRIALS} trials × 3 grupos)…")
+            hp_grupos: dict = {}
+            for grupo, (_, h_rep) in H_GRUPOS.items():
+                t_opt = time.time()
+                hp_grupos[grupo] = optuna_tune_h(h_rep, df, fold, cols_feat)
+                elapsed_opt = time.time() - t_opt
+                hp_g = hp_grupos[grupo]
+                print(
+                    f"    [{grupo:5s}] h_rep={h_rep:2d}  "
+                    f"depth={hp_g.get('max_depth')}  "
+                    f"min_cw={hp_g.get('min_child_weight')}  "
+                    f"lr={hp_g.get('learning_rate', 0):.3f}  "
+                    f"α={hp_g.get('reg_alpha', 0):.2f}  "
+                    f"λ={hp_g.get('reg_lambda', 1):.2f}  "
+                    f"({elapsed_opt:.0f}s)"
+                )
+        else:
+            if USE_OPTUNA and not _OPTUNA_OK:
+                log.warning("USE_OPTUNA=True pero optuna no está instalado — usando HP fijos")
+            hp_grupos = {g: dict(HP) for g in H_GRUPOS}
+
         # Write each h directly to a list; concat and flush to disk per fold
         fold_scaffolds: list[pd.DataFrame] = []
         n_h_ok = 0
@@ -797,7 +959,8 @@ def run(banco: str = BANCO) -> None:
                 len(X_train), len(X_val), len(X_test),
             )
 
-            modelos = entrenar_modelos_h(X_train, y_train, HP)
+            hp_h = get_hp_for_h(h_val, hp_grupos)
+            modelos = entrenar_modelos_h(X_train, y_train, X_val, y_val, hp_h)
 
             _scaffold = pd.DataFrame({
                 "banco"   : banco,
