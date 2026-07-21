@@ -21,6 +21,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import xgboost as xgb
+xgb.set_config(verbosity=0)   # silencia warnings C++ (binary format, etc.)
 
 try:
     import shap as _shap_lib
