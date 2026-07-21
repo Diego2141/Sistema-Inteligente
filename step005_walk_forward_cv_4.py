@@ -298,29 +298,24 @@ def entrenar_modelos_h(
         m = xgb.XGBRegressor(
             objective="reg:quantileerror",
             quantile_alpha=tau,
+            eval_metric="quantile",
+            early_stopping_rounds=EARLY_STOPPING_ROUNDS if use_es else None,
             **hp,
         )
         if use_es:
-            m.fit(
-                X_train, y_train,
-                eval_set=[(X_val, y_val)],
-                eval_metric="quantile",            # pinball loss explícito; evita default RMSE en XGBoost < 1.7
-                early_stopping_rounds=EARLY_STOPPING_ROUNDS,
-                verbose=False,
-            )
+            m.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
         else:
             m.fit(X_train, y_train, verbose=False)
         modelos[tau] = m
 
-    m_mean = xgb.XGBRegressor(objective="reg:squarederror", **hp)
+    m_mean = xgb.XGBRegressor(
+        objective="reg:squarederror",
+        eval_metric="rmse",
+        early_stopping_rounds=EARLY_STOPPING_ROUNDS if use_es else None,
+        **hp,
+    )
     if use_es:
-        m_mean.fit(
-            X_train, y_train,
-            eval_set=[(X_val, y_val)],
-            eval_metric="rmse",                    # explícito; coincide con reg:squarederror
-            early_stopping_rounds=EARLY_STOPPING_ROUNDS,
-            verbose=False,
-        )
+        m_mean.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
     else:
         m_mean.fit(X_train, y_train, verbose=False)
     modelos["mean"] = m_mean
@@ -452,7 +447,7 @@ def _diag_shap_h(
         if tau == "mean":
             continue
         try:
-            explainer = _shap_lib.TreeExplainer(model)
+            explainer = _shap_lib.TreeExplainer(model.get_booster())
             sv = explainer.shap_values(X)
             s = pd.Series(np.abs(sv).mean(axis=0), index=cols_feat)
             acum = acum.add(s.fillna(0.0), fill_value=0.0)
@@ -645,15 +640,11 @@ def optuna_tune_h(
             m = xgb.XGBRegressor(
                 objective="reg:quantileerror",
                 quantile_alpha=tau,
+                eval_metric="quantile",
+                early_stopping_rounds=EARLY_STOPPING_ROUNDS,
                 **hp_trial,
             )
-            m.fit(
-                X_tr, y_tr_arr,
-                eval_set=[(X_vl, y_vl_arr)],
-                eval_metric="quantile",            # consistente con entrenar_modelos_h
-                early_stopping_rounds=EARLY_STOPPING_ROUNDS,
-                verbose=False,
-            )
+            m.fit(X_tr, y_tr_arr, eval_set=[(X_vl, y_vl_arr)], verbose=False)
             total_loss += _pinball(y_vl_arr, m.predict(X_vl), tau)
         return total_loss / len(TAUS)   # media de pinball entre cuantiles
 
