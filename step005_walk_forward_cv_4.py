@@ -68,7 +68,14 @@ VENTANA_TRAIN_AÑOS  = 3
 VENTANA_VAL_AÑOS    = 0.5
 VENTANA_TEST_AÑOS   = 1
 PASO_AÑOS           = 1
-PURGE_DIAS_HAB      = 97   # h_max(75) + feature lookback(22)
+
+# Purge & embargo — derivados de los parámetros del modelo
+LOOKBACK_MAX_DIAS   = 22   # ventana máxima de lags del target usados como features
+PURGE_DIAS_HAB      = H_MAX + LOOKBACK_MAX_DIAS   # 75 + 22 = 97
+EMBARGO_DIAS_HAB    = LOOKBACK_MAX_DIAS            # 22: autocorrelación serial en bordes
+# Gap total aplicado simétricamente: TRAIN→VAL y VAL→TEST
+GAP_DIAS_HAB        = PURGE_DIAS_HAB + EMBARGO_DIAS_HAB   # 97 + 22 = 119
+
 MIN_TRAIN_ROWS      = 50
 
 # ---------------------------------------------------------------------------
@@ -132,7 +139,17 @@ def get_feature_cols(df: pd.DataFrame) -> list[str]:
 
 def build_folds(df: pd.DataFrame) -> list[dict]:
     """
-    Build walk-forward CV folds with an expanding training window.
+    Build walk-forward CV folds with an expanding training window and symmetric gaps.
+
+    Gap structure (applied identically on both sides):
+        TRAIN..train_end | GAP_DIAS_HAB | val_start..val_end | GAP_DIAS_HAB | test_start..test_end
+
+    GAP = PURGE (H_MAX + LOOKBACK_MAX_DIAS) + EMBARGO (LOOKBACK_MAX_DIAS)
+        = 97 + 22 = 119 business days
+
+    The gap prevents TARGET values from TRAIN/VAL from appearing as LAG FEATURES
+    in VAL/TEST (direct leakage) and adds an embargo for serial correlation at
+    period boundaries.
 
     Returns a list of dicts with keys:
         fold, train_start, train_end, val_start, val_end, test_start, test_end
@@ -161,23 +178,24 @@ def build_folds(df: pd.DataFrame) -> list[dict]:
         if test_end > df["fecha_t"].max():
             break
 
-        val_start = test_start - _offset(VENTANA_VAL_AÑOS)
+        # --- GAP2: purge + embargo entre VAL y TEST ---
+        # val_end se calcula retrocediendo GAP_DIAS_HAB antes de test_start
+        idx_test = int(np.searchsorted(all_bdays, np.datetime64(test_start, "ns")))
+        val_end_idx = max(0, idx_test - GAP_DIAS_HAB)
+        val_end = pd.Timestamp(all_bdays[val_end_idx])
+
+        # VAL: ventana de VENTANA_VAL_AÑOS terminando en val_end
+        val_start = val_end - _offset(VENTANA_VAL_AÑOS)
 
         if EXPANDING:
             train_start = train_min
         else:
             train_start = val_start - _offset(VENTANA_TRAIN_AÑOS)
 
-        # --- Purge gap between train and val ---
-        # Find the index of the first business day >= val_start
+        # --- GAP1: purge + embargo entre TRAIN y VAL (simétrico a GAP2) ---
         idx_val = int(np.searchsorted(all_bdays, np.datetime64(val_start, "ns")))
-        train_end_idx = max(0, idx_val - PURGE_DIAS_HAB - 1)
+        train_end_idx = max(0, idx_val - GAP_DIAS_HAB)
         train_end = pd.Timestamp(all_bdays[train_end_idx])
-
-        # --- val_end: last business day before test_start (no purge val→test) ---
-        idx_test = int(np.searchsorted(all_bdays, np.datetime64(test_start, "ns")))
-        val_end_idx = max(0, idx_test - 1)
-        val_end = pd.Timestamp(all_bdays[val_end_idx])
 
         fold_num += 1
         folds.append({
@@ -191,10 +209,12 @@ def build_folds(df: pd.DataFrame) -> list[dict]:
         })
 
         log.debug(
-            "Fold %d  train %s–%s  val %s–%s  test %s–%s",
+            "Fold %d | train %s..%s | [gap %dd] | val %s..%s | [gap %dd] | test %s..%s",
             fold_num,
             train_start.date(), train_end.date(),
+            GAP_DIAS_HAB,
             val_start.date(),   val_end.date(),
+            GAP_DIAS_HAB,
             test_start.date(),  test_end.date(),
         )
 
