@@ -175,9 +175,12 @@ def preparar_resultado(df: pd.DataFrame, fecha_origen: pd.Timestamp) -> pd.DataF
 # ── 5. Graficar ───────────────────────────────────────────────────────────────
 def _dibujar_bandas(ax, hs, res):
     ax.fill_between(hs, res["q01"] / 1e6, res["q99"] / 1e6,
-                    alpha=0.12, color=COLOR_BANDA, label="Q01–Q99 (98%)")
+                    alpha=0.10, color=COLOR_BANDA, label="Q01–Q99 (98%)")
     ax.fill_between(hs, res["q05"] / 1e6, res["q95"] / 1e6,
-                    alpha=0.28, color=COLOR_BANDA, label="Q05–Q95 (90%)")
+                    alpha=0.22, color=COLOR_BANDA, label="Q05–Q95 (90%)")
+    if "q40" in res.columns and "q60" in res.columns:
+        ax.fill_between(hs, res["q40"] / 1e6, res["q60"] / 1e6,
+                        alpha=0.42, color=COLOR_BANDA, label="Q40–Q60 (20%)")
     ax.plot(hs, res["q05"] / 1e6, color=COLOR_BANDA, lw=1.0, ls=":", alpha=0.7)
     ax.plot(hs, res["q95"] / 1e6, color=COLOR_BANDA, lw=1.0, ls=":", alpha=0.7)
     ax.plot(hs, res["q50"] / 1e6, color="steelblue", lw=2.0,
@@ -200,7 +203,9 @@ def graficar(res: pd.DataFrame, fecha_origen: pd.Timestamp, banco: str,
 
     cum_q01  = np.cumsum(res["q01"].values / 1e6)
     cum_q05  = np.cumsum(res["q05"].values / 1e6)
+    cum_q40  = np.cumsum(res["q40"].values / 1e6) if "q40" in res.columns else None
     cum_q50  = np.cumsum(res["q50"].values / 1e6)
+    cum_q60  = np.cumsum(res["q60"].values / 1e6) if "q60" in res.columns else None
     cum_q95  = np.cumsum(res["q95"].values / 1e6)
     cum_q99  = np.cumsum(res["q99"].values / 1e6)
     cum_real = np.where(mask_real, np.nancumsum(np.where(mask_real, realizado, 0)), np.nan)
@@ -239,10 +244,13 @@ def graficar(res: pd.DataFrame, fecha_origen: pd.Timestamp, banco: str,
     ax2.legend(loc="upper right", fontsize=9, framealpha=0.9)
 
     # Panel 3: acumulado
-    ax3.fill_between(hs, cum_q01, cum_q99, alpha=0.12, color=COLOR_BANDA,
+    ax3.fill_between(hs, cum_q01, cum_q99, alpha=0.10, color=COLOR_BANDA,
                      label="Q01–Q99 acum. (98%)")
-    ax3.fill_between(hs, cum_q05, cum_q95, alpha=0.28, color=COLOR_BANDA,
+    ax3.fill_between(hs, cum_q05, cum_q95, alpha=0.22, color=COLOR_BANDA,
                      label="Q05–Q95 acum. (90%)")
+    if cum_q40 is not None and cum_q60 is not None:
+        ax3.fill_between(hs, cum_q40, cum_q60, alpha=0.42, color=COLOR_BANDA,
+                         label="Q40–Q60 acum. (20%)")
     ax3.plot(hs, cum_q05, color=COLOR_BANDA, lw=1.0, ls=":", alpha=0.7)
     ax3.plot(hs, cum_q95, color=COLOR_BANDA, lw=1.0, ls=":", alpha=0.7)
     ax3.plot(hs, cum_q50, color="steelblue", lw=2.0,
@@ -279,14 +287,15 @@ def exportar_excel(df: pd.DataFrame) -> None:
         print("[AVISO] openpyxl no instalado — omitiendo exportación Excel")
         return
 
-    col_order = ["fecha_t", "fecha_th", "h", "target", "q01", "q05", "q50", "q95", "q99"]
-    if "mean" in df.columns:
-        col_order.append("mean")
-    col_order = [c for c in col_order if c in df.columns]
+    q_cols = sorted(
+        [c for c in df.columns if c.startswith("q") and c[1:].isdigit()],
+        key=lambda x: int(x[1:]),
+    )
+    col_order = [c for c in ["fecha_t", "fecha_th", "h", "target"] + q_cols + ["mean"]
+                 if c in df.columns]
 
     # Convertir a MM USD
-    mm_cols = [c for c in ["target", "q01", "q05", "q50", "q95", "q99", "mean"]
-               if c in df.columns]
+    mm_cols = [c for c in ["target"] + q_cols + ["mean"] if c in df.columns]
 
     with pd.ExcelWriter(RUTA_EXCEL, engine="openpyxl") as writer:
         for fold_num, gdf in df.groupby("fold"):
