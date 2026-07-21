@@ -427,6 +427,32 @@ def _diag_perm_h(
     return acum
 
 
+def _shap_compat_booster(model):
+    """
+    Return a Booster whose predict() translates the deprecated ntree_limit
+    kwarg (removed in XGBoost >= 2.0) to iteration_range.
+
+    Early stopping sets best_ntree_limit on the Booster itself, not just on
+    the sklearn wrapper.  SHAP < 0.43 detects this attribute and calls
+    booster.predict(X, ntree_limit=N), which raises TypeError in XGBoost 2.0+.
+    Monkey-patching predict() on a fresh reference fixes it without altering
+    the original model or requiring a SHAP/XGBoost upgrade.
+    """
+    booster = model.get_booster()
+    if not hasattr(booster, "best_ntree_limit"):
+        return booster  # no early stopping active; no patch needed
+
+    _orig = booster.predict
+
+    def _predict_compat(data, ntree_limit=None, **kw):
+        if ntree_limit is not None and "iteration_range" not in kw:
+            kw["iteration_range"] = (0, int(ntree_limit))
+        return _orig(data, **kw)
+
+    booster.predict = _predict_compat
+    return booster
+
+
 def _diag_shap_h(
     modelos: dict,
     X_val: pd.DataFrame,
@@ -447,7 +473,7 @@ def _diag_shap_h(
         if tau == "mean":
             continue
         try:
-            explainer = _shap_lib.TreeExplainer(model.get_booster())
+            explainer = _shap_lib.TreeExplainer(_shap_compat_booster(model))
             sv = explainer.shap_values(X)
             s = pd.Series(np.abs(sv).mean(axis=0), index=cols_feat)
             acum = acum.add(s.fillna(0.0), fill_value=0.0)
