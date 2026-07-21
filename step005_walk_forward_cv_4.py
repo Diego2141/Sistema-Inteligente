@@ -304,6 +304,7 @@ def entrenar_modelos_h(
             m.fit(
                 X_train, y_train,
                 eval_set=[(X_val, y_val)],
+                eval_metric="quantile",            # pinball loss explícito; evita default RMSE en XGBoost < 1.7
                 early_stopping_rounds=EARLY_STOPPING_ROUNDS,
                 verbose=False,
             )
@@ -316,6 +317,7 @@ def entrenar_modelos_h(
         m_mean.fit(
             X_train, y_train,
             eval_set=[(X_val, y_val)],
+            eval_metric="rmse",                    # explícito; coincide con reg:squarederror
             early_stopping_rounds=EARLY_STOPPING_ROUNDS,
             verbose=False,
         )
@@ -648,6 +650,7 @@ def optuna_tune_h(
             m.fit(
                 X_tr, y_tr_arr,
                 eval_set=[(X_vl, y_vl_arr)],
+                eval_metric="quantile",            # consistente con entrenar_modelos_h
                 early_stopping_rounds=EARLY_STOPPING_ROUNDS,
                 verbose=False,
             )
