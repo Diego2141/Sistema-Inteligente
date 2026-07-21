@@ -474,12 +474,18 @@ def _diag_shap_h(
             continue
         try:
             explainer = _shap_lib.TreeExplainer(_shap_compat_booster(model))
-            sv = explainer.shap_values(X)
+        except Exception as e:
+            log.debug("SHAP τ=%.2f falló [init]: %s", tau, e)
+            continue
+        try:
+            # check_additivity=False evita la llamada interna a predict(ntree_limit=N)
+            # que SHAP < 0.43 usa para validar que sum(SHAP) == predicción del modelo
+            sv = explainer.shap_values(X, check_additivity=False)
             s = pd.Series(np.abs(sv).mean(axis=0), index=cols_feat)
             acum = acum.add(s.fillna(0.0), fill_value=0.0)
             n_tau += 1
         except Exception as e:
-            log.debug("SHAP τ=%.2f falló: %s", tau, e)
+            log.debug("SHAP τ=%.2f falló [values]: %s", tau, e)
 
     if n_tau == 0:
         return pd.Series(np.nan, index=cols_feat)
