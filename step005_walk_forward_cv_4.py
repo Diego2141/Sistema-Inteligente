@@ -58,7 +58,7 @@ DIR_OUTPUT   = BASE_SISTEMA / "2. Output" / "step005_wfcv_v4_direct"
 BANCO   = "SISTEMA"
 H_MIN   = 2
 H_MAX   = 75
-TAUS    = [0.01, 0.05, 0.50, 0.95, 0.99]
+TAUS    = [0.01, 0.05, 0.40, 0.50, 0.60, 0.95, 0.99]
 
 EXPANDING             = True
 RECORTAR_INICIO_TRAIN = True
@@ -66,8 +66,8 @@ TRAIN_INICIO_CUTOFF   = "2020-01-01"
 
 VENTANA_TRAIN_AÑOS  = 3
 VENTANA_VAL_AÑOS    = 0.5
-VENTANA_TEST_AÑOS   = 1
-PASO_AÑOS           = 1
+VENTANA_TEST_AÑOS   = 0.5
+PASO_AÑOS           = 0.5
 
 # Purge & embargo — derivados de los parámetros del modelo
 LOOKBACK_MAX_DIAS   = 22   # ventana máxima de lags del target usados como features
@@ -762,7 +762,9 @@ def graficar_metricas(
     tau_colors = {
         "pinball_q01": "#6B21A8",
         "pinball_q05": "#9333EA",
+        "pinball_q40": "#0EA5E9",
         "pinball_q50": "#2563EB",
+        "pinball_q60": "#10B981",
         "pinball_q95": "#EA580C",
         "pinball_q99": "#991B1B",
     }
@@ -1061,7 +1063,7 @@ def run(banco: str = BANCO) -> None:
     # 5. Consolidate per-fold parquets into preds_base (read one by one)
     # ------------------------------------------------------------------
     col_order = ["banco", "fold", "fecha_t", "fecha_th", "h", "target",
-                 "q01", "q05", "q50", "q95", "q99", "mean"]
+                 "q01", "q05", "q40", "q50", "q60", "q95", "q99", "mean"]
 
     if fold_parquet_paths:
         chunks = []
