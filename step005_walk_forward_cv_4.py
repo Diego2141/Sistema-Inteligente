@@ -94,10 +94,13 @@ OPTUNA_N_TRIALS = 30     # trials por h representativo por fold
 
 # Grupos de h y sus representantes para Optuna (Opción C)
 # Un solo h "típico" por grupo → HP se buscan ahí y se transfieren a todo el grupo
+# muy_corto separado: banco pre-reporta retiros a t+2 y depósitos a t+1 →
+#   señal cualitativamente diferente a horizontes mayores
 H_GRUPOS: dict = {
-    "corto": (list(range(H_MIN, 21)),        10),   # h=2–20,  representante h=10
-    "medio": (list(range(21, 51)),           35),   # h=21–50, representante h=35
-    "largo": (list(range(51, H_MAX + 1)),    62),   # h=51–75, representante h=62
+    "muy_corto": (list(range(H_MIN, 6)),          3),   # h=2–5,   rep h=3  (~1 semana hábil)
+    "corto":     (list(range(6, 21)),            13),   # h=6–20,  rep h=13 (~1–4 semanas)
+    "medio":     (list(range(21, 51)),           35),   # h=21–50, rep h=35 (~1–2.5 meses)
+    "largo":     (list(range(51, H_MAX + 1)),    62),   # h=51–75, rep h=62 (~2.5–3.5 meses)
 }
 
 # Fixed hyperparameters — valores por defecto (Optuna sobreescribe los buscados)
@@ -789,7 +792,9 @@ def optuna_tune_h(
 
 def get_hp_for_h(h_val: int, hp_grupos: dict) -> dict:
     """Devuelve el HP dict del grupo correspondiente al horizonte h_val."""
-    if h_val <= 20:
+    if h_val <= 5:
+        return hp_grupos["muy_corto"]
+    elif h_val <= 20:
         return hp_grupos["corto"]
     elif h_val <= 50:
         return hp_grupos["medio"]
@@ -888,31 +893,40 @@ def graficar_metricas(
     ax3.legend(fontsize=9)
     _xgrid(ax3)
 
-    # ── Panel 4: Coverage TEST ───────────────────────────────────────────────
+    # ── Panel 4: Coverage TEST por fold + promedio ───────────────────────────
     has_cov = False
     if "coverage_90" in df_res.columns:
+        # Línea delgada por fold (misma paleta que RMSE)
+        for i, fn in enumerate(folds):
+            sub = df_res[df_res["fold"] == fn].sort_values("h")
+            ax4.plot(sub["h"], sub["coverage_90"], lw=1.1,
+                     color=cmap_folds(i / max(len(folds), 1)), alpha=0.55,
+                     label=f"Fold {fn}")
+        # Línea gruesa = promedio de folds
         m90 = df_res.groupby("h")["coverage_90"].mean()
-        ax4.plot(m90.index, m90.values, color="#059669", lw=2.0, label="Cov. TEST 90% [Q05-Q95]")
+        ax4.plot(m90.index, m90.values, color="#059669", lw=2.5,
+                 label="Promedio folds 90%", zorder=5)
         ax4.fill_between(m90.index, m90.values, 0.90,
-                         where=m90.values < 0.90, alpha=0.20, color="#DC2626", label="Bajo objetivo")
-        ax4.fill_between(m90.index, m90.values, 0.90,
-                         where=m90.values >= 0.90, alpha=0.15, color="#059669", label="Sobre objetivo")
-        ax4.axhline(0.90, color="#059669", lw=1.2, ls="--", alpha=0.6, label="Objetivo 90%")
+                         where=m90.values < 0.90, alpha=0.15, color="#DC2626")
+        ax4.axhline(0.90, color="#059669", lw=1.2, ls="--", alpha=0.7,
+                    label="Objetivo 90%")
         has_cov = True
     if "coverage_98" in df_res.columns:
         m98 = df_res.groupby("h")["coverage_98"].mean()
-        ax4.plot(m98.index, m98.values, color="#7C3AED", lw=1.5, ls=":", label="Cov. TEST 98% [Q01-Q99]")
-        ax4.axhline(0.98, color="#7C3AED", lw=1.0, ls="--", alpha=0.5, label="Objetivo 98%")
-        has_cov = True
+        ax4.plot(m98.index, m98.values, color="#7C3AED", lw=1.8, ls=":",
+                 label="Promedio folds 98%", zorder=4)
+        ax4.axhline(0.98, color="#7C3AED", lw=1.0, ls="--", alpha=0.5,
+                    label="Objetivo 98%")
     if not has_cov:
         ax4.text(0.5, 0.5, "Sin datos de cobertura", ha="center", va="center",
                  transform=ax4.transAxes, fontsize=11)
-    ax4.set_title("Cobertura empírica TEST por horizonte h (promedio folds)", fontweight="bold")
+    ax4.set_title("Cobertura 90% TEST por fold y horizonte h\n(línea gruesa = promedio)",
+                  fontweight="bold")
     ax4.set_xlabel("Horizonte h (días hábiles)")
     ax4.set_ylabel("Cobertura empírica")
     ax4.set_ylim(0.40, 1.05)
     ax4.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:.0%}"))
-    ax4.legend(fontsize=9)
+    ax4.legend(fontsize=8, ncol=2)
     _xgrid(ax4)
 
     # ── Panel 5: Coverage VAL vs TEST ─────────────────────────────────────────
@@ -1212,9 +1226,31 @@ def run(banco: str = BANCO) -> None:
             print("\nCobertura empírica 90% [Q05-Q95] TEST media por grupo de horizonte:")
             print(df_res.groupby("h_grupo", observed=True)["coverage_90"].mean().map("{:.1%}".format))
 
+            # Tabla por fold × grupo (coverage_90)
+            print("\nCobertura 90% TEST por fold y grupo de horizonte:")
+            tbl_90 = (
+                df_res.groupby(["fold", "h_grupo"], observed=True)["coverage_90"]
+                .mean()
+                .unstack("h_grupo")
+                .applymap("{:.1%}".format)
+            )
+            tbl_90.index = ["Fold {}".format(f) for f in tbl_90.index]
+            print(tbl_90.to_string())
+
         if "coverage_98" in df_res.columns:
             print("\nCobertura empírica 98% [Q01-Q99] TEST media por grupo de horizonte:")
             print(df_res.groupby("h_grupo", observed=True)["coverage_98"].mean().map("{:.1%}".format))
+
+            # Tabla por fold × grupo (coverage_98)
+            print("\nCobertura 98% TEST por fold y grupo de horizonte:")
+            tbl_98 = (
+                df_res.groupby(["fold", "h_grupo"], observed=True)["coverage_98"]
+                .mean()
+                .unstack("h_grupo")
+                .applymap("{:.1%}".format)
+            )
+            tbl_98.index = ["Fold {}".format(f) for f in tbl_98.index]
+            print(tbl_98.to_string())
 
         if "val_coverage_90" in df_res.columns:
             print("\nCobertura empírica 90% [Q05-Q95] VAL media por grupo de horizonte:")
