@@ -453,6 +453,41 @@ def _pinball(y: np.ndarray, yhat: np.ndarray, tau: float) -> float:
     return float(np.where(err >= 0, tau * err, (tau - 1) * err).mean())
 
 
+def _sincos_pairs(cols: list[str]) -> dict[str, tuple[str, str]]:
+    """
+    Detecta features cíclicos codificados como par _sin / _cos.
+    Devuelve {base: (sin_col, cos_col)} solo cuando AMBOS componentes están en cols.
+    Ejemplo: 'dias_al_cierre_mes' → ('dias_al_cierre_mes_sin', 'dias_al_cierre_mes_cos')
+    """
+    sin_map = {c[:-4]: c for c in cols if c.endswith("_sin")}
+    cos_map = {c[:-4]: c for c in cols if c.endswith("_cos")}
+    return {base: (sin_map[base], cos_map[base])
+            for base in sin_map if base in cos_map}
+
+
+def _consolidar_sincos_pivot(
+    pivot: pd.DataFrame,
+    pairs: dict[str, tuple[str, str]],
+) -> pd.DataFrame:
+    """
+    En un pivot (features × h), suma filas sin+cos en una única fila 'base'
+    y elimina las filas individuales.
+    Para perm: las filas ya llevan el Δ conjunto (sin=joint, cos=0) → la suma = joint.
+    Para gain/shap: la suma aproxima la importancia total del feature circular.
+    """
+    rows_new: dict[str, pd.Series] = {}
+    rows_drop: list[str] = []
+    for base, (sin_c, cos_c) in pairs.items():
+        if sin_c in pivot.index and cos_c in pivot.index:
+            rows_new[base] = pivot.loc[sin_c] + pivot.loc[cos_c]
+            rows_drop += [sin_c, cos_c]
+    if rows_new:
+        pivot = pd.concat(
+            [pivot.drop(index=rows_drop), pd.DataFrame(rows_new).T]
+        )
+    return pivot
+
+
 def _diag_gain_h(modelos: dict, cols_feat: list[str]) -> pd.Series:
     """Gain promedio entre cuantiles (in-sample, solo informativo)."""
     acum = {f: 0.0 for f in cols_feat}
@@ -486,6 +521,10 @@ def _diag_perm_h(
     acum = pd.Series(0.0, index=cols_feat)
     n_tau = 0
 
+    # Pares sin/cos → se permutar conjuntamente con el mismo shuffle
+    pairs     = _sincos_pairs(cols_feat)
+    paired_cs = {c for (sc, cc) in pairs.values() for c in (sc, cc)}
+
     for tau, model in modelos.items():
         if tau == "mean":
             continue
@@ -493,7 +532,11 @@ def _diag_perm_h(
         base_loss  = _pinball(y, base_preds, tau)
 
         feat_deltas: dict[str, float] = {}
+
+        # ── Features individuales (sin/cos no emparejados) ──────────────────
         for c in cols_feat:
+            if c in paired_cs:
+                continue  # se manejan abajo
             orig = X[c].values.copy()
             deltas = []
             for _ in range(DIAG_N_REPEATS):
@@ -503,6 +546,25 @@ def _diag_perm_h(
                 Xp[c] = new_col
                 deltas.append(_pinball(y, model.predict(Xp), tau) - base_loss)
             feat_deltas[c] = float(np.mean(deltas))
+
+        # ── Pares sin/cos — permutación conjunta (mismo shuffle) ────────────
+        # Strobl et al. (2008): permutar solo un componente deja al modelo
+        # recuperar señal del otro → subestima importancia real del feature cíclico.
+        # Solución: usar el mismo vector de permutación para ambos.
+        # Almacenamos el Δ conjunto en sin_col y 0 en cos_col;
+        # _consolidar_sincos_pivot los suma → importancia joint correcta.
+        for base, (sin_c, cos_c) in pairs.items():
+            orig_sin = X[sin_c].values.copy()
+            orig_cos = X[cos_c].values.copy()
+            deltas = []
+            for _ in range(DIAG_N_REPEATS):
+                perm   = rng.permutation(block_starts)
+                Xp     = X.copy()
+                Xp[sin_c] = np.concatenate([orig_sin[s:s + bs] for s in perm])[:n]
+                Xp[cos_c] = np.concatenate([orig_cos[s:s + bs] for s in perm])[:n]
+                deltas.append(_pinball(y, model.predict(Xp), tau) - base_loss)
+            feat_deltas[sin_c] = float(np.mean(deltas))  # Δ joint completo
+            feat_deltas[cos_c] = 0.0                     # placeholder; suma → Δ joint
 
         acum = acum.add(pd.Series(feat_deltas), fill_value=0.0)
         n_tau += 1
@@ -639,6 +701,10 @@ def guardar_diag_y_plots(
             .mean()
             .T   # features como filas, h como columnas
         )
+        # Consolidar pares sin/cos → suma en fila 'base' (ej. 'dias_al_cierre_mes')
+        pairs = _sincos_pairs(list(pivot.index))
+        pivot = _consolidar_sincos_pivot(pivot, pairs)
+
         # Ordenar features por importancia media descendente
         pivot["_mean"] = pivot.mean(axis=1)
         pivot = pivot.sort_values("_mean", ascending=False).drop(columns=["_mean"])
@@ -681,6 +747,9 @@ def guardar_diag_y_plots(
         pivot_perm = (
             df_d[["h"] + perm_cols].rename(columns=rename_p).groupby("h").mean().T
         )
+        # Consolidar pares sin/cos antes del ranking
+        pairs_p = _sincos_pairs(list(pivot_perm.index))
+        pivot_perm = _consolidar_sincos_pivot(pivot_perm, pairs_p)
         pivot_perm["_mean"] = pivot_perm.mean(axis=1)
         top10 = pivot_perm.sort_values("_mean", ascending=False).head(10).drop(columns=["_mean"])
         hs = top10.columns.tolist()
