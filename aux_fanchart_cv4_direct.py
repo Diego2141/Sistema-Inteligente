@@ -248,16 +248,10 @@ def graficar(res: pd.DataFrame, fecha_origen: pd.Timestamp, banco: str,
     ax2.set_title("Solo proyección del modelo — mediana visible", fontsize=10, style="italic")
     ax2.legend(loc="upper right", fontsize=9, framealpha=0.9)
 
-    # Panel 3: acumulado
-    ax3.fill_between(hs, cum_q01, cum_q99, alpha=0.10, color=COLOR_BANDA,
-                     label="Q01–Q99 acum. (98%)")
-    ax3.fill_between(hs, cum_q05, cum_q95, alpha=0.22, color=COLOR_BANDA,
-                     label="Q05–Q95 acum. (90%)")
+    # Panel 3: acumulado — solo Q40-Q60 + mediana
     if cum_q40 is not None and cum_q60 is not None:
-        ax3.fill_between(hs, cum_q40, cum_q60, alpha=0.42, color=COLOR_BANDA,
+        ax3.fill_between(hs, cum_q40, cum_q60, alpha=0.45, color=COLOR_BANDA,
                          label="Q40–Q60 acum. (20%)")
-    ax3.plot(hs, cum_q05, color=COLOR_BANDA, lw=1.0, ls=":", alpha=0.7)
-    ax3.plot(hs, cum_q95, color=COLOR_BANDA, lw=1.0, ls=":", alpha=0.7)
     ax3.plot(hs, cum_q50, color="steelblue", lw=2.0,
              label="Mediana acumulada (Q50)", zorder=5)
     if mask_real.any():
