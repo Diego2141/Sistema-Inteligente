@@ -349,25 +349,38 @@ def calcular_metricas(
     y_test: np.ndarray,
     h_val: int,
     fold_num: int,
+    preds_val_dict: dict | None = None,
+    y_val: np.ndarray | None = None,
 ) -> dict:
     """
-    Compute pinball loss per quantile tau, RMSE for mean, and empirical coverage.
+    Compute:
+      - Pinball loss por cuantil (TEST)
+      - RMSE (TEST)
+      - Coverage empírica TEST 90% y 98%
+      - Coverage empírica VAL 90% y 98%   (para detectar overfitting de calibración)
+      - Winkler Score 90% y 98%           (penaliza anchura + violaciones)
+      - Interval Sharpness 90%            (anchura media sin penalización)
+      - CRPS aproximado (trapz sobre taus discretos)
+      - Calibración hit-rate por cuantil  (empírico debe ≈ tau)
+      - Pinball relativo (/ std y_test)   (comparable entre horizontes)
 
     Returns a flat dict suitable for appending to a list before pd.DataFrame().
     """
     row: dict = {"fold": fold_num, "h": h_val}
+    tau_pinballs: dict[float, float] = {}
 
+    # ── Pinball + RMSE ────────────────────────────────────────────────────────
     for tau, preds in preds_dict.items():
         if tau == "mean":
-            residuals = y_test - preds
-            row["rmse"] = float(np.sqrt(np.mean(residuals ** 2)))
+            row["rmse"] = float(np.sqrt(np.mean((y_test - preds) ** 2)))
         else:
-            errors    = y_test - preds
-            pinball   = np.where(errors >= 0, tau * errors, (tau - 1) * errors)
-            col_name  = f"pinball_q{int(tau * 100):02d}"
-            row[col_name] = float(np.mean(pinball))
+            err    = y_test - preds
+            pb     = np.where(err >= 0, tau * err, (tau - 1) * err)
+            pb_val = float(np.mean(pb))
+            row[f"pinball_q{int(tau * 100):02d}"] = pb_val
+            tau_pinballs[tau] = pb_val
 
-    # Empirical coverage
+    # ── Coverage TEST ─────────────────────────────────────────────────────────
     if 0.05 in preds_dict and 0.95 in preds_dict:
         row["coverage_90"] = float(
             ((y_test >= preds_dict[0.05]) & (y_test <= preds_dict[0.95])).mean()
@@ -376,6 +389,49 @@ def calcular_metricas(
         row["coverage_98"] = float(
             ((y_test >= preds_dict[0.01]) & (y_test <= preds_dict[0.99])).mean()
         )
+
+    # ── Coverage VAL ──────────────────────────────────────────────────────────
+    if preds_val_dict is not None and y_val is not None and len(y_val) > 0:
+        if 0.05 in preds_val_dict and 0.95 in preds_val_dict:
+            row["val_coverage_90"] = float(
+                ((y_val >= preds_val_dict[0.05]) & (y_val <= preds_val_dict[0.95])).mean()
+            )
+        if 0.01 in preds_val_dict and 0.99 in preds_val_dict:
+            row["val_coverage_98"] = float(
+                ((y_val >= preds_val_dict[0.01]) & (y_val <= preds_val_dict[0.99])).mean()
+            )
+
+    # ── Winkler Score: W = (U-L) + (2/α)*[max(0,L-y) + max(0,y-U)] ──────────
+    if 0.05 in preds_dict and 0.95 in preds_dict:
+        L, U  = preds_dict[0.05], preds_dict[0.95]
+        alpha = 0.10
+        width = U - L
+        penalty = (2 / alpha) * (np.maximum(0.0, L - y_test) + np.maximum(0.0, y_test - U))
+        row["winkler_90"]   = float((width + penalty).mean())
+        row["sharpness_90"] = float(width.mean())
+    if 0.01 in preds_dict and 0.99 in preds_dict:
+        L, U  = preds_dict[0.01], preds_dict[0.99]
+        alpha = 0.02
+        width = U - L
+        penalty = (2 / alpha) * (np.maximum(0.0, L - y_test) + np.maximum(0.0, y_test - U))
+        row["winkler_98"] = float((width + penalty).mean())
+
+    # ── CRPS ≈ 2 * ∫₀¹ pinball_τ dτ  (integración trapezoidal, 7 cuantiles) ──
+    if len(tau_pinballs) >= 2:
+        sorted_taus = sorted(tau_pinballs.keys())
+        pb_arr = np.array([tau_pinballs[t] for t in sorted_taus])
+        row["crps"] = float(2.0 * np.trapz(pb_arr, sorted_taus))
+
+    # ── Calibración hit-rate por cuantil (empírico debe ≈ tau nominal) ────────
+    for tau, preds in preds_dict.items():
+        if tau != "mean":
+            row[f"calib_q{int(tau * 100):02d}"] = float((y_test <= preds).mean())
+
+    # ── Pinball relativo (/ std target TEST) — comparable entre horizontes ────
+    y_std = float(np.std(y_test))
+    if y_std > 0:
+        for tau, pb in tau_pinballs.items():
+            row[f"pinball_rel_q{int(tau * 100):02d}"] = pb / y_std
 
     return row
 
@@ -746,7 +802,8 @@ def graficar_metricas(
     banco: str,
     fecha_hoy: str,
 ) -> None:
-    """Genera figura con 4 paneles: RMSE, Pinball q50, todos los cuantiles, Coverage."""
+    """6 paneles 2×3: RMSE | Pinball Q50+CRPS | Pinball cuantiles |
+                      Coverage TEST | Coverage VAL vs TEST | Winkler + Sharpness."""
     try:
         import matplotlib.pyplot as plt
         import matplotlib.ticker as mticker
@@ -756,9 +813,8 @@ def graficar_metricas(
 
     folds      = sorted(df_res["fold"].unique())
     cmap_folds = plt.cm.Set1
-    hs_all     = np.sort(df_res["h"].unique())
+    mean_h     = df_res.groupby("h").mean(numeric_only=True)
 
-    # Paleta de colores para cuantiles
     tau_colors = {
         "pinball_q01": "#6B21A8",
         "pinball_q05": "#9333EA",
@@ -769,101 +825,136 @@ def graficar_metricas(
         "pinball_q99": "#991B1B",
     }
 
-    fig, axes = plt.subplots(2, 2, figsize=(18, 12),
-                             gridspec_kw={"hspace": 0.40, "wspace": 0.32})
+    fig, axes = plt.subplots(2, 3, figsize=(22, 12),
+                             gridspec_kw={"hspace": 0.42, "wspace": 0.34})
     fig.suptitle(
         f"Métricas de desempeño por horizonte — {banco}\n"
-        f"cv4 DIRECT (1 modelo por h, h ∉ features)",
+        f"cv4 DIRECT · 6 paneles: error | calibración | cobertura",
         fontsize=13, fontweight="bold", y=0.99,
     )
+    ax1, ax2, ax3, ax4, ax5, ax6 = axes.flat
 
-    ax1, ax2, ax3, ax4 = axes.flat
+    def _xgrid(ax):
+        ax.grid(True, alpha=0.25)
+        ax.xaxis.set_major_locator(mticker.MultipleLocator(10))
 
-    # ── Panel 1: RMSE por h ──────────────────────────────────────────────────
-    for i, fold_num in enumerate(folds):
-        sub = df_res[df_res["fold"] == fold_num].sort_values("h")
+    # ── Panel 1: RMSE ────────────────────────────────────────────────────────
+    for i, fn in enumerate(folds):
+        sub = df_res[df_res["fold"] == fn].sort_values("h")
         ax1.plot(sub["h"], sub["rmse"] / 1e6, lw=1.5,
-                 color=cmap_folds(i / max(len(folds), 1)),
-                 alpha=0.7, label=f"Fold {fold_num}")
-    mean_rmse = df_res.groupby("h")["rmse"].mean()
-    ax1.plot(mean_rmse.index, mean_rmse.values / 1e6,
-             color="black", lw=2.5, label="Promedio folds", zorder=5)
+                 color=cmap_folds(i / max(len(folds), 1)), alpha=0.7, label=f"Fold {fn}")
+    ax1.plot(mean_h.index, mean_h["rmse"] / 1e6, color="black", lw=2.5, label="Promedio")
     ax1.set_title("RMSE por horizonte h", fontweight="bold")
     ax1.set_xlabel("Horizonte h (días hábiles)")
     ax1.set_ylabel("RMSE (MM USD)")
     ax1.legend(fontsize=9)
-    ax1.grid(True, alpha=0.25)
-    ax1.xaxis.set_major_locator(mticker.MultipleLocator(10))
+    _xgrid(ax1)
 
-    # ── Panel 2: Pinball q50 por h ───────────────────────────────────────────
-    for i, fold_num in enumerate(folds):
-        sub = df_res[df_res["fold"] == fold_num].sort_values("h")
-        if "pinball_q50" in sub.columns:
-            ax2.plot(sub["h"], sub["pinball_q50"] / 1e6, lw=1.5,
-                     color=cmap_folds(i / max(len(folds), 1)),
-                     alpha=0.7, label=f"Fold {fold_num}")
+    # ── Panel 2: Pinball Q50 + CRPS ──────────────────────────────────────────
     if "pinball_q50" in df_res.columns:
-        mean_pb50 = df_res.groupby("h")["pinball_q50"].mean()
-        ax2.plot(mean_pb50.index, mean_pb50.values / 1e6,
-                 color="black", lw=2.5, label="Promedio folds", zorder=5)
-    ax2.set_title("Pinball loss Q50 (mediana) por horizonte h", fontweight="bold")
+        for i, fn in enumerate(folds):
+            sub = df_res[df_res["fold"] == fn].sort_values("h")
+            ax2.plot(sub["h"], sub["pinball_q50"] / 1e6, lw=1.2,
+                     color=cmap_folds(i / max(len(folds), 1)), alpha=0.55, label=f"Fold {fn}")
+        ax2.plot(mean_h.index, mean_h["pinball_q50"] / 1e6,
+                 color="#2563EB", lw=2.5, label="Pinball Q50 (prom.)")
+    if "crps" in mean_h.columns:
+        ax2b = ax2.twinx()
+        ax2b.plot(mean_h.index, mean_h["crps"] / 1e6,
+                  color="#DC2626", lw=2.0, ls="--", label="CRPS (prom.)")
+        ax2b.set_ylabel("CRPS (MM USD)", color="#DC2626")
+        ax2b.tick_params(axis="y", labelcolor="#DC2626")
+        ax2b.legend(loc="upper right", fontsize=9)
+    ax2.set_title("Pinball Q50 y CRPS por horizonte h", fontweight="bold")
     ax2.set_xlabel("Horizonte h (días hábiles)")
-    ax2.set_ylabel("Pinball loss (MM USD)")
-    ax2.legend(fontsize=9)
-    ax2.grid(True, alpha=0.25)
-    ax2.xaxis.set_major_locator(mticker.MultipleLocator(10))
+    ax2.set_ylabel("Pinball Q50 (MM USD)")
+    ax2.legend(fontsize=9, loc="upper left")
+    _xgrid(ax2)
 
-    # ── Panel 3: Pinball todos los cuantiles (promedio de folds) ─────────────
+    # ── Panel 3: Pinball todos cuantiles ─────────────────────────────────────
     pb_cols_present = [c for c in tau_colors if c in df_res.columns]
     for col in pb_cols_present:
-        mean_pb = df_res.groupby("h")[col].mean()
-        label   = col.replace("pinball_q", "Q").replace("01", "01 (1%)")\
-                     .replace("05", "05 (5%)").replace("50", "50 (50%)")\
-                     .replace("95", "95 (95%)").replace("99", "99 (99%)")
-        ax3.plot(mean_pb.index, mean_pb.values / 1e6,
+        label = col.replace("pinball_q", "Q")
+        ax3.plot(mean_h.index, mean_h[col] / 1e6,
                  color=tau_colors[col], lw=2.0, label=label)
-    ax3.set_title("Pinball loss por cuantil y horizonte (promedio folds)",
-                  fontweight="bold")
+    ax3.set_title("Pinball loss por cuantil y horizonte (promedio folds)", fontweight="bold")
     ax3.set_xlabel("Horizonte h (días hábiles)")
     ax3.set_ylabel("Pinball loss (MM USD)")
     ax3.legend(fontsize=9)
-    ax3.grid(True, alpha=0.25)
-    ax3.xaxis.set_major_locator(mticker.MultipleLocator(10))
+    _xgrid(ax3)
 
-    # ── Panel 4: Cobertura empírica ──────────────────────────────────────────
+    # ── Panel 4: Coverage TEST ───────────────────────────────────────────────
     has_cov = False
     if "coverage_90" in df_res.columns:
-        mean_cov90 = df_res.groupby("h")["coverage_90"].mean()
-        ax4.plot(mean_cov90.index, mean_cov90.values,
-                 color="#059669", lw=2.0, label="Cobertura 90% [Q05-Q95]")
-        ax4.fill_between(mean_cov90.index, mean_cov90.values, 0.90,
-                         where=mean_cov90.values < 0.90,
-                         alpha=0.20, color="#DC2626", label="Bajo objetivo")
-        ax4.fill_between(mean_cov90.index, mean_cov90.values, 0.90,
-                         where=mean_cov90.values >= 0.90,
-                         alpha=0.15, color="#059669", label="Sobre objetivo")
-        ax4.axhline(0.90, color="#059669", lw=1.2, ls="--", alpha=0.6,
-                    label="Objetivo 90%")
+        m90 = df_res.groupby("h")["coverage_90"].mean()
+        ax4.plot(m90.index, m90.values, color="#059669", lw=2.0, label="Cov. TEST 90% [Q05-Q95]")
+        ax4.fill_between(m90.index, m90.values, 0.90,
+                         where=m90.values < 0.90, alpha=0.20, color="#DC2626", label="Bajo objetivo")
+        ax4.fill_between(m90.index, m90.values, 0.90,
+                         where=m90.values >= 0.90, alpha=0.15, color="#059669", label="Sobre objetivo")
+        ax4.axhline(0.90, color="#059669", lw=1.2, ls="--", alpha=0.6, label="Objetivo 90%")
         has_cov = True
     if "coverage_98" in df_res.columns:
-        mean_cov98 = df_res.groupby("h")["coverage_98"].mean()
-        ax4.plot(mean_cov98.index, mean_cov98.values,
-                 color="#7C3AED", lw=1.5, ls=":", label="Cobertura 98% [Q01-Q99]")
-        ax4.axhline(0.98, color="#7C3AED", lw=1.0, ls="--", alpha=0.5,
-                    label="Objetivo 98%")
+        m98 = df_res.groupby("h")["coverage_98"].mean()
+        ax4.plot(m98.index, m98.values, color="#7C3AED", lw=1.5, ls=":", label="Cov. TEST 98% [Q01-Q99]")
+        ax4.axhline(0.98, color="#7C3AED", lw=1.0, ls="--", alpha=0.5, label="Objetivo 98%")
         has_cov = True
     if not has_cov:
-        ax4.text(0.5, 0.5, "Sin datos de cobertura",
-                 ha="center", va="center", transform=ax4.transAxes, fontsize=11)
-    ax4.set_title("Cobertura empírica por horizonte h (promedio folds)",
-                  fontweight="bold")
+        ax4.text(0.5, 0.5, "Sin datos de cobertura", ha="center", va="center",
+                 transform=ax4.transAxes, fontsize=11)
+    ax4.set_title("Cobertura empírica TEST por horizonte h (promedio folds)", fontweight="bold")
     ax4.set_xlabel("Horizonte h (días hábiles)")
     ax4.set_ylabel("Cobertura empírica")
     ax4.set_ylim(0.40, 1.05)
     ax4.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:.0%}"))
     ax4.legend(fontsize=9)
-    ax4.grid(True, alpha=0.25)
-    ax4.xaxis.set_major_locator(mticker.MultipleLocator(10))
+    _xgrid(ax4)
+
+    # ── Panel 5: Coverage VAL vs TEST ─────────────────────────────────────────
+    cov_specs = [
+        ("coverage_90",     "TEST 90%", "#059669", "-"),
+        ("val_coverage_90", "VAL  90%", "#059669", "--"),
+        ("coverage_98",     "TEST 98%", "#7C3AED", "-"),
+        ("val_coverage_98", "VAL  98%", "#7C3AED", "--"),
+    ]
+    plotted_5 = False
+    for metric, label, color, ls in cov_specs:
+        if metric in df_res.columns:
+            m = df_res.groupby("h")[metric].mean()
+            ax5.plot(m.index, m.values, color=color, lw=2.0, ls=ls, label=label)
+            plotted_5 = True
+    for nivel, color in [(0.90, "#059669"), (0.98, "#7C3AED")]:
+        ax5.axhline(nivel, color=color, lw=0.8, ls=":", alpha=0.5)
+    if not plotted_5:
+        ax5.text(0.5, 0.5, "Sin datos VAL coverage", ha="center", va="center",
+                 transform=ax5.transAxes, fontsize=11)
+    ax5.set_title("Coverage VAL vs TEST\n(sólida = TEST, discontinua = VAL)",
+                  fontweight="bold")
+    ax5.set_xlabel("Horizonte h (días hábiles)")
+    ax5.set_ylabel("Cobertura empírica")
+    ax5.set_ylim(0.40, 1.05)
+    ax5.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:.0%}"))
+    ax5.legend(fontsize=9)
+    _xgrid(ax5)
+
+    # ── Panel 6: Winkler Score + Sharpness ───────────────────────────────────
+    plotted_6 = False
+    if "winkler_90" in mean_h.columns:
+        ax6.plot(mean_h.index, mean_h["winkler_90"] / 1e6,
+                 color="#DC2626", lw=2.0, label="Winkler 90% (cov+anchura)")
+        plotted_6 = True
+    if "sharpness_90" in mean_h.columns:
+        ax6.plot(mean_h.index, mean_h["sharpness_90"] / 1e6,
+                 color="#F59E0B", lw=2.0, ls="--", label="Sharpness 90% (solo anchura)")
+        plotted_6 = True
+    if not plotted_6:
+        ax6.text(0.5, 0.5, "Sin datos Winkler", ha="center", va="center",
+                 transform=ax6.transAxes, fontsize=11)
+    ax6.set_title("Winkler Score y Sharpness del intervalo [Q05–Q95]", fontweight="bold")
+    ax6.set_xlabel("Horizonte h (días hábiles)")
+    ax6.set_ylabel("Puntuación (MM USD)")
+    ax6.legend(fontsize=9)
+    _xgrid(ax6)
 
     ruta_fig = dir_modo / f"metricas_por_h_{banco}_{fecha_hoy}.png"
     plt.savefig(ruta_fig, dpi=150, bbox_inches="tight")
@@ -1031,7 +1122,14 @@ def run(banco: str = BANCO) -> None:
             n_h_ok += 1
 
             preds_for_metrics = {tau: m.predict(X_test) for tau, m in modelos.items()}
-            resultados.append(calcular_metricas(preds_for_metrics, y_test.values, h_val, fold["fold"]))
+            preds_val_for_metrics = (
+                {tau: m.predict(X_val) for tau, m in modelos.items()}
+                if len(X_val) > 0 else None
+            )
+            resultados.append(calcular_metricas(
+                preds_for_metrics, y_test.values, h_val, fold["fold"],
+                preds_val_for_metrics, y_val.values if len(X_val) > 0 else None,
+            ))
 
             if DIAG_FEATURES:
                 diag_rows.append(
@@ -1106,12 +1204,36 @@ def run(banco: str = BANCO) -> None:
             print(df_res.groupby("h_grupo", observed=True)["pinball_q50"].mean().round(4))
 
         if "coverage_90" in df_res.columns:
-            print("\nCobertura empírica 90% [Q05-Q95] media por grupo de horizonte:")
+            print("\nCobertura empírica 90% [Q05-Q95] TEST media por grupo de horizonte:")
             print(df_res.groupby("h_grupo", observed=True)["coverage_90"].mean().map("{:.1%}".format))
 
         if "coverage_98" in df_res.columns:
-            print("\nCobertura empírica 98% [Q01-Q99] media por grupo de horizonte:")
+            print("\nCobertura empírica 98% [Q01-Q99] TEST media por grupo de horizonte:")
             print(df_res.groupby("h_grupo", observed=True)["coverage_98"].mean().map("{:.1%}".format))
+
+        if "val_coverage_90" in df_res.columns:
+            print("\nCobertura empírica 90% [Q05-Q95] VAL media por grupo de horizonte:")
+            print(df_res.groupby("h_grupo", observed=True)["val_coverage_90"].mean().map("{:.1%}".format))
+
+        if "val_coverage_98" in df_res.columns:
+            print("\nCobertura empírica 98% [Q01-Q99] VAL media por grupo de horizonte:")
+            print(df_res.groupby("h_grupo", observed=True)["val_coverage_98"].mean().map("{:.1%}".format))
+
+        if "winkler_90" in df_res.columns:
+            print("\nWinkler Score 90% medio por grupo de horizonte (MM USD):")
+            print((df_res.groupby("h_grupo", observed=True)["winkler_90"].mean() / 1e6).round(3))
+
+        if "crps" in df_res.columns:
+            print("\nCRPS medio por grupo de horizonte (MM USD):")
+            print((df_res.groupby("h_grupo", observed=True)["crps"].mean() / 1e6).round(4))
+
+        calib_cols = sorted([c for c in df_res.columns if c.startswith("calib_q")])
+        if calib_cols:
+            print("\nCalibración hit-rate por cuantil (promedio global; debe ≈ tau nominal):")
+            calib_mean = df_res[calib_cols].mean().round(3)
+            tau_labels = {f"calib_q{int(t*100):02d}": f"Q{int(t*100):02d} (τ={t:.2f})" for t in TAUS}
+            calib_mean.index = [tau_labels.get(c, c) for c in calib_mean.index]
+            print(calib_mean.to_string())
 
         graficar_metricas(df_res, DIR_MODO, banco, fecha_hoy)
     else:
