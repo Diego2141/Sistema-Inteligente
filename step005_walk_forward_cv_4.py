@@ -663,6 +663,205 @@ def diagnosticar_h(
     return row
 
 
+def guardar_hp_report(
+    hp_rows: list[dict],
+    dir_modo: "Path",
+    banco: str,
+    fecha_hoy: str,
+) -> None:
+    """
+    Genera CSV + 2 gráficos con el reporte de hiperparámetros Optuna:
+
+    1. Convergencia Optuna — curva 'mejor encontrado hasta el trial t' por
+       fold × grupo → diagnostica si N_ESTIMATORS_MAX/OPTUNA_N_TRIALS es suficiente.
+    2. Estabilidad HP — un subpanel por HP, mostrando su valor en cada fold
+       para los 4 grupos → detecta inestabilidad o comportamiento anómalo.
+    """
+    if not hp_rows:
+        return
+    try:
+        import matplotlib.pyplot as plt
+        import matplotlib.ticker as mticker
+    except ImportError:
+        log.warning("matplotlib no disponible — omitiendo reporte HP")
+        return
+
+    # ── CSV (sin la columna de listas) ───────────────────────────────────────
+    df_hp = pd.DataFrame([{k: v for k, v in r.items() if k != "trial_values"}
+                           for r in hp_rows])
+    ruta_csv = dir_modo / f"hp_report_{banco}_{fecha_hoy}.csv"
+    df_hp.to_csv(ruta_csv, index=False)
+    log.info("HP report CSV: %s", ruta_csv.name)
+
+    # Orden visual de grupos
+    grupo_order = ["muy_corto", "corto", "medio", "largo"]
+    grupo_colors = {"muy_corto": "#6D28D9", "corto": "#0369A1",
+                    "medio": "#047857", "largo": "#B45309"}
+    folds_sorted = sorted(df_hp["fold"].unique())
+
+    # ── Gráfico 1: Convergencia Optuna ────────────────────────────────────────
+    n_grupos = len(grupo_order)
+    n_folds  = len(folds_sorted)
+    fig1, axes1 = plt.subplots(
+        1, n_grupos,
+        figsize=(5 * n_grupos, 4.5),
+        sharey=False,
+        gridspec_kw={"wspace": 0.35},
+    )
+    if n_grupos == 1:
+        axes1 = [axes1]
+
+    fig1.suptitle(
+        f"Convergencia Optuna por grupo — {banco}\n"
+        f"Curva 'mejor hasta trial t' · {OPTUNA_N_TRIALS} trials · "
+        f"¿converge antes del último trial?",
+        fontsize=11, fontweight="bold", y=1.01,
+    )
+
+    cmap_folds = plt.cm.Set1
+    for ax, grupo in zip(axes1, grupo_order):
+        rows_g = [r for r in hp_rows if r["grupo"] == grupo]
+        for i, row in enumerate(rows_g):
+            tv    = row["trial_values"]
+            if not tv:
+                continue
+            best_so_far = list(__import__("itertools").accumulate(tv, min))
+            color = cmap_folds(i / max(n_folds, 1))
+            ax.plot(range(1, len(best_so_far) + 1), best_so_far,
+                    lw=1.6, color=color, alpha=0.85, label=f"Fold {row['fold']}")
+            # marcar dónde deja de mejorar
+            last_improvement = max(
+                (j for j, (a, b) in enumerate(zip(best_so_far, best_so_far[1:]))
+                 if b < a - 1e-8),
+                default=len(best_so_far) - 1,
+            )
+            ax.axvline(last_improvement + 1, color=color, lw=0.7, ls=":", alpha=0.5)
+
+        ax.set_title(
+            f"{grupo}\n(h_rep={[r['h_rep'] for r in rows_g[:1]][0] if rows_g else '?'})",
+            fontsize=10, fontweight="bold",
+        )
+        ax.set_xlabel("Trial #", fontsize=9)
+        ax.set_ylabel("Pinball val (mejor acumulado)", fontsize=8)
+        ax.xaxis.set_major_locator(mticker.MultipleLocator(5))
+        ax.grid(True, alpha=0.25)
+        # línea vertical en N_TRIALS para referencia
+        ax.axvline(OPTUNA_N_TRIALS, color="#DC2626", lw=1.2, ls="--", alpha=0.6,
+                   label=f"N_TRIALS={OPTUNA_N_TRIALS}")
+        ax.legend(fontsize=7, loc="upper right")
+
+    plt.tight_layout()
+    ruta_conv = dir_modo / f"hp_convergencia_{banco}_{fecha_hoy}.png"
+    fig1.savefig(ruta_conv, dpi=150, bbox_inches="tight")
+    plt.close(fig1)
+    log.info("HP convergencia: %s", ruta_conv.name)
+
+    # ── Gráfico 2: Estabilidad HP por fold ───────────────────────────────────
+    hp_names = ["max_depth", "min_child_weight", "learning_rate",
+                 "reg_alpha", "reg_lambda", "subsample", "colsample_bytree"]
+    hp_labels = {
+        "max_depth"       : "max_depth",
+        "min_child_weight": "min_child_weight",
+        "learning_rate"   : "learning_rate",
+        "reg_alpha"       : "reg_alpha (L1)",
+        "reg_lambda"      : "reg_lambda (L2)",
+        "subsample"       : "subsample",
+        "colsample_bytree": "colsample_bytree",
+    }
+
+    n_hp  = len(hp_names)
+    ncols = 4
+    nrows = (n_hp + ncols - 1) // ncols
+    fig2, axes2 = plt.subplots(nrows, ncols,
+                                figsize=(ncols * 4.2, nrows * 3.2),
+                                gridspec_kw={"hspace": 0.55, "wspace": 0.38})
+    axes2_flat = axes2.flat if nrows > 1 else list(axes2)
+
+    fig2.suptitle(
+        f"Estabilidad de Hiperparámetros por fold — {banco}\n"
+        f"4 grupos · línea por grupo · variación entre folds indica inestabilidad",
+        fontsize=11, fontweight="bold", y=1.01,
+    )
+
+    for ax, hp in zip(axes2_flat, hp_names):
+        for grupo in grupo_order:
+            vals = [r[hp] for r in hp_rows if r["grupo"] == grupo
+                    and r.get(hp) is not None]
+            fs   = [r["fold"] for r in hp_rows if r["grupo"] == grupo
+                    and r.get(hp) is not None]
+            if not vals:
+                continue
+            color = grupo_colors[grupo]
+            ax.plot(fs, vals, "o-", lw=1.6, ms=5, color=color,
+                    alpha=0.85, label=grupo)
+            # rango observado como banda
+            ax.fill_between(fs,
+                             [min(vals)] * len(fs),
+                             [max(vals)] * len(fs),
+                             alpha=0.06, color=color)
+
+        ax.set_title(hp_labels[hp], fontsize=9, fontweight="bold")
+        ax.set_xlabel("Fold", fontsize=8)
+        ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+        ax.grid(True, alpha=0.22)
+        ax.legend(fontsize=7, loc="best")
+
+    # ocultar subplots sobrantes
+    for ax in list(axes2_flat)[n_hp:]:
+        ax.set_visible(False)
+
+    plt.tight_layout()
+    ruta_stab = dir_modo / f"hp_estabilidad_{banco}_{fecha_hoy}.png"
+    fig2.savefig(ruta_stab, dpi=150, bbox_inches="tight")
+    plt.close(fig2)
+    log.info("HP estabilidad: %s", ruta_stab.name)
+
+    # ── Tabla resumen en consola ──────────────────────────────────────────────
+    print("\nHiperparámetros óptimos por fold y grupo:")
+    col_print = ["fold", "grupo", "h_rep",
+                 "max_depth", "min_child_weight", "learning_rate",
+                 "reg_alpha", "reg_lambda", "subsample", "colsample_bytree",
+                 "best_pinball_val"]
+    df_show = df_hp[[c for c in col_print if c in df_hp.columns]].copy()
+    df_show["learning_rate"]   = df_show["learning_rate"].map("{:.4f}".format)
+    df_show["reg_alpha"]       = df_show["reg_alpha"].map("{:.3f}".format)
+    df_show["reg_lambda"]      = df_show["reg_lambda"].map("{:.3f}".format)
+    df_show["subsample"]       = df_show["subsample"].map("{:.3f}".format)
+    df_show["colsample_bytree"]= df_show["colsample_bytree"].map("{:.3f}".format)
+    df_show["best_pinball_val"]= df_show["best_pinball_val"].map("{:.4f}".format)
+    print(df_show.to_string(index=False))
+
+    # Diagnóstico N_TRIALS
+    last_improvement_stats = []
+    for r in hp_rows:
+        tv = r["trial_values"]
+        if not tv:
+            continue
+        best_so_far = list(__import__("itertools").accumulate(tv, min))
+        last_imp = max(
+            (j for j, (a, b) in enumerate(zip(best_so_far, best_so_far[1:]))
+             if b < a - 1e-8),
+            default=0,
+        ) + 1
+        last_improvement_stats.append(last_imp)
+    if last_improvement_stats:
+        p50 = int(np.percentile(last_improvement_stats, 50))
+        p90 = int(np.percentile(last_improvement_stats, 90))
+        print(
+            f"\nDiagnóstico OPTUNA_N_TRIALS={OPTUNA_N_TRIALS}:"
+            f"  última mejora mediana en trial #{p50},"
+            f"  p90 en trial #{p90}."
+        )
+        if p90 >= OPTUNA_N_TRIALS - 2:
+            print(
+              "  ⚠  La convergencia llega hasta el final — considera aumentar OPTUNA_N_TRIALS.")
+        else:
+            print(
+              f"  ✓  Converge bien antes del límite ({p90} < {OPTUNA_N_TRIALS}).")
+
+    print(f"[OK] HP report guardado en: {dir_modo}")
+
+
 def guardar_diag_y_plots(
     diag_rows: list[dict],
     cols_feat: list[str],
@@ -849,7 +1048,16 @@ def optuna_tune_h(
         fold["fold"], h_rep, study.best_value,
         " ".join(f"{k}={v:.3g}" for k, v in best.items()),
     )
-    return {
+
+    # Meta para el reporte de HP (no se pasa al modelo)
+    trial_vals = [t.value for t in study.trials if t.value is not None]
+    hp_meta = {
+        "best_pinball_val": study.best_value,
+        "n_trials_ok"     : len(trial_vals),
+        "trial_values"    : trial_vals,   # convergencia trial a trial
+    }
+
+    hp_dict = {
         **best,                        # HP encontrados por Optuna
         "n_estimators": N_ESTIMATORS_MAX,
         "tree_method" : "hist",
@@ -857,6 +1065,7 @@ def optuna_tune_h(
         "n_jobs"      : 1,
         "random_state": 42,
     }
+    return hp_dict, hp_meta
 
 
 def get_hp_for_h(h_val: int, hp_grupos: dict) -> dict:
@@ -1116,7 +1325,8 @@ def run(banco: str = BANCO) -> None:
     # ------------------------------------------------------------------
     # 4. Walk-forward CV loop
     # ------------------------------------------------------------------
-    resultados: list[dict] = []
+    resultados:    list[dict] = []
+    hp_report_rows: list[dict] = []   # acumula HPs por fold × grupo para el reporte
     diag_rows:  list[dict] = []
     n_horizontes = H_MAX - H_MIN + 1
 
@@ -1142,18 +1352,36 @@ def run(banco: str = BANCO) -> None:
             hp_grupos: dict = {}
             for grupo, (_, h_rep) in H_GRUPOS.items():
                 t_opt = time.time()
-                hp_grupos[grupo] = optuna_tune_h(h_rep, df, fold, cols_feat)
+                hp_grupos[grupo], hp_meta = optuna_tune_h(h_rep, df, fold, cols_feat)
                 elapsed_opt = time.time() - t_opt
                 hp_g = hp_grupos[grupo]
                 print(
-                    f"    [{grupo:5s}] h_rep={h_rep:2d}  "
+                    f"    [{grupo:9s}] h_rep={h_rep:2d}  "
                     f"depth={hp_g.get('max_depth')}  "
                     f"min_cw={hp_g.get('min_child_weight')}  "
                     f"lr={hp_g.get('learning_rate', 0):.3f}  "
                     f"α={hp_g.get('reg_alpha', 0):.2f}  "
                     f"λ={hp_g.get('reg_lambda', 1):.2f}  "
+                    f"sub={hp_g.get('subsample', 1):.2f}  "
+                    f"col={hp_g.get('colsample_bytree', 1):.2f}  "
+                    f"pinball={hp_meta['best_pinball_val']:.4f}  "
                     f"({elapsed_opt:.0f}s)"
                 )
+                hp_report_rows.append({
+                    "fold"            : fold["fold"],
+                    "grupo"           : grupo,
+                    "h_rep"           : h_rep,
+                    "best_pinball_val": hp_meta["best_pinball_val"],
+                    "n_trials_ok"     : hp_meta["n_trials_ok"],
+                    "trial_values"    : hp_meta["trial_values"],
+                    "max_depth"       : hp_g.get("max_depth"),
+                    "min_child_weight": hp_g.get("min_child_weight"),
+                    "learning_rate"   : hp_g.get("learning_rate"),
+                    "reg_alpha"       : hp_g.get("reg_alpha"),
+                    "reg_lambda"      : hp_g.get("reg_lambda"),
+                    "subsample"       : hp_g.get("subsample"),
+                    "colsample_bytree": hp_g.get("colsample_bytree"),
+                })
         else:
             if USE_OPTUNA and not _OPTUNA_OK:
                 log.warning("USE_OPTUNA=True pero optuna no está instalado — usando HP fijos")
@@ -1350,7 +1578,13 @@ def run(banco: str = BANCO) -> None:
         print("\n⚠  Sin métricas para guardar.")
 
     # ------------------------------------------------------------------
-    # 7. Feature diagnostics (gain / perm / SHAP per h)
+    # 7. HP report (convergencia Optuna + estabilidad por fold)
+    # ------------------------------------------------------------------
+    if hp_report_rows:
+        guardar_hp_report(hp_report_rows, DIR_MODO, banco, fecha_hoy)
+
+    # ------------------------------------------------------------------
+    # 8. Feature diagnostics (gain / perm / SHAP per h)
     # ------------------------------------------------------------------
     if DIAG_FEATURES and diag_rows:
         guardar_diag_y_plots(diag_rows, cols_feat, DIR_MODO, banco, fecha_hoy)
