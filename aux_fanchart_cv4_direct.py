@@ -9,7 +9,8 @@ Genera por cada fecha de origen seleccionada un PNG con 3 subplots:
   2. Flujo diario D-R: solo modelo (sin realizado)
   3. Flujo neto acumulado D-R: bandas + realizado acumulado
 
-Diferencia clave vs cv3: los parquets están en step005_wfcv_v4_direct/fold_exp/
+Diferencia clave vs cv3: los parquets están en step005_wfcv_v4_direct/fold_exp/ o fold_roll/
+según el flag EXPANDING (True → expanding/fold_exp/fan_exp; False → rolling/fold_roll/fan_roll).
 y el nombre del banco en el filename es SISTEMA (no BancaLocal).
 """
 
@@ -57,8 +58,14 @@ def _build_bday() -> CustomBusinessDay:
 
 # ── Rutas ─────────────────────────────────────────────────────────────────────
 BASE_SISTEMA = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente")
-DIR_PREDS    = BASE_SISTEMA / "2. Output" / "step005_wfcv_v4_direct" / "fold_exp"
-DIR_OUTPUT   = BASE_SISTEMA / "2. Output" / "aux_fanchart_cv4_direct"
+
+# Debe coincidir con el flag EXPANDING de step005_walk_forward_cv_4.py
+EXPANDING = True   # True → expanding window (fold_exp / fan_exp); False → rolling (fold_roll / fan_roll)
+
+_MODO_SUFIJO = "exp" if EXPANDING else "roll"
+
+DIR_PREDS    = BASE_SISTEMA / "2. Output" / "step005_wfcv_v4_direct" / f"fold_{_MODO_SUFIJO}"
+DIR_OUTPUT   = BASE_SISTEMA / "2. Output" / "aux_fanchart_cv4_direct" / f"fan_{_MODO_SUFIJO}"
 DIR_OUTPUT.mkdir(parents=True, exist_ok=True)
 
 RUTA_MATRIZ  = BASE_SISTEMA / "1. Data" / "Clean" / "matriz_features.parquet"

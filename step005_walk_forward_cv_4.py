@@ -147,7 +147,12 @@ def get_feature_cols(df: pd.DataFrame) -> list[str]:
 
 def build_folds(df: pd.DataFrame) -> list[dict]:
     """
-    Build walk-forward CV folds with an expanding training window and symmetric gaps.
+    Build walk-forward CV folds (expanding or rolling) with symmetric purge+embargo gaps.
+
+    Window type is controlled by the EXPANDING flag:
+      EXPANDING=True  → train_start anchored to train_min (growing window)
+      EXPANDING=False → train_start = val_start - VENTANA_TRAIN_AÑOS (fixed-size rolling window)
+                        clamped to train_min so early folds never go below the data origin.
 
     Gap structure (applied identically on both sides):
         TRAIN..train_end | GAP_DIAS_HAB | val_start..val_end | GAP_DIAS_HAB | test_start..test_end
@@ -198,7 +203,7 @@ def build_folds(df: pd.DataFrame) -> list[dict]:
         if EXPANDING:
             train_start = train_min
         else:
-            train_start = val_start - _offset(VENTANA_TRAIN_AÑOS)
+            train_start = max(train_min, val_start - _offset(VENTANA_TRAIN_AÑOS))
 
         # --- GAP1: purge + embargo entre TRAIN y VAL (simétrico a GAP2) ---
         idx_val = int(np.searchsorted(all_bdays, np.datetime64(val_start, "ns")))
