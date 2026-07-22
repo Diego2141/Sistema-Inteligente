@@ -59,10 +59,8 @@ def _build_bday() -> CustomBusinessDay:
 # ── Rutas ─────────────────────────────────────────────────────────────────────
 BASE_SISTEMA = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente")
 
-# Debe coincidir con el flag EXPANDING de step005_walk_forward_cv_4.py
-EXPANDING = True   # True → expanding window (fold_exp / fan_exp); False → rolling (fold_roll / fan_roll)
-
-_MODO_SUFIJO = "exp" if EXPANDING else "roll"
+# "exp" → fold_exp / fan_exp  |  "roll" → fold_roll / fan_roll  (debe coincidir con EXPANDING de step005)
+_MODO_SUFIJO = "exp"
 
 DIR_PREDS    = BASE_SISTEMA / "2. Output" / "step005_wfcv_v4_direct" / f"fold_{_MODO_SUFIJO}"
 DIR_OUTPUT   = BASE_SISTEMA / "2. Output" / "aux_fanchart_cv4_direct" / f"fan_{_MODO_SUFIJO}"
