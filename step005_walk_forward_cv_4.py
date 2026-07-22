@@ -48,6 +48,11 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+# Silenciar loggers internos de matplotlib (findfont, colorbar, pcolormesh)
+# y PIL que heredan el nivel DEBUG del root logger
+logging.getLogger("matplotlib").setLevel(logging.WARNING)
+logging.getLogger("PIL").setLevel(logging.WARNING)
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
