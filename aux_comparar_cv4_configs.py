@@ -538,6 +538,12 @@ print(f"[OK] Checklist guardado en {ruta_excel}")
 
 
 # ── 11. Reporte HTML ─────────────────────────────────────────────────────────
+_COV_TARGETS = {
+    "coverage_90"    : 0.90,
+    "val_coverage_90": 0.90,
+    "coverage_98"    : 0.98,
+}
+
 def _color_cell(val_raw, col, cfg, all_cfg_vals):
     """Devuelve clase CSS según si el valor es el mejor, peor o intermedio."""
     if pd.isna(val_raw):
@@ -545,12 +551,14 @@ def _color_cell(val_raw, col, cfg, all_cfg_vals):
     vals = {c: v for c, v in all_cfg_vals.items() if not pd.isna(v)}
     if len(vals) < 2:
         return ""
-    if col == "coverage_90":
-        # mejor = más cercano a 0.90
-        best = min(vals, key=lambda c: abs(vals[c] - 0.90))
-        worst = max(vals, key=lambda c: abs(vals[c] - 0.90))
+    target = _COV_TARGETS.get(col)
+    if target is not None:
+        # mejor = más cercano al objetivo de cobertura
+        best  = min(vals, key=lambda c: abs(vals[c] - target))
+        worst = max(vals, key=lambda c: abs(vals[c] - target))
     else:
-        best = min(vals, key=lambda c: vals[c])
+        # métricas de error: menor es mejor
+        best  = min(vals, key=lambda c: vals[c])
         worst = max(vals, key=lambda c: vals[c])
     if cfg == best:
         return "best"
@@ -626,7 +634,9 @@ def _build_html() -> str:
 
     # ── Tabla 1: Resumen global ──
     sections.append("<h2>1 — Resumen Global</h2>")
-    sections.append("<p>Media aritmética sobre todos los horizontes h=2..75 y todos los folds disponibles.</p>")
+    sections.append("<p>Media aritmética sobre todos los horizontes h=2..75 y todos los folds disponibles. "
+                    "Para coberturas: verde = más cercano al objetivo (90% / 98%), rojo = más alejado. "
+                    "Para métricas de error: verde = menor valor.</p>")
     # build with raw vals for coloring
     raw_global = {}
     for col, _, label in [
