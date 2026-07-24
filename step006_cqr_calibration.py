@@ -43,6 +43,8 @@ DIR_WFCV     = BASE_SISTEMA / "2. Output" / "step005_wfcv_v4_direct"
 DIR_CQR      = BASE_SISTEMA / "2. Output" / "step006_cqr"
 
 _MODO_SUFIJO = "roll_0.5"   # "exp_0.5" | "exp_1" | "roll_0.5" | "roll_1"
+                             # Agregar "_arctan" al sufijo para leer resultados de AJUSTE_ARCTAN=True
+                             # Ejemplo: "roll_0.5_arctan"
 BANCO        = "SISTEMA"
 
 DIR_FOLD = DIR_WFCV / f"fold_{_MODO_SUFIJO}"

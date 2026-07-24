@@ -99,7 +99,7 @@ OPTUNA_WARM_START   = True   # True → inyecta el HP óptimo del fold anterior 
 #          grad ∝ arctan(u/s)/π + ... | hess = ((s²+σ²)/(s²+u²))² > 0 siempre
 #          Ventaja: hessiana no-nula → pasos Newton reales; gradiente tiene magnitud
 # False → reg:quantileerror estándar (gradiente binario {-τ, 1-τ}, hess≈1 surrogate)
-AJUSTE_ARCTAN       = False
+AJUSTE_ARCTAN       = True
 S_ARCTAN_FACTOR     = 0.05   # s = S_ARCTAN_FACTOR × std_y(y_train del h actual)
                               # Rango razonable: [0.01, 0.20]; paper usa 0.05 en datos std
 
@@ -1553,7 +1553,9 @@ def run(banco: str = BANCO) -> None:
     prev_hp_por_grupo: dict[str, dict | None] = {g: None for g in H_GRUPOS}
 
     # Output dir created early so per-fold parquets can be written immediately
-    DIR_MODO = DIR_OUTPUT / f"fold{'_exp' if EXPANDING else '_roll'}"
+    # El sufijo _arctan separa los resultados del objetivo suavizado para comparación
+    _arctan_sfx = "_arctan" if AJUSTE_ARCTAN else ""
+    DIR_MODO = DIR_OUTPUT / f"fold{'_exp' if EXPANDING else '_roll'}{_arctan_sfx}"
     DIR_MODO.mkdir(parents=True, exist_ok=True)
     fecha_hoy = date.today().strftime("%Y%m%d")
 
