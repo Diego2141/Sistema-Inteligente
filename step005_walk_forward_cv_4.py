@@ -398,7 +398,10 @@ class _ArcTanBooster:
     def predict(self, X) -> np.ndarray:
         return self._b.predict(xgb.DMatrix(X))
 
-    # Propiedad de conveniencia para debugging
+    def get_booster(self) -> "xgb.Booster":
+        """Compatibilidad con XGBRegressor.get_booster() — usado en gain y SHAP."""
+        return self._b
+
     @property
     def best_iteration(self) -> int:
         return self._b.num_boosted_rounds()
