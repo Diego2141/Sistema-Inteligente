@@ -94,6 +94,15 @@ OPTUNA_N_TRIALS     = 30     # trials por h representativo por fold
 OPTUNA_WARM_START   = True   # True → inyecta el HP óptimo del fold anterior como trial 0
                               # False → cada fold parte desde cero (comportamiento original)
 
+# Objetivo suavizado Pinball-Arctan (paper 2406.02293)
+# True  → reemplaza reg:quantileerror por gradiente/hessiana suavizados
+#          grad ∝ arctan(u/s)/π + ... | hess = ((s²+σ²)/(s²+u²))² > 0 siempre
+#          Ventaja: hessiana no-nula → pasos Newton reales; gradiente tiene magnitud
+# False → reg:quantileerror estándar (gradiente binario {-τ, 1-τ}, hess≈1 surrogate)
+AJUSTE_ARCTAN       = False
+S_ARCTAN_FACTOR     = 0.05   # s = S_ARCTAN_FACTOR × std_y(y_train del h actual)
+                              # Rango razonable: [0.01, 0.20]; paper usa 0.05 en datos std
+
 # Grupos de h y sus representantes para Optuna (Opción C)
 # Un solo h "típico" por grupo → HP se buscan ahí y se transfieren a todo el grupo
 # muy_corto separado: banco pre-reporta retiros a t+2 y depósitos a t+1 →
@@ -312,38 +321,167 @@ def preparar_fold_data_h(
     )
 
 
+# ---------------------------------------------------------------------------
+# Objetivo Pinball-Arctan suavizado (activo solo si AJUSTE_ARCTAN = True)
+# Referencia: paper 2406.02293
+# ---------------------------------------------------------------------------
+
+def _make_quantile_objective(tau: float, s: float, std_y: float):
+    """
+    Devuelve la función objetivo suavizada (grad, hess) para xgb.train().
+    s      — parámetro de suavizado; s = S_ARCTAN_FACTOR × std_y
+    std_y  — desviación estándar de y_train; normaliza la hessiana
+    _scale — factor que ajusta el lambda efectivo de XGBoost a la escala
+             del target no estandarizado (std_y ~ 80,000 → _scale ~ 1e9)
+    """
+    _scale = np.pi * (s ** 2 + std_y ** 2) ** 2 / (2.0 * s ** 3)
+
+    def objective(y_pred: np.ndarray, dtrain: "xgb.DMatrix"):
+        y_pred = np.clip(y_pred, -1e15, 1e15)   # evita overflow con HP malos en Optuna
+        u      = dtrain.get_label() - y_pred
+        s2u2   = s ** 2 + u ** 2
+        grad   = -((tau - 0.5 + np.arctan(u / s) / np.pi)
+                   + u * s / (np.pi * s2u2)) * _scale
+        # Forma simplificada que evita overflow numérico: hess = ((s²+std_y²)/(s²+u²))²
+        hess   = ((s ** 2 + std_y ** 2) / s2u2) ** 2
+        return grad, hess
+
+    return objective
+
+
+def _make_pinball_metric(tau: float):
+    """Métrica pinball para custom_metric en xgb.train(); monitorea el eval set."""
+    def metric(y_pred: np.ndarray, dtrain: "xgb.DMatrix"):
+        u = dtrain.get_label() - y_pred
+        return "pinball", float(np.mean(np.where(u >= 0, tau * u, (tau - 1) * u)))
+    return metric
+
+
+class _PinballEarlyStopping(xgb.callback.TrainingCallback):
+    """
+    Early stopping sobre la métrica 'pinball' del eval set de validación.
+    Reemplaza xgb.callback.EarlyStopping porque ese callback busca el nombre
+    de la métrica en un dict plano ("val-pinball"), pero XGBoost con
+    custom_metric lo almacena en estructura anidada: evals_log["val"]["pinball"].
+    """
+    def __init__(self, rounds: int = 50):
+        super().__init__()
+        self.rounds  = rounds
+        self._best   = float("inf")
+        self._since  = 0
+
+    def after_iteration(self, model, epoch, evals_log):
+        score = None
+        for metrics in evals_log.values():
+            if "pinball" in metrics:
+                score = metrics["pinball"][-1]
+                break
+        if score is None:
+            return False
+        if score < self._best - 1e-9:
+            self._best  = score
+            self._since = 0
+        else:
+            self._since += 1
+        return self._since >= self.rounds
+
+
+class _ArcTanBooster:
+    """
+    Wrapper mínimo sobre xgb.Booster para exponer .predict(X_df) compatible
+    con XGBRegressor — permite usar xgb.train() con objetivo custom sin
+    modificar el resto del pipeline (diagnosticar_h, scaffolds, métricas).
+    """
+    def __init__(self, booster: "xgb.Booster"):
+        self._b = booster
+
+    def predict(self, X) -> np.ndarray:
+        return self._b.predict(xgb.DMatrix(X))
+
+    # Propiedad de conveniencia para debugging
+    @property
+    def best_iteration(self) -> int:
+        return self._b.num_boosted_rounds()
+
+
+# Claves de HP que xgb.train() acepta en params (excluye sklearn-only)
+_XGB_TRAIN_SKIP = {"n_estimators", "random_state", "n_jobs",
+                   "early_stopping_rounds", "eval_metric"}
+
+
+def _hp_para_xgb_train(hp: dict) -> dict:
+    """Filtra hp_h para que sea compatible con xgb.train() params."""
+    p = {k: v for k, v in hp.items() if k not in _XGB_TRAIN_SKIP}
+    p.setdefault("nthread", 1)
+    p.setdefault("seed",    hp.get("random_state", 42))
+    return p
+
+
 def entrenar_modelos_h(
     X_train: pd.DataFrame,
     y_train: pd.Series,
     X_val: pd.DataFrame,
     y_val: pd.Series,
     hp: dict,
+    std_y: float = 0.0,   # requerido solo si AJUSTE_ARCTAN = True
 ) -> dict:
     """
-    Train one XGBRegressor per quantile tau plus one for mean.
-    Uses early stopping on val when val is non-empty (Option A).
+    Train one model per quantile tau plus one for mean.
+    Uses early stopping on val when val is non-empty.
+
+    AJUSTE_ARCTAN = False (default):
+        XGBRegressor con reg:quantileerror — comportamiento original.
+    AJUSTE_ARCTAN = True:
+        xgb.train() con objetivo Pinball-Arctan suavizado (paper 2406.02293).
+        El booster se envuelve en _ArcTanBooster para compatibilidad con predict(X_df).
+        'mean' siempre usa reg:squarederror (arctan no aplica a la media).
 
     Returns
     -------
-    dict {tau (float | 'mean'): fitted XGBRegressor}
+    dict {tau (float | 'mean'): XGBRegressor | _ArcTanBooster}
     """
     modelos: dict = {}
-    use_es = len(X_val) > 0   # early stopping requires a non-empty val set
+    use_es = len(X_val) > 0
 
-    for tau in TAUS:
-        m = xgb.XGBRegressor(
-            objective="reg:quantileerror",
-            quantile_alpha=tau,
-            eval_metric="quantile",
-            early_stopping_rounds=EARLY_STOPPING_ROUNDS if use_es else None,
-            **hp,
-        )
-        if use_es:
-            m.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
-        else:
-            m.fit(X_train, y_train, verbose=False)
-        modelos[tau] = m
+    if AJUSTE_ARCTAN:
+        # ── Rama arctan: xgb.train() + _PinballEarlyStopping ────────────────
+        s       = S_ARCTAN_FACTOR * std_y
+        params  = _hp_para_xgb_train(hp)
+        dtrain  = xgb.DMatrix(X_train, label=y_train)
+        dval    = xgb.DMatrix(X_val,   label=y_val) if use_es else None
+        evals   = [(dval, "val")] if use_es else []
+        cbs     = [_PinballEarlyStopping(rounds=EARLY_STOPPING_ROUNDS)] if use_es else []
 
+        for tau in TAUS:
+            booster = xgb.train(
+                params,
+                dtrain,
+                num_boost_round=N_ESTIMATORS_MAX,
+                obj=_make_quantile_objective(tau, s, std_y),
+                custom_metric=_make_pinball_metric(tau) if use_es else None,
+                evals=evals,
+                callbacks=cbs,
+                verbose_eval=False,
+            )
+            modelos[tau] = _ArcTanBooster(booster)
+
+    else:
+        # ── Rama estándar: XGBRegressor con reg:quantileerror ────────────────
+        for tau in TAUS:
+            m = xgb.XGBRegressor(
+                objective="reg:quantileerror",
+                quantile_alpha=tau,
+                eval_metric="quantile",
+                early_stopping_rounds=EARLY_STOPPING_ROUNDS if use_es else None,
+                **hp,
+            )
+            if use_es:
+                m.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
+            else:
+                m.fit(X_train, y_train, verbose=False)
+            modelos[tau] = m
+
+    # ── Media: siempre reg:squarederror (sin arctan) ─────────────────────────
     m_mean = xgb.XGBRegressor(
         objective="reg:squarederror",
         eval_metric="rmse",
@@ -1041,6 +1179,9 @@ def optuna_tune_h(
     y_tr_arr = np.asarray(y_tr)
     y_vl_arr = np.asarray(y_vl)
 
+    # std_y del h representativo — requerido por el objetivo arctan
+    _std_y_opt = max(float(y_tr_arr.std()), 1.0)
+
     def objective(trial: "optuna.Trial") -> float:
         hp_trial = {
             # ── HP buscados ────────────────────────────────────────────────
@@ -1059,16 +1200,39 @@ def optuna_tune_h(
             "random_state"    : 42,
         }
         total_loss = 0.0
-        for tau in TAUS:
-            m = xgb.XGBRegressor(
-                objective="reg:quantileerror",
-                quantile_alpha=tau,
-                eval_metric="quantile",
-                early_stopping_rounds=EARLY_STOPPING_ROUNDS,
-                **hp_trial,
-            )
-            m.fit(X_tr, y_tr_arr, eval_set=[(X_vl, y_vl_arr)], verbose=False)
-            total_loss += _pinball(y_vl_arr, m.predict(X_vl), tau)
+
+        if AJUSTE_ARCTAN:
+            # Arctan: xgb.train() + _PinballEarlyStopping
+            _s      = S_ARCTAN_FACTOR * _std_y_opt
+            _params = _hp_para_xgb_train(hp_trial)
+            _dtrain = xgb.DMatrix(X_tr, label=y_tr_arr)
+            _dval   = xgb.DMatrix(X_vl, label=y_vl_arr)
+            for tau in TAUS:
+                booster = xgb.train(
+                    _params,
+                    _dtrain,
+                    num_boost_round=N_ESTIMATORS_MAX,
+                    obj=_make_quantile_objective(tau, _s, _std_y_opt),
+                    custom_metric=_make_pinball_metric(tau),
+                    evals=[(_dval, "val")],
+                    callbacks=[_PinballEarlyStopping(rounds=EARLY_STOPPING_ROUNDS)],
+                    verbose_eval=False,
+                )
+                preds_vl = booster.predict(_dval)
+                total_loss += _pinball(y_vl_arr, preds_vl, tau)
+        else:
+            # Estándar: XGBRegressor con reg:quantileerror
+            for tau in TAUS:
+                m = xgb.XGBRegressor(
+                    objective="reg:quantileerror",
+                    quantile_alpha=tau,
+                    eval_metric="quantile",
+                    early_stopping_rounds=EARLY_STOPPING_ROUNDS,
+                    **hp_trial,
+                )
+                m.fit(X_tr, y_tr_arr, eval_set=[(X_vl, y_vl_arr)], verbose=False)
+                total_loss += _pinball(y_vl_arr, m.predict(X_vl), tau)
+
         return total_loss / len(TAUS)   # media de pinball entre cuantiles
 
     # Seed distinta por fold para que la exploración inicial (fase aleatoria del TPE)
@@ -1484,8 +1648,12 @@ def run(banco: str = BANCO) -> None:
                 len(X_train), len(X_val), len(X_test),
             )
 
-            hp_h = get_hp_for_h(h_val, hp_grupos)
-            modelos = entrenar_modelos_h(X_train, y_train, X_val, y_val, hp_h)
+            hp_h  = get_hp_for_h(h_val, hp_grupos)
+            # std_y por h: escala natural del target en la ventana de entrenamiento
+            # Requerido por _make_quantile_objective cuando AJUSTE_ARCTAN = True
+            std_y = max(float(y_train.std()), 1.0) if AJUSTE_ARCTAN else 0.0
+            modelos = entrenar_modelos_h(X_train, y_train, X_val, y_val, hp_h,
+                                         std_y=std_y)
 
             _scaffold = pd.DataFrame({
                 "banco"   : banco,
