@@ -343,8 +343,8 @@ calib_json = {
     "banco"            : BANCO,
     "modo"             : _MODO_SUFIJO,
     "fecha_generacion" : fecha_hoy,
-    "fold_produccion"  : fold_prod,
-    "taus"             : TAUS,
+    "fold_produccion"  : int(fold_prod),
+    "taus"             : [float(t) for t in TAUS],
     "q_cols"           : Q_COLS,
     "h_grupos"         : {g: [int(h) for h in hs] for g, hs in H_GRUPOS.items()},
     "calibration"      : {
