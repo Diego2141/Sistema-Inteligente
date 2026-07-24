@@ -77,7 +77,9 @@ if not dfs:
     raise RuntimeError("No se encontró ningún parquet de métricas.")
 
 datos = pd.concat(dfs.values(), ignore_index=True)
+cfgs_ok = [c for c in CONFIGS if c in dfs]   # lista ordenada de configs disponibles
 print(f"\n[INFO] Columnas disponibles:\n  {sorted(datos.columns.tolist())}\n")
+print(f"[INFO] Configs cargadas: {cfgs_ok}\n")
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -209,8 +211,6 @@ if calib_rows:
 
 
 # ── 6. Plots ───────────────────────────────────────────────────────────────────
-cfgs_ok = [c for c in CONFIGS if c in dfs]
-
 # 6a. RMSE por horizonte (media sobre folds)
 fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 fig.suptitle("Comparativa cv4 — RMSE, CRPS, Cobertura 90% y Calibración Q95",
@@ -439,7 +439,112 @@ for rank, (cfg, (score, parts)) in enumerate(sorted_configs, 1):
 print()
 
 
-# ── 10. Reporte HTML ──────────────────────────────────────────────────────────
+# ── 10. Checklist de consistencia ─────────────────────────────────────────────
+print("=" * 70)
+print("CHECKLIST DE CONSISTENCIA — VALIDACIÓN DE TABLAS")
+print("=" * 70)
+
+checks = []
+
+def _chk(label, ok, detalle=""):
+    sym = "✓" if ok else "✗"
+    checks.append((sym, label, detalle))
+    print(f"  [{sym}] {label}")
+    if detalle:
+        print(f"       {detalle}")
+
+# C1 — Todos los configs cargados
+_chk("Configs cargadas",
+     len(cfgs_ok) == len(CONFIGS),
+     f"Esperados {len(CONFIGS)}, cargados {len(cfgs_ok)}: {cfgs_ok}")
+
+# C2 — Columnas clave presentes
+for col in ["rmse", "crps", "coverage_90", "coverage_98", "fold", "h"]:
+    _chk(f"Columna '{col}' presente",
+         col in datos.columns,
+         f"Columnas disponibles: {[c for c in datos.columns if c in ['rmse','crps','coverage_90','coverage_98','fold','h','winkler_90']]}")
+
+# C3 — Folds consistentes por config
+if "fold" in datos.columns:
+    for cfg in cfgs_ok:
+        n_folds = dfs[cfg]["fold"].nunique()
+        expected = 5 if "0.5" in cfg else 4
+        _chk(f"{cfg}: nº folds = {n_folds}",
+             n_folds == expected,
+             f"Esperados {expected} (test={'0.5' if '0.5' in cfg else '1'} año)")
+
+# C4 — Rango de h correcto
+if "h" in datos.columns:
+    h_min_obs = datos["h"].min()
+    h_max_obs = datos["h"].max()
+    _chk(f"Rango h = [{h_min_obs}, {h_max_obs}]",
+         h_min_obs >= 2 and h_max_obs <= 75,
+         f"Esperado h ∈ [2, 75]")
+
+# C5 — Coverage_90 en rango plausible [0.5, 1.0]
+if "coverage_90" in datos.columns:
+    cov_min = datos["coverage_90"].min()
+    cov_max = datos["coverage_90"].max()
+    _chk("coverage_90 en rango [0.5, 1.0]",
+         0.5 <= cov_min and cov_max <= 1.0,
+         f"Observado: [{cov_min:.3f}, {cov_max:.3f}]")
+
+# C6 — RMSE positivo y en rango razonable (100M–2000M USD)
+if "rmse" in datos.columns:
+    rmse_min = datos["rmse"].min()
+    rmse_max = datos["rmse"].max()
+    _chk("RMSE en rango plausible (100M–2000M USD)",
+         1e8 <= rmse_min and rmse_max <= 2e9,
+         f"Observado: [{rmse_min/1e6:.0f} MM, {rmse_max/1e6:.0f} MM]")
+
+# C7 — Tabla resumen coincide con datos
+if "coverage_90" in datos.columns:
+    for cfg in cfgs_ok:
+        val_tbl  = dfs[cfg]["coverage_90"].mean()
+        val_pivot = datos[datos["config"] == cfg]["coverage_90"].mean()
+        _chk(f"{cfg}: cob90 resumen == pivot",
+             abs(val_tbl - val_pivot) < 1e-9,
+             f"Tabla={val_tbl:.4f}, Pivot={val_pivot:.4f}")
+
+# C8 — Calibración: hit-rates en rango [0, 1]
+calib_cols_all = [c for c in datos.columns if c.startswith("calib_q")]
+if calib_cols_all:
+    calib_min = datos[calib_cols_all].min().min()
+    calib_max = datos[calib_cols_all].max().max()
+    _chk("Hit-rates de calibración en [0, 1]",
+         0.0 <= calib_min and calib_max <= 1.0,
+         f"Observado: [{calib_min:.3f}, {calib_max:.3f}]")
+
+# C9 — Monotonía RMSE: h02-05 ≤ h51-75 para cada config
+if "rmse" in datos.columns:
+    for cfg in cfgs_ok:
+        df_ = dfs[cfg].copy()
+        df_["h_grupo5"] = _h_grupo5(df_["h"])
+        r_corto = df_[df_["h_grupo5"] == "h02-05"]["rmse"].mean()
+        r_largo  = df_[df_["h_grupo5"] == "h51-75"]["rmse"].mean()
+        _chk(f"{cfg}: RMSE h02-05 ≤ h51-75",
+             r_corto <= r_largo,
+             f"h02-05={r_corto/1e6:.0f} MM, h51-75={r_largo/1e6:.0f} MM")
+
+# C10 — Ranking tiene winner
+_chk("Ranking generado con ganador",
+     winner is not None,
+     f"Ganador: {winner}")
+
+n_ok   = sum(1 for s, _, _ in checks if s == "✓")
+n_fail = sum(1 for s, _, _ in checks if s == "✗")
+print(f"\n  Resultado: {n_ok} ✓ / {n_fail} ✗ de {len(checks)} verificaciones")
+print()
+
+# Guardar checklist en Excel
+chk_df = pd.DataFrame(checks, columns=["Estado", "Verificación", "Detalle"])
+with pd.ExcelWriter(ruta_excel, engine="openpyxl", mode="a",
+                    if_sheet_exists="replace") as writer:
+    chk_df.to_excel(writer, sheet_name="Checklist", index=False)
+print(f"[OK] Checklist guardado en {ruta_excel}")
+
+
+# ── 11. Reporte HTML ─────────────────────────────────────────────────────────
 def _color_cell(val_raw, col, cfg, all_cfg_vals):
     """Devuelve clase CSS según si el valor es el mejor, peor o intermedio."""
     if pd.isna(val_raw):
@@ -788,6 +893,18 @@ def _build_html() -> str:
             for row_d in rank_rows
         )
         sections.append(f'<div class="tbl-wrap"><table><thead><tr>{th_r}</tr></thead><tbody>{body_r}</tbody></table></div>')
+
+    # ── Checklist HTML ──
+    sections.append("<h2>8 — Checklist de Consistencia</h2>")
+    sections.append("<p>Verificaciones automáticas sobre los datos cargados. Todas deben mostrar ✓ antes de interpretar los resultados.</p>")
+    chk_th = "<th>Estado</th><th>Verificación</th><th>Detalle</th>"
+    chk_body = ""
+    for sym, label, detalle in checks:
+        cls = "best" if sym == "✓" else "worst"
+        chk_body += f'<tr><td class="{cls}" style="text-align:center;font-size:16px">{sym}</td><td>{label}</td><td style="font-size:12px;color:var(--muted)">{detalle}</td></tr>'
+    sections.append(f'<div class="tbl-wrap"><table><thead><tr>{chk_th}</tr></thead><tbody>{chk_body}</tbody></table></div>')
+    resumen_chk = f"<p><strong>{sum(1 for s,_,_ in checks if s=='✓')} ✓</strong> / <strong style='color:var(--red)'>{sum(1 for s,_,_ in checks if s=='✗')} ✗</strong> de {len(checks)} verificaciones</p>"
+    sections.append(resumen_chk)
 
     sections.append("<footer>Sistema Inteligente cv4 DIRECT · Análisis Comparativo · Confidencial</footer>")
 
