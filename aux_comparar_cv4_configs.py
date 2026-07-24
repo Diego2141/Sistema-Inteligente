@@ -81,13 +81,20 @@ print(f"\n[INFO] Columnas disponibles:\n  {sorted(datos.columns.tolist())}\n")
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
-def _h_grupo(h_series: pd.Series) -> pd.Categorical:
+def _h_grupo(h_series):
     bins   = [1, 5, 20, 50, 75]
     labels = ["muy_corto", "corto", "medio", "largo"]
     return pd.cut(h_series, bins=bins, labels=labels)
 
+def _h_grupo5(h_series):
+    """5 grupos de horizonte para la tabla fold × h_grupo."""
+    bins   = [1,  5, 15, 30, 50, 75]
+    labels = ["h02-05", "h06-15", "h16-30", "h31-50", "h51-75"]
+    return pd.cut(h_series, bins=bins, labels=labels)
 
-datos["h_grupo"] = _h_grupo(datos["h"])
+
+datos["h_grupo"]  = _h_grupo(datos["h"])
+datos["h_grupo5"] = _h_grupo5(datos["h"])
 
 
 def _fmt_mm(x):
@@ -154,6 +161,29 @@ if "coverage_90" in datos.columns and "fold" in datos.columns:
     cob_fold = datos.groupby(["config", "fold"])["coverage_90"].mean().unstack("config")
     print(cob_fold.applymap(_fmt_pct).to_string())
 
+
+# ── 4b. Cobertura 90% por fold × grupo horizonte (una tabla por config) ───────
+print("\n" + "=" * 70)
+print("TABLA 4b — COBERTURA 90% TEST: fold × grupo horizonte (por config)")
+print("=" * 70)
+
+pivot_fold_hgrp = {}   # guardamos para HTML y Excel
+if "coverage_90" in datos.columns and "fold" in datos.columns:
+    for cfg in cfgs_ok:
+        df_ = dfs[cfg]
+        if "coverage_90" not in df_.columns:
+            continue
+        df_["h_grupo5"] = _h_grupo5(df_["h"])
+        piv = (
+            df_.groupby(["fold", "h_grupo5"], observed=True)["coverage_90"]
+            .mean()
+            .unstack("h_grupo5")
+        )
+        piv.index = [f"Fold {f}" for f in piv.index]
+        piv.columns = [str(c) for c in piv.columns]
+        pivot_fold_hgrp[cfg] = piv
+        print(f"\n  [{cfg}]  Cobertura 90% TEST por fold × grupo horizonte")
+        print(piv.applymap(_fmt_pct).to_string())
 
 # ── 5. Calibración por cuantil ────────────────────────────────────────────────
 print("\n" + "=" * 70)
@@ -315,6 +345,10 @@ with pd.ExcelWriter(ruta_excel, engine="openpyxl") as writer:
     if "coverage_90" in datos.columns and "fold" in datos.columns:
         cob_fold2 = datos.groupby(["fold", "config"])["coverage_90"].mean().unstack("config")
         cob_fold2.to_excel(writer, sheet_name="Cob90_por_fold")
+
+    # Hoja 4b: fold × h_grupo5 por config
+    for cfg, piv in pivot_fold_hgrp.items():
+        piv.to_excel(writer, sheet_name=f"Cob90_fold_h_{cfg[:10]}")
 
     # Hoja 5: calibración
     if calib_rows:
@@ -662,6 +696,29 @@ def _build_html() -> str:
                 tds += f'<td class="{cls}">{row_d.get(cfg,"—")}</td>'
             body4 += f"<tr>{tds}</tr>"
         sections.append(f'<div class="tbl-wrap"><table><thead><tr>{th4}</tr></thead><tbody>{body4}</tbody></table></div>')
+
+    # ── Tabla 4b: fold × h_grupo5 por config ──
+    sections.append("<h2>4b — Cobertura 90% por Fold × Grupo Horizonte (por configuración)</h2>")
+    sections.append("<p>Verde = ≥ 89% (cerca del objetivo). Rojo = &lt; 80% (drift severo).</p>")
+    H5_COLS = ["h02-05", "h06-15", "h16-30", "h31-50", "h51-75"]
+    for cfg, piv in pivot_fold_hgrp.items():
+        sections.append(f"<h3>{cfg}</h3>")
+        th_b = "<th>Fold</th>" + "".join(f"<th>{c}</th>" for c in H5_COLS)
+        body_b = ""
+        for fold_lbl in piv.index:
+            tds = f"<td>{fold_lbl}</td>"
+            for col in H5_COLS:
+                v = piv.loc[fold_lbl, col] if col in piv.columns else np.nan
+                txt = _fmt_pct(v)
+                cls = ""
+                if not pd.isna(v):
+                    if v >= 0.89:
+                        cls = "best"
+                    elif v < 0.80:
+                        cls = "worst"
+                tds += f'<td class="{cls}">{txt}</td>'
+            body_b += f"<tr>{tds}</tr>"
+        sections.append(f'<div class="tbl-wrap"><table><thead><tr>{th_b}</tr></thead><tbody>{body_b}</tbody></table></div>')
 
     # ── Tabla 5: Calibración ──
     sections.append("<h2>5 — Calibración Hit-Rate por Cuantil</h2>")
