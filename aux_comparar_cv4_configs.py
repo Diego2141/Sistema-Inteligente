@@ -40,13 +40,6 @@ CONFIGS = {
     "roll_1"  : DIR_WFCV / "fold_roll_1",
 }
 
-H_GRUPOS = [
-    ("muy_corto", 2,  5),
-    ("corto",     6, 20),
-    ("medio",    21, 50),
-    ("largo",    51, 75),
-]
-
 CALIB_TAUS = [1, 5, 40, 50, 60, 95, 99]
 
 COLORS = {
@@ -566,27 +559,6 @@ def _color_cell(val_raw, col, cfg, all_cfg_vals):
     return ""
 
 
-def _html_table(rows, highlight_col=None, raw_vals=None):
-    if not rows:
-        return "<p>Sin datos</p>"
-    cols = list(rows[0].keys())
-    th = "".join(f"<th>{c}</th>" for c in cols)
-    body = ""
-    for row in rows:
-        tds = ""
-        for c in cols:
-            v = row[c]
-            cls = ""
-            if raw_vals and c in cfgs_ok:
-                rv = raw_vals.get((row.get(cols[0], ""), c), np.nan)
-                cls = _color_cell(rv, highlight_col or "", c,
-                                  {cfg2: raw_vals.get((row.get(cols[0], ""), cfg2), np.nan)
-                                   for cfg2 in cfgs_ok})
-            tds += f'<td class="{cls}">{v}</td>'
-        body += f"<tr>{tds}</tr>"
-    return f"<table><thead><tr>{th}</tr></thead><tbody>{body}</tbody></table>"
-
-
 CSS = """
 :root {
   --ink:#0F172A; --mid:#334155; --muted:#64748B; --border:#CBD5E1;
@@ -840,8 +812,12 @@ def _build_html() -> str:
                     rv[cfg] = float(row_d.get(cfg,"0%").strip("%")) / 100
                 except Exception:
                     rv[cfg] = np.nan
-            best_c = min(rv, key=lambda c: abs(rv[c]-tau_val) if not pd.isna(rv[c]) else 9)
-            worst_c = max(rv, key=lambda c: abs(rv[c]-tau_val) if not pd.isna(rv[c]) else -9)
+            rv_valid = {c: v for c, v in rv.items() if not pd.isna(v)}
+            if not rv_valid:
+                best_c = worst_c = None
+            else:
+                best_c  = min(rv_valid, key=lambda c: abs(rv_valid[c] - tau_val))
+                worst_c = max(rv_valid, key=lambda c: abs(rv_valid[c] - tau_val))
             tds = ""
             for c in cols5:
                 cls = ""
