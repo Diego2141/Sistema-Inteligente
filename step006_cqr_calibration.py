@@ -326,10 +326,42 @@ for grupo in list(H_GRUPOS.keys()) + ["TOTAL"]:
     if grupo != "TOTAL":
         print()
 
+# ── Tabla 3: Cobertura 90% por fold ──────────────────────────────────────────
+print("\n── Cobertura 90% por fold (TOTAL) ──")
+print(f"{'Fold':>6}  {'ANTES':>7}  {'DESPUÉS':>8}  {'Δpp':>6}  {'CRPS Antes':>11}  {'CRPS Dsp':>9}")
+print("-" * 60)
+for fold in sorted(folds_disponibles):
+    mf_a = _metricas_df(df_test[df_test["fold"] == fold], "ANTES")
+    mf_d = _metricas_df(df_cal[df_cal["fold"]   == fold], "DESPUÉS")
+    tot_a_f = mf_a[mf_a["h_grupo"] == "TOTAL"]
+    tot_d_f = mf_d[mf_d["h_grupo"] == "TOTAL"]
+    if tot_a_f.empty or tot_d_f.empty:
+        continue
+    cov_a = tot_a_f["coverage_90"].values[0] if "coverage_90" in tot_a_f.columns else float("nan")
+    cov_d = tot_d_f["coverage_90"].values[0] if "coverage_90" in tot_d_f.columns else float("nan")
+    crps_a = tot_a_f["crps_mm"].values[0]    if "crps_mm"    in tot_a_f.columns else float("nan")
+    crps_d = tot_d_f["crps_mm"].values[0]    if "crps_mm"    in tot_d_f.columns else float("nan")
+    dpp = (cov_d - cov_a) * 100
+    print(f"{fold:>6}  {cov_a:>7.1%}  {cov_d:>8.1%}  {dpp:>+6.1f}  "
+          f"{crps_a:>11.1f}  {crps_d:>9.1f}")
+
+# ── Tabla 4: Deltas (ajuste CQR) por fold × h_grupo × cuantil ────────────────
+print("\n── Ajuste CQR (delta_tau) por fold × h_grupo × cuantil (MM USD) ──")
+print(f"{'Fold':>5}  {'h_grupo':>10}  " + "  ".join(f"Q{int(t*100):02d}" for t in TAUS))
+print("-" * 90)
+for fold in sorted(folds_disponibles):
+    for grupo in H_GRUPOS:
+        deltas_g = delta_params[fold].get(grupo, {})
+        if not deltas_g:
+            continue
+        vals = "  ".join(f"{deltas_g.get(t, 0.0)/1e6:+6.1f}" for t in TAUS)
+        print(f"{fold:>5}  {grupo:>10}  {vals}")
+    print()
+
 # Guardar métricas en parquet
 ruta_met = DIR_OUT / f"metricas_comparativo_{BANCO}_{fecha_hoy}.parquet"
 df_met.to_parquet(ruta_met, index=False)
-print(f"\n[OK] Métricas guardadas: {ruta_met.name}")
+print(f"[OK] Métricas guardadas: {ruta_met.name}")
 
 
 # ── 7. Guardar calibration params JSON (para producción) ─────────────────────
