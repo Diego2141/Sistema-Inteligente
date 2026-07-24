@@ -1453,7 +1453,8 @@ def run(banco: str = BANCO) -> None:
             hp_grupos = {g: dict(HP) for g in H_GRUPOS}
 
         # Write each h directly to a list; concat and flush to disk per fold
-        fold_scaffolds: list[pd.DataFrame] = []
+        fold_scaffolds:     list[pd.DataFrame] = []
+        fold_val_scaffolds: list[pd.DataFrame] = []   # para CQR calibración
         n_h_ok = 0
 
         for h_val in range(H_MIN, H_MAX + 1):
@@ -1500,6 +1501,27 @@ def run(banco: str = BANCO) -> None:
                 _scaffold[col] = model.predict(X_test)
 
             fold_scaffolds.append(_scaffold)
+
+            # ── VAL scaffold (para CQR en step006) ───────────────────────────
+            if len(X_val) > 0:
+                mv_mask = (
+                    (df_h["fecha_t"] >= fold["val_start"]) &
+                    (df_h["fecha_t"] <= fold["val_end"])   &
+                    df_h["target"].notna()
+                )
+                fechas_t_val = _strip_tz(df_h.loc[mv_mask, "fecha_t"])
+                _val_scaffold = pd.DataFrame({
+                    "banco"  : banco,
+                    "fold"   : fold["fold"],
+                    "fecha_t": pd.DatetimeIndex(fechas_t_val),
+                    "h"      : h_val,
+                    "target" : y_val.values,
+                })
+                for tau, model in modelos.items():
+                    col = "mean" if tau == "mean" else f"q{int(tau * 100):02d}"
+                    _val_scaffold[col] = model.predict(X_val)
+                fold_val_scaffolds.append(_val_scaffold)
+
             n_h_ok += 1
 
             preds_for_metrics = {tau: m.predict(X_test) for tau, m in modelos.items()}
@@ -1527,8 +1549,16 @@ def run(banco: str = BANCO) -> None:
             ruta_fold = DIR_MODO / f"preds_test_fold{fold['fold']:02d}_{banco}_{fecha_hoy}.parquet"
             df_fold.to_parquet(ruta_fold, index=False)
             fold_parquet_paths.append(ruta_fold)
-            print(f"  → Guardado: {ruta_fold.name}")
+            print(f"  → Guardado TEST: {ruta_fold.name}")
             del df_fold, fold_scaffolds
+            gc.collect()
+
+        if fold_val_scaffolds:
+            df_val_fold = pd.concat(fold_val_scaffolds, ignore_index=True)
+            ruta_val = DIR_MODO / f"preds_val_fold{fold['fold']:02d}_{banco}_{fecha_hoy}.parquet"
+            df_val_fold.to_parquet(ruta_val, index=False)
+            print(f"  → Guardado VAL:  {ruta_val.name}")
+            del df_val_fold, fold_val_scaffolds
             gc.collect()
 
         elapsed_fold = (time.time() - t0_fold) / 60
