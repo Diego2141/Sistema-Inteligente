@@ -57,7 +57,7 @@ COLORS = {
 }
 
 # ── 1. Cargar parquets ─────────────────────────────────────────────────────────
-def cargar_parquet(cfg: str, path: Path) -> pd.DataFrame | None:
+def cargar_parquet(cfg: str, path: Path):
     candidatos = sorted(path.glob(f"metricas_{BANCO}_*.parquet"))
     if not candidatos:
         print(f"[WARN] Sin métricas en {path.name} — omitiendo")
@@ -397,8 +397,354 @@ for cfg in cfgs_ok:
     scores[cfg] = (score, parts)
 
 sorted_configs = sorted(scores.items(), key=lambda x: x[1][0])
+winner = sorted_configs[0][0] if sorted_configs else None
 for rank, (cfg, (score, parts)) in enumerate(sorted_configs, 1):
     marker = " ★ RECOMENDADO" if rank == 1 else ""
     print(f"  #{rank} {cfg:12s}  score={score:.4f}{marker}")
     print(f"       {' | '.join(parts)}")
 print()
+
+
+# ── 10. Reporte HTML ──────────────────────────────────────────────────────────
+def _color_cell(val_raw, col, cfg, all_cfg_vals):
+    """Devuelve clase CSS según si el valor es el mejor, peor o intermedio."""
+    if pd.isna(val_raw):
+        return ""
+    vals = {c: v for c, v in all_cfg_vals.items() if not pd.isna(v)}
+    if len(vals) < 2:
+        return ""
+    if col == "coverage_90":
+        # mejor = más cercano a 0.90
+        best = min(vals, key=lambda c: abs(vals[c] - 0.90))
+        worst = max(vals, key=lambda c: abs(vals[c] - 0.90))
+    else:
+        best = min(vals, key=lambda c: vals[c])
+        worst = max(vals, key=lambda c: vals[c])
+    if cfg == best:
+        return "best"
+    if cfg == worst:
+        return "worst"
+    return ""
+
+
+def _html_table(rows, highlight_col=None, raw_vals=None):
+    if not rows:
+        return "<p>Sin datos</p>"
+    cols = list(rows[0].keys())
+    th = "".join(f"<th>{c}</th>" for c in cols)
+    body = ""
+    for row in rows:
+        tds = ""
+        for c in cols:
+            v = row[c]
+            cls = ""
+            if raw_vals and c in cfgs_ok:
+                rv = raw_vals.get((row.get(cols[0], ""), c), np.nan)
+                cls = _color_cell(rv, highlight_col or "", c,
+                                  {cfg2: raw_vals.get((row.get(cols[0], ""), cfg2), np.nan)
+                                   for cfg2 in cfgs_ok})
+            tds += f'<td class="{cls}">{v}</td>'
+        body += f"<tr>{tds}</tr>"
+    return f"<table><thead><tr>{th}</tr></thead><tbody>{body}</tbody></table>"
+
+
+CSS = """
+:root {
+  --ink:#0F172A; --mid:#334155; --muted:#64748B; --border:#CBD5E1;
+  --stripe:#F8FAFC; --bg:#FFFFFF; --teal:#0F766E; --teal-lt:#CCFBF1;
+  --em:#059669; --em-lt:#D1FAE5; --red:#DC2626; --red-lt:#FEE2E2;
+  --amber:#D97706; --amber-lt:#FEF3C7;
+}
+@media (prefers-color-scheme:dark){
+  :root{--ink:#E2E8F0;--mid:#94A3B8;--muted:#64748B;--border:#1E293B;
+    --stripe:#0F172A;--bg:#111827;--teal:#2DD4BF;--teal-lt:#134e4a;
+    --em:#34D399;--em-lt:#064e3b;--red:#F87171;--red-lt:#450a0a;
+    --amber:#FBBF24;--amber-lt:#451a03;}
+}
+:root[data-theme="light"]{--ink:#0F172A;--mid:#334155;--muted:#64748B;--border:#CBD5E1;--stripe:#F8FAFC;--bg:#FFFFFF;--teal:#0F766E;--teal-lt:#CCFBF1;--em:#059669;--em-lt:#D1FAE5;--red:#DC2626;--red-lt:#FEE2E2;--amber:#D97706;--amber-lt:#FEF3C7;}
+:root[data-theme="dark"]{--ink:#E2E8F0;--mid:#94A3B8;--muted:#64748B;--border:#1E293B;--stripe:#0F172A;--bg:#111827;--teal:#2DD4BF;--teal-lt:#134e4a;--em:#34D399;--em-lt:#064e3b;--red:#F87171;--red-lt:#450a0a;--amber:#FBBF24;--amber-lt:#451a03;}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;font-size:14px;line-height:1.6;color:var(--ink);background:var(--bg);max-width:1100px;margin:0 auto;padding:40px 32px 80px;}
+h1{font-size:22px;font-weight:700;color:var(--ink);margin-bottom:4px;}
+.sub{font-size:13px;color:var(--muted);margin-bottom:32px;}
+h2{font-size:15px;font-weight:700;color:var(--ink);margin:32px 0 8px;padding-bottom:6px;border-bottom:2px solid var(--teal);}
+h3{font-size:13px;font-weight:700;color:var(--mid);margin:20px 0 6px;}
+p{color:var(--mid);font-size:13px;margin-bottom:8px;line-height:1.6;}
+.tbl-wrap{overflow-x:auto;margin-bottom:20px;border-radius:6px;box-shadow:0 1px 4px rgba(0,0,0,.08);}
+table{width:100%;border-collapse:collapse;font-size:13px;font-variant-numeric:tabular-nums;}
+thead th{background:var(--teal);color:white;padding:9px 12px;text-align:left;font-weight:600;font-size:12px;letter-spacing:.03em;white-space:nowrap;}
+tbody tr:nth-child(even){background:var(--stripe);}
+tbody tr:hover{background:var(--teal-lt);}
+td{padding:8px 12px;color:var(--mid);border-bottom:1px solid var(--border);}
+td:first-child{font-weight:600;color:var(--ink);}
+td.best{background:var(--em-lt);color:var(--em);font-weight:700;}
+td.worst{background:var(--red-lt);color:var(--red);}
+.legend{display:flex;gap:16px;font-size:12px;color:var(--muted);margin-bottom:16px;flex-wrap:wrap;}
+.legend span{display:flex;align-items:center;gap:6px;}
+.dot{width:12px;height:12px;border-radius:2px;display:inline-block;}
+.dot-best{background:var(--em-lt);border:1px solid var(--em);}
+.dot-worst{background:var(--red-lt);border:1px solid var(--red);}
+.winner-box{background:var(--em-lt);border:2px solid var(--em);border-radius:6px;padding:14px 20px;margin-bottom:24px;}
+.winner-box .wt{font-size:13px;font-weight:700;color:var(--em);margin-bottom:4px;}
+.winner-box .wd{font-size:13px;color:var(--mid);}
+.img-wrap{text-align:center;margin-bottom:20px;}
+.img-wrap img{max-width:100%;border:1px solid var(--border);border-radius:6px;}
+footer{margin-top:48px;padding-top:16px;border-top:1px solid var(--border);font-size:11.5px;color:var(--muted);text-align:center;}
+"""
+
+def _build_html() -> str:
+    from datetime import date
+    today = date.today().strftime("%d %b %Y")
+
+    sections = []
+
+    # ── Hero ──
+    winner_txt = f"<strong>{winner}</strong>" if winner else "—"
+    sections.append(f"""
+<h1>Comparativa cv4 DIRECT — 4 Configuraciones</h1>
+<p class="sub">Expanding vs Rolling · Test 0.5 vs 1 año &nbsp;|&nbsp; Banco: {BANCO} &nbsp;|&nbsp; {today}</p>
+<div class="winner-box">
+  <div class="wt">★ Configuración recomendada para producción: {winner_txt}</div>
+  <div class="wd">Basado en menor distancia a Cob90 = 90% + menor RMSE y CRPS normalizados entre configuraciones.</div>
+</div>
+<div class="legend">
+  <span><span class="dot dot-best"></span> Mejor valor en esa fila</span>
+  <span><span class="dot dot-worst"></span> Peor valor en esa fila</span>
+</div>
+""")
+
+    # ── Tabla 1: Resumen global ──
+    sections.append("<h2>1 — Resumen Global</h2>")
+    sections.append("<p>Media aritmética sobre todos los horizontes h=2..75 y todos los folds disponibles.</p>")
+    # build with raw vals for coloring
+    raw_global = {}
+    for col, _, label in [
+        ("rmse","mm","RMSE (MM USD)"),("crps","mm","CRPS (MM USD)"),
+        ("coverage_90","pct","Cobertura 90%"),("coverage_98","pct","Cobertura 98%"),
+        ("val_coverage_90","pct","VAL Cob 90%"),("winkler_90","mm","Winkler 90% (MM USD)"),
+        ("pinball_q50","mm","Pinball Q50 (MM USD)"),
+    ]:
+        if col not in datos.columns:
+            continue
+        row_d = {"Métrica": label}
+        rv = {}
+        for cfg in cfgs_ok:
+            v = dfs[cfg][col].mean() if col in dfs[cfg].columns else np.nan
+            rv[cfg] = v
+            row_d[cfg] = _fmt_pct(v) if "pct" in _ else _fmt_mm(v)
+        raw_global[label] = rv
+
+    rows1 = []
+    for col, kind, label in [
+        ("rmse","mm","RMSE (MM USD)"),("crps","mm","CRPS (MM USD)"),
+        ("coverage_90","pct","Cobertura 90%"),("coverage_98","pct","Cobertura 98%"),
+        ("val_coverage_90","pct","VAL Cob 90%"),("winkler_90","mm","Winkler 90% (MM USD)"),
+        ("pinball_q50","mm","Pinball Q50 (MM USD)"),
+    ]:
+        if col not in datos.columns:
+            continue
+        row_d = {"Métrica": label}
+        for cfg in cfgs_ok:
+            v = dfs[cfg][col].mean() if col in dfs[cfg].columns else np.nan
+            row_d[cfg] = _fmt_pct(v) if kind == "pct" else _fmt_mm(v)
+        rows1.append(row_d)
+
+    # generate table with color
+    if rows1:
+        cols1 = list(rows1[0].keys())
+        th1 = "".join(f"<th>{c}</th>" for c in cols1)
+        body1 = ""
+        for row_d in rows1:
+            label = row_d["Métrica"]
+            rv = raw_global.get(label, {})
+            col_key = next((c for c, _, l in [
+                ("rmse","mm","RMSE (MM USD)"),("crps","mm","CRPS (MM USD)"),
+                ("coverage_90","pct","Cobertura 90%"),("coverage_98","pct","Cobertura 98%"),
+                ("val_coverage_90","pct","VAL Cob 90%"),("winkler_90","mm","Winkler 90% (MM USD)"),
+                ("pinball_q50","mm","Pinball Q50 (MM USD)")] if l == label), None)
+            tds = f"<td>{label}</td>"
+            for cfg in cfgs_ok:
+                cls = _color_cell(rv.get(cfg, np.nan), col_key or "", cfg, rv)
+                tds += f'<td class="{cls}">{row_d.get(cfg,"—")}</td>'
+            body1 += f"<tr>{tds}</tr>"
+        sections.append(f'<div class="tbl-wrap"><table><thead><tr>{th1}</tr></thead><tbody>{body1}</tbody></table></div>')
+
+    # ── Tabla 2: RMSE por grupo horizonte ──
+    sections.append("<h2>2 — RMSE por Grupo de Horizonte (MM USD)</h2>")
+    sections.append("<p>Media del RMSE dentro de cada grupo. Verde = menor error en esa fila. Rojo = mayor.</p>")
+    if "rmse" in datos.columns:
+        rmse_p = datos.groupby(["h_grupo","config"],observed=True)["rmse"].mean().unstack("config")
+        rows2 = []
+        for grp in rmse_p.index:
+            row_d = {"Grupo": str(grp)}
+            rv = {}
+            for cfg in cfgs_ok:
+                v = rmse_p.loc[grp, cfg] if cfg in rmse_p.columns else np.nan
+                rv[cfg] = v
+                row_d[cfg] = _fmt_mm(v)
+            rv_norm = {c: v for c, v in rv.items() if not pd.isna(v)}
+            best_c = min(rv_norm, key=rv_norm.get) if rv_norm else None
+            worst_c = max(rv_norm, key=rv_norm.get) if rv_norm else None
+            row_d["_best"] = best_c
+            row_d["_worst"] = worst_c
+            row_d["_rv"] = rv
+            rows2.append(row_d)
+        cols2 = ["Grupo"] + cfgs_ok
+        th2 = "".join(f"<th>{c}</th>" for c in cols2)
+        body2 = ""
+        for row_d in rows2:
+            best_c = row_d.pop("_best", None)
+            worst_c = row_d.pop("_worst", None)
+            row_d.pop("_rv", None)
+            tds = f"<td>{row_d['Grupo']}</td>"
+            for cfg in cfgs_ok:
+                cls = "best" if cfg == best_c else ("worst" if cfg == worst_c else "")
+                tds += f'<td class="{cls}">{row_d.get(cfg,"—")}</td>'
+            body2 += f"<tr>{tds}</tr>"
+        sections.append(f'<div class="tbl-wrap"><table><thead><tr>{th2}</tr></thead><tbody>{body2}</tbody></table></div>')
+
+    # ── Tabla 3: Cobertura 90% por grupo horizonte ──
+    sections.append("<h2>3 — Cobertura 90% [Q05–Q95] por Grupo de Horizonte</h2>")
+    sections.append("<p>Verde = más cercano al objetivo 90%. Rojo = más alejado.</p>")
+    if "coverage_90" in datos.columns:
+        cob_p = datos.groupby(["h_grupo","config"],observed=True)["coverage_90"].mean().unstack("config")
+        rows3 = []
+        for grp in cob_p.index:
+            row_d = {"Grupo": str(grp), "Objetivo": "90.0%"}
+            rv = {}
+            for cfg in cfgs_ok:
+                v = cob_p.loc[grp, cfg] if cfg in cob_p.columns else np.nan
+                rv[cfg] = v
+                row_d[cfg] = _fmt_pct(v)
+            rv_norm = {c: v for c, v in rv.items() if not pd.isna(v)}
+            best_c = min(rv_norm, key=lambda c: abs(rv_norm[c]-0.90)) if rv_norm else None
+            worst_c = max(rv_norm, key=lambda c: abs(rv_norm[c]-0.90)) if rv_norm else None
+            row_d["_best"] = best_c; row_d["_worst"] = worst_c
+            rows3.append(row_d)
+        cols3 = ["Grupo", "Objetivo"] + cfgs_ok
+        th3 = "".join(f"<th>{c}</th>" for c in cols3)
+        body3 = ""
+        for row_d in rows3:
+            best_c = row_d.pop("_best", None); worst_c = row_d.pop("_worst", None)
+            tds = f"<td>{row_d['Grupo']}</td><td>{row_d['Objetivo']}</td>"
+            for cfg in cfgs_ok:
+                cls = "best" if cfg == best_c else ("worst" if cfg == worst_c else "")
+                tds += f'<td class="{cls}">{row_d.get(cfg,"—")}</td>'
+            body3 += f"<tr>{tds}</tr>"
+        sections.append(f'<div class="tbl-wrap"><table><thead><tr>{th3}</tr></thead><tbody>{body3}</tbody></table></div>')
+
+    # ── Tabla 4: Cobertura por fold ──
+    sections.append("<h2>4 — Cobertura 90% por Fold (Detección de Drift)</h2>")
+    sections.append("<p>Fold 5 es el periodo más reciente. Un colapso sistemático en Fold 5 a través de todas las configs indica drift macroeconómico, no de ventana.</p>")
+    if "coverage_90" in datos.columns and "fold" in datos.columns:
+        cob_f = datos.groupby(["fold","config"])["coverage_90"].mean().unstack("config")
+        rows4 = []
+        for fold in sorted(cob_f.index):
+            row_d = {"Fold": f"Fold {fold}", "Objetivo": "90.0%"}
+            rv = {}
+            for cfg in cfgs_ok:
+                v = cob_f.loc[fold, cfg] if cfg in cob_f.columns else np.nan
+                rv[cfg] = v
+                row_d[cfg] = _fmt_pct(v)
+            rv_norm = {c: v for c, v in rv.items() if not pd.isna(v)}
+            best_c = min(rv_norm, key=lambda c: abs(rv_norm[c]-0.90)) if rv_norm else None
+            worst_c = max(rv_norm, key=lambda c: abs(rv_norm[c]-0.90)) if rv_norm else None
+            row_d["_best"] = best_c; row_d["_worst"] = worst_c
+            rows4.append(row_d)
+        cols4 = ["Fold", "Objetivo"] + cfgs_ok
+        th4 = "".join(f"<th>{c}</th>" for c in cols4)
+        body4 = ""
+        for row_d in rows4:
+            best_c = row_d.pop("_best", None); worst_c = row_d.pop("_worst", None)
+            tds = f"<td>{row_d['Fold']}</td><td>{row_d['Objetivo']}</td>"
+            for cfg in cfgs_ok:
+                cls = "best" if cfg == best_c else ("worst" if cfg == worst_c else "")
+                tds += f'<td class="{cls}">{row_d.get(cfg,"—")}</td>'
+            body4 += f"<tr>{tds}</tr>"
+        sections.append(f'<div class="tbl-wrap"><table><thead><tr>{th4}</tr></thead><tbody>{body4}</tbody></table></div>')
+
+    # ── Tabla 5: Calibración ──
+    sections.append("<h2>5 — Calibración Hit-Rate por Cuantil</h2>")
+    sections.append("<p>Hit-rate empírico vs τ nominal. Ideal: todas las celdas ≈ Nominal. Verde = más cercano, Rojo = más alejado.</p>")
+    if calib_rows:
+        cols5 = list(calib_rows[0].keys())
+        th5 = "".join(f"<th>{c}</th>" for c in cols5)
+        body5 = ""
+        for row_d in calib_rows:
+            tau_val = float(row_d["Nominal"].strip("%")) / 100
+            rv = {}
+            for cfg in cfgs_ok:
+                try:
+                    rv[cfg] = float(row_d.get(cfg,"0%").strip("%")) / 100
+                except Exception:
+                    rv[cfg] = np.nan
+            best_c = min(rv, key=lambda c: abs(rv[c]-tau_val) if not pd.isna(rv[c]) else 9)
+            worst_c = max(rv, key=lambda c: abs(rv[c]-tau_val) if not pd.isna(rv[c]) else -9)
+            tds = ""
+            for c in cols5:
+                cls = ""
+                if c in cfgs_ok:
+                    cls = "best" if c == best_c else ("worst" if c == worst_c else "")
+                tds += f'<td class="{cls}">{row_d.get(c,"—")}</td>'
+            body5 += f"<tr>{tds}</tr>"
+        sections.append(f'<div class="tbl-wrap"><table><thead><tr>{th5}</tr></thead><tbody>{body5}</tbody></table></div>')
+
+    # ── Tabla 6: Estadísticos descriptivos ──
+    sections.append("<h2>6 — Estadísticos Descriptivos por Configuración</h2>")
+    for col, label in [("rmse","RMSE (MM USD)"),("crps","CRPS (MM USD)"),
+                        ("coverage_90","Cobertura 90%"),("winkler_90","Winkler 90% (MM USD)"),
+                        ("pinball_q50","Pinball Q50 (MM USD)")]:
+        if col not in datos.columns:
+            continue
+        is_pct = col in ("coverage_90","coverage_98")
+        sections.append(f"<h3>{label}</h3>")
+        tbl_s = datos.groupby("config")[col].agg(["mean","std","min","max"])
+        rows6 = []
+        for cfg in tbl_s.index:
+            row_d = {"Config": cfg}
+            for stat in ["mean","std","min","max"]:
+                v = tbl_s.loc[cfg, stat]
+                row_d[stat.capitalize()] = _fmt_pct(v) if is_pct else _fmt_mm(v)
+            rows6.append(row_d)
+        cols6 = ["Config","Mean","Std","Min","Max"]
+        th6 = "".join(f"<th>{c}</th>" for c in cols6)
+        body6 = "".join(f"<tr>{''.join(f'<td>{row_d.get(c,chr(8212))}</td>' for c in cols6)}</tr>"
+                        for row_d in rows6)
+        sections.append(f'<div class="tbl-wrap"><table><thead><tr>{th6}</tr></thead><tbody>{body6}</tbody></table></div>')
+
+    # ── Ranking ──
+    sections.append("<h2>7 — Ranking Final</h2>")
+    rank_rows = []
+    for rank, (cfg, (score, parts)) in enumerate(sorted_configs, 1):
+        rank_rows.append({
+            "Posición": f"#{rank}",
+            "Config": cfg,
+            "Score compuesto": f"{score:.4f}",
+            "Detalle": " | ".join(parts),
+            "": "★ RECOMENDADO" if rank == 1 else ""
+        })
+    if rank_rows:
+        cols_r = list(rank_rows[0].keys())
+        th_r = "".join(f"<th>{c}</th>" for c in cols_r)
+        body_r = "".join(
+            f"<tr>{''.join(f'<td class={chr(34)}best{chr(34)}>{v}</td>' if i==0 and row_d.get(chr(35)+'1',row_d.get('Posición',''))=='#1' else f'<td>{v}</td>' for i,(k,v) in enumerate(row_d.items()))}</tr>"
+            for row_d in rank_rows
+        )
+        sections.append(f'<div class="tbl-wrap"><table><thead><tr>{th_r}</tr></thead><tbody>{body_r}</tbody></table></div>')
+
+    sections.append("<footer>Sistema Inteligente cv4 DIRECT · Análisis Comparativo · Confidencial</footer>")
+
+    return f"""<!doctype html><html><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>Comparativa cv4 — {BANCO}</title>
+<style>{CSS}</style></head><body>
+{"".join(sections)}
+</body></html>"""
+
+
+html_content = _build_html()
+ruta_html = DIR_OUT / f"comparativo_configs_{BANCO}.html"
+ruta_html.write_text(html_content, encoding="utf-8")
+print(f"[OK] Reporte HTML: {ruta_html}")
+print(f"\nAbre el archivo en tu navegador para ver las tablas comparativas.")
+
