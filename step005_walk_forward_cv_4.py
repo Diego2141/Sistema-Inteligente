@@ -103,6 +103,13 @@ AJUSTE_ARCTAN       = True
 S_ARCTAN_FACTOR     = 0.05   # s = S_ARCTAN_FACTOR × std_y(y_train del h actual)
                               # Rango razonable: [0.01, 0.20]; paper usa 0.05 en datos std
 
+# Sub-botón: solo aplica cuando AJUSTE_ARCTAN = True
+# True  → Optuna estima s_factor en [0.01, 1.0] (log) — s = s_factor × std_y
+# False → usa S_ARCTAN_FACTOR fijo (más rápido, menos HP que buscar)
+S_ARCTAN_OPTUNA     = False
+S_ARCTAN_EXTRA_TRIALS = 10   # trials adicionales cuando S_ARCTAN_OPTUNA=True
+                              # (1 HP extra → más exploración necesaria)
+
 # Grupos de h y sus representantes para Optuna (Opción C)
 # Un solo h "típico" por grupo → HP se buscan ahí y se transfieren a todo el grupo
 # muy_corto separado: banco pre-reporta retiros a t+2 y depósitos a t+1 →
@@ -409,7 +416,8 @@ class _ArcTanBooster:
 
 # Claves de HP que xgb.train() acepta en params (excluye sklearn-only)
 _XGB_TRAIN_SKIP = {"n_estimators", "random_state", "n_jobs",
-                   "early_stopping_rounds", "eval_metric"}
+                   "early_stopping_rounds", "eval_metric",
+                   "s_factor"}   # s_factor → usado en _make_quantile_objective, no en params
 
 
 def _hp_para_xgb_train(hp: dict) -> dict:
@@ -448,8 +456,9 @@ def entrenar_modelos_h(
 
     if AJUSTE_ARCTAN:
         # ── Rama arctan: xgb.train() + _PinballEarlyStopping ────────────────
-        s       = S_ARCTAN_FACTOR * std_y
-        params  = _hp_para_xgb_train(hp)
+        # s_factor viene de Optuna si S_ARCTAN_OPTUNA=True; si no, usa el fijo
+        s       = hp.get("s_factor", S_ARCTAN_FACTOR) * std_y
+        params  = _hp_para_xgb_train(hp)   # _XGB_TRAIN_SKIP excluye s_factor
         dtrain  = xgb.DMatrix(X_train, label=y_train)
         dval    = xgb.DMatrix(X_val,   label=y_val) if use_es else None
         evals   = [(dval, "val")] if use_es else []
@@ -1206,7 +1215,12 @@ def optuna_tune_h(
 
         if AJUSTE_ARCTAN:
             # Arctan: xgb.train() + _PinballEarlyStopping
-            _s      = S_ARCTAN_FACTOR * _std_y_opt
+            # s_factor: buscado por Optuna (S_ARCTAN_OPTUNA=True) o fijo
+            if S_ARCTAN_OPTUNA:
+                _sf = trial.suggest_float("s_factor", 0.01, 1.0, log=True)
+            else:
+                _sf = S_ARCTAN_FACTOR
+            _s      = _sf * _std_y_opt
             _params = _hp_para_xgb_train(hp_trial)
             _dtrain = xgb.DMatrix(X_tr, label=y_tr_arr)
             _dval   = xgb.DMatrix(X_vl, label=y_vl_arr)
@@ -1249,9 +1263,11 @@ def optuna_tune_h(
     # El TPE los evalúa primero y construye su modelo probabilístico desde
     # esa región, convergiendo más rápido con los mismos N trials.
     if OPTUNA_WARM_START and prev_best_params is not None:
-        # Filtrar solo los HP que pertenecen al espacio de búsqueda
+        # s_factor incluido en warm start cuando S_ARCTAN_OPTUNA=True
         _search_keys = {"max_depth", "min_child_weight", "reg_alpha", "reg_lambda",
                         "learning_rate", "subsample", "colsample_bytree"}
+        if AJUSTE_ARCTAN and S_ARCTAN_OPTUNA:
+            _search_keys = _search_keys | {"s_factor"}
         warm_params = {k: v for k, v in prev_best_params.items() if k in _search_keys}
         if warm_params:
             study.enqueue_trial(warm_params)
@@ -1261,7 +1277,10 @@ def optuna_tune_h(
                 " ".join(f"{k}={v:.3g}" for k, v in warm_params.items()),
             )
 
-    study.optimize(objective, n_trials=OPTUNA_N_TRIALS, show_progress_bar=False)
+    # Trials extra cuando s_factor entra al espacio de búsqueda
+    n_trials_run = OPTUNA_N_TRIALS + (S_ARCTAN_EXTRA_TRIALS
+                                      if (AJUSTE_ARCTAN and S_ARCTAN_OPTUNA) else 0)
+    study.optimize(objective, n_trials=n_trials_run, show_progress_bar=False)
 
     best = study.best_params
     log.info(
