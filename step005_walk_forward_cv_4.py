@@ -89,8 +89,10 @@ MIN_TRAIN_ROWS      = 50
 N_ESTIMATORS_MAX      = 300   # techo de árboles; early stopping lo reduce en práctica
 EARLY_STOPPING_ROUNDS = 10    # parar si val loss no mejora en N rondas consecutivas
 
-USE_OPTUNA      = True   # False → HP fijos para todos los h (más rápido, sin optuna)
-OPTUNA_N_TRIALS = 30     # trials por h representativo por fold
+USE_OPTUNA          = True   # False → HP fijos para todos los h (más rápido, sin optuna)
+OPTUNA_N_TRIALS     = 30     # trials por h representativo por fold
+OPTUNA_WARM_START   = True   # True → inyecta el HP óptimo del fold anterior como trial 0
+                              # False → cada fold parte desde cero (comportamiento original)
 
 # Grupos de h y sus representantes para Optuna (Opción C)
 # Un solo h "típico" por grupo → HP se buscan ahí y se transfieren a todo el grupo
@@ -403,7 +405,7 @@ def calcular_metricas(
             ((y_test >= preds_dict[0.01]) & (y_test <= preds_dict[0.99])).mean()
         )
 
-    # ── Coverage VAL ──────────────────────────────────────────────────────────
+    # ── Coverage VAL + CRPS VAL ───────────────────────────────────────────────
     if preds_val_dict is not None and y_val is not None and len(y_val) > 0:
         if 0.05 in preds_val_dict and 0.95 in preds_val_dict:
             row["val_coverage_90"] = float(
@@ -413,6 +415,19 @@ def calcular_metricas(
             row["val_coverage_98"] = float(
                 ((y_val >= preds_val_dict[0.01]) & (y_val <= preds_val_dict[0.99])).mean()
             )
+        # CRPS VAL ≈ 2 * ∫₀¹ pinball_τ dτ — permite comparar VAL vs TEST
+        # para detectar overfitting distribucional (val_crps << crps → overfit)
+        tau_pinballs_val: dict[float, float] = {}
+        for tau, preds in preds_val_dict.items():
+            if tau != "mean":
+                err = y_val - preds
+                tau_pinballs_val[tau] = float(
+                    np.where(err >= 0, tau * err, (tau - 1) * err).mean()
+                )
+        if len(tau_pinballs_val) >= 2:
+            sorted_taus_v = sorted(tau_pinballs_val.keys())
+            pb_arr_v = np.array([tau_pinballs_val[t] for t in sorted_taus_v])
+            row["val_crps"] = float(2.0 * np.trapz(pb_arr_v, sorted_taus_v))
 
     # ── Winkler Score: W = (U-L) + (2/α)*[max(0,L-y) + max(0,y-U)] ──────────
     if 0.05 in preds_dict and 0.95 in preds_dict:
@@ -986,27 +1001,42 @@ def guardar_diag_y_plots(
 # Optuna HP search (Option C: representative h per group)
 # ---------------------------------------------------------------------------
 
+_HP_META_VACIO = {"best_pinball_val": float("nan"), "n_trials_ok": 0, "trial_values": []}
+
+
 def optuna_tune_h(
     h_rep: int,
     df: pd.DataFrame,
     fold: dict,
     cols_feat: list[str],
-) -> dict:
+    prev_best_params: dict | None = None,
+) -> tuple:
     """
     Busca HP óptimos en el h representativo del grupo usando Optuna + early stopping.
     Espacio de búsqueda: 7 HP de regularización/árbol; n_estimators lo decide early stopping.
-    Devuelve un HP dict completo listo para entrenar.
+
+    Parameters
+    ----------
+    prev_best_params : dict | None
+        HP óptimos del fold anterior para este mismo grupo.
+        Si OPTUNA_WARM_START=True y prev_best_params no es None, se inyecta como
+        trial 0 (study.enqueue_trial) para que el TPE parta de una región prometedora.
+        Si es None o OPTUNA_WARM_START=False, comportamiento original (exploración libre).
+
+    Returns
+    -------
+    (hp_dict, hp_meta) — siempre una tupla de dos elementos.
     """
     if not _OPTUNA_OK:
         log.warning("optuna no instalado — usando HP fijos para h_rep=%d", h_rep)
-        return dict(HP)
+        return dict(HP), _HP_META_VACIO
 
     df_h = df[df["h"] == h_rep]
     try:
         X_tr, y_tr, X_vl, y_vl, _, _, _, _ = preparar_fold_data_h(df_h, fold, cols_feat)
     except ValueError as e:
         log.warning("Optuna h_rep=%d fold=%d omitido: %s — usando HP fijos", h_rep, fold["fold"], e)
-        return dict(HP)
+        return dict(HP), _HP_META_VACIO
 
     y_tr_arr = np.asarray(y_tr)
     y_vl_arr = np.asarray(y_vl)
@@ -1041,10 +1071,29 @@ def optuna_tune_h(
             total_loss += _pinball(y_vl_arr, m.predict(X_vl), tau)
         return total_loss / len(TAUS)   # media de pinball entre cuantiles
 
+    # Seed distinta por fold para que la exploración inicial (fase aleatoria del TPE)
+    # no sea idéntica entre folds — antes todos arrancaban con seed=42.
     study = optuna.create_study(
         direction="minimize",
-        sampler=optuna.samplers.TPESampler(seed=42),
+        sampler=optuna.samplers.TPESampler(seed=42 + fold["fold"]),
     )
+
+    # Warm start: inyectar los HP óptimos del fold anterior como trial 0.
+    # El TPE los evalúa primero y construye su modelo probabilístico desde
+    # esa región, convergiendo más rápido con los mismos N trials.
+    if OPTUNA_WARM_START and prev_best_params is not None:
+        # Filtrar solo los HP que pertenecen al espacio de búsqueda
+        _search_keys = {"max_depth", "min_child_weight", "reg_alpha", "reg_lambda",
+                        "learning_rate", "subsample", "colsample_bytree"}
+        warm_params = {k: v for k, v in prev_best_params.items() if k in _search_keys}
+        if warm_params:
+            study.enqueue_trial(warm_params)
+            log.debug(
+                "Optuna warm start fold=%d h_rep=%d — inyectando HP de fold anterior: %s",
+                fold["fold"], h_rep,
+                " ".join(f"{k}={v:.3g}" for k, v in warm_params.items()),
+            )
+
     study.optimize(objective, n_trials=OPTUNA_N_TRIALS, show_progress_bar=False)
 
     best = study.best_params
@@ -1335,6 +1384,10 @@ def run(banco: str = BANCO) -> None:
     diag_rows:  list[dict] = []
     n_horizontes = H_MAX - H_MIN + 1
 
+    # Warm start: guarda los HP óptimos del fold anterior por grupo.
+    # Se pasan a optuna_tune_h() y se actualizan al final de cada fold.
+    prev_hp_por_grupo: dict[str, dict | None] = {g: None for g in H_GRUPOS}
+
     # Output dir created early so per-fold parquets can be written immediately
     DIR_MODO = DIR_OUTPUT / f"fold{'_exp' if EXPANDING else '_roll'}"
     DIR_MODO.mkdir(parents=True, exist_ok=True)
@@ -1353,11 +1406,18 @@ def run(banco: str = BANCO) -> None:
 
         # ── Optuna: buscar HP por grupo de h (Opción C) ──────────────────────
         if USE_OPTUNA and _OPTUNA_OK:
-            print(f"  Buscando HP con Optuna ({OPTUNA_N_TRIALS} trials × 3 grupos)…")
+            ws_tag = " · warm_start=ON" if OPTUNA_WARM_START else " · warm_start=OFF"
+            print(f"  Buscando HP con Optuna ({OPTUNA_N_TRIALS} trials × 4 grupos{ws_tag})…")
             hp_grupos: dict = {}
             for grupo, (_, h_rep) in H_GRUPOS.items():
                 t_opt = time.time()
-                hp_grupos[grupo], hp_meta = optuna_tune_h(h_rep, df, fold, cols_feat)
+                hp_grupos[grupo], hp_meta = optuna_tune_h(
+                    h_rep, df, fold, cols_feat,
+                    prev_best_params=prev_hp_por_grupo[grupo],
+                )
+                # Guardar para el próximo fold (solo si warm start activo)
+                if OPTUNA_WARM_START:
+                    prev_hp_por_grupo[grupo] = hp_grupos[grupo]
                 elapsed_opt = time.time() - t_opt
                 hp_g = hp_grupos[grupo]
                 print(
