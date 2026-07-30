@@ -392,12 +392,24 @@ class _PinballEarlyStopping(xgb.callback.TrainingCallback):
     Reemplaza xgb.callback.EarlyStopping porque ese callback busca el nombre
     de la métrica en un dict plano ("val-pinball"), pero XGBoost con
     custom_metric lo almacena en estructura anidada: evals_log["val"]["pinball"].
+
+    NOTA: xgb.train() no revierte el modelo al mejor iteration cuando un
+    callback corta — deja TODOS los árboles entrenados, incluidos los
+    `rounds` posteriores al óptimo. Por eso se registra _best_iter y el
+    _ArcTanBooster lo usa como iteration_range al predecir; si no, cada
+    modelo arrastraría EARLY_STOPPING_ROUNDS árboles sobreajustados.
     """
     def __init__(self, rounds: int = 50):
         super().__init__()
-        self.rounds  = rounds
-        self._best   = float("inf")
-        self._since  = 0
+        self.rounds     = rounds
+        self._best      = float("inf")
+        self._best_iter = 0
+        self._since     = 0
+
+    @property
+    def best_iteration(self) -> int:
+        """Epoch (0-based) donde el pinball de validación fue mínimo."""
+        return self._best_iter
 
     def after_iteration(self, model, epoch, evals_log):
         score = None
@@ -408,8 +420,9 @@ class _PinballEarlyStopping(xgb.callback.TrainingCallback):
         if score is None:
             return False
         if score < self._best - 1e-9:
-            self._best  = score
-            self._since = 0
+            self._best      = score
+            self._best_iter = epoch
+            self._since     = 0
         else:
             self._since += 1
         return self._since >= self.rounds
@@ -420,12 +433,23 @@ class _ArcTanBooster:
     Wrapper mínimo sobre xgb.Booster para exponer .predict(X_df) compatible
     con XGBRegressor — permite usar xgb.train() con objetivo custom sin
     modificar el resto del pipeline (diagnosticar_h, scaffolds, métricas).
+
+    best_iter — epoch óptimo reportado por _PinballEarlyStopping. Se usa como
+    iteration_range al predecir para descartar los árboles entrenados después
+    del óptimo (xgb.train no revierte el modelo por sí solo). None cuando no
+    hubo eval set: en ese caso se usan todos los árboles.
     """
-    def __init__(self, booster: "xgb.Booster"):
+    def __init__(self, booster: "xgb.Booster", best_iter: int | None = None):
         self._b = booster
+        self._best_iter = best_iter
 
     def predict(self, X) -> np.ndarray:
-        return self._b.predict(xgb.DMatrix(X))
+        d = xgb.DMatrix(X)
+        # No se pasa iteration_range=None: el default varía entre versiones de
+        # XGBoost ((0,0) en 2.0, None en 2.1+). Se omite el kwarg si no aplica.
+        if self._best_iter is None:
+            return self._b.predict(d)
+        return self._b.predict(d, iteration_range=(0, self._best_iter + 1))
 
     def get_booster(self) -> "xgb.Booster":
         """Compatibilidad con XGBRegressor.get_booster() — usado en gain y SHAP."""
@@ -433,7 +457,9 @@ class _ArcTanBooster:
 
     @property
     def best_iteration(self) -> int:
-        return self._b.num_boosted_rounds()
+        if self._best_iter is not None:
+            return self._best_iter
+        return self._b.num_boosted_rounds() - 1
 
 
 # Claves de HP que xgb.train() acepta en params (excluye sklearn-only)
@@ -491,7 +517,7 @@ def entrenar_modelos_h(
             # causa early stopping prematuro: el _best de Q01 (~30 MM) es mucho
             # menor que el pinball inicial de Q05 (~160 MM), disparando stop en
             # EARLY_STOPPING_ROUNDS iteraciones aunque Q05 aún no haya convergido.
-            cbs = [_PinballEarlyStopping(rounds=EARLY_STOPPING_ROUNDS)] if use_es else []
+            cb  = _PinballEarlyStopping(rounds=EARLY_STOPPING_ROUNDS) if use_es else None
             booster = xgb.train(
                 params,
                 dtrain,
@@ -499,10 +525,13 @@ def entrenar_modelos_h(
                 obj=_make_quantile_objective(tau, s, std_y),
                 custom_metric=_make_pinball_metric(tau) if use_es else None,
                 evals=evals,
-                callbacks=cbs,
+                callbacks=[cb] if cb is not None else [],
                 verbose_eval=False,
             )
-            modelos[tau] = _ArcTanBooster(booster)
+            # best_iter recorta los árboles posteriores al óptimo de VAL
+            modelos[tau] = _ArcTanBooster(
+                booster, best_iter=cb.best_iteration if cb is not None else None
+            )
 
     else:
         # ── Rama estándar: XGBRegressor con reg:quantileerror ────────────────
@@ -1326,6 +1355,7 @@ def optuna_tune_h(
             _dtrain = xgb.DMatrix(X_tr, label=y_tr_arr)
             _dval   = xgb.DMatrix(X_vl, label=y_vl_arr)
             for tau in TAUS:
+                _cb = _PinballEarlyStopping(rounds=EARLY_STOPPING_ROUNDS)
                 booster = xgb.train(
                     _params,
                     _dtrain,
@@ -1333,10 +1363,14 @@ def optuna_tune_h(
                     obj=_make_quantile_objective(tau, _s, _std_y_opt),
                     custom_metric=_make_pinball_metric(tau),
                     evals=[(_dval, "val")],
-                    callbacks=[_PinballEarlyStopping(rounds=EARLY_STOPPING_ROUNDS)],
+                    callbacks=[_cb],
                     verbose_eval=False,
                 )
-                preds_vl = booster.predict(_dval)
+                # Mismo recorte que en entrenar_modelos_h: sin iteration_range,
+                # Optuna evaluaría modelos sobreajustados y elegiría HP erróneos
+                preds_vl = booster.predict(
+                    _dval, iteration_range=(0, _cb.best_iteration + 1)
+                )
                 total_loss += _pinball(y_vl_arr, preds_vl, tau)
         else:
             # Estándar: XGBRegressor con reg:quantileerror
@@ -1827,10 +1861,18 @@ def run(banco: str = BANCO) -> None:
                 {tau: m.predict(X_val) for tau, m in modelos.items()}
                 if len(X_val) > 0 else None
             )
-            resultados.append(calcular_metricas(
+            _row_met = calcular_metricas(
                 preds_for_metrics, y_test.values, h_val, fold["fold"],
                 preds_val_for_metrics, y_val.values if len(X_val) > 0 else None,
-            ))
+            )
+            # Árboles efectivos tras early stopping — diagnostica si
+            # N_ESTIMATORS_MAX es holgado y si el recorte por best_iter opera
+            for tau, model in modelos.items():
+                _bi = getattr(model, "best_iteration", None)
+                if _bi is not None:
+                    _c = "mean" if tau == "mean" else f"q{int(tau * 100):02d}"
+                    _row_met[f"n_trees_{_c}"] = int(_bi) + 1
+            resultados.append(_row_met)
 
             if DIAG_FEATURES:
                 diag_rows.append(
@@ -1957,6 +1999,22 @@ def run(banco: str = BANCO) -> None:
         if "crps" in df_res.columns:
             print("\nCRPS medio por grupo de horizonte (MM USD):")
             print((df_res.groupby("h_grupo", observed=True)["crps"].mean() / 1e6).round(4))
+
+        tree_cols = sorted([c for c in df_res.columns if c.startswith("n_trees_")])
+        if tree_cols:
+            print(f"\nÁrboles efectivos tras early stopping "
+                  f"(techo N_ESTIMATORS_MAX={N_ESTIMATORS_MAX}, "
+                  f"paciencia={EARLY_STOPPING_ROUNDS}):")
+            _tr = df_res[tree_cols].mean().round(1)
+            _tr.index = [c.replace("n_trees_", "") for c in _tr.index]
+            print(_tr.to_string())
+            _mx = float(df_res[tree_cols].max().max())
+            if _mx >= N_ESTIMATORS_MAX:
+                print(f"  ⚠  Algún modelo agotó el techo ({int(_mx)}) — "
+                      f"considera subir N_ESTIMATORS_MAX.")
+            else:
+                print(f"  ✓  Máximo observado {int(_mx)} < {N_ESTIMATORS_MAX} "
+                      f"— el techo no limita.")
 
         calib_cols = sorted([c for c in df_res.columns if c.startswith("calib_q")])
         if calib_cols:
