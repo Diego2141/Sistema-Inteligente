@@ -1572,7 +1572,8 @@ def run(banco: str = BANCO) -> None:
     # Output dir created early so per-fold parquets can be written immediately
     # El sufijo _arctan separa los resultados del objetivo suavizado para comparación
     _arctan_sfx = "_arctan" if AJUSTE_ARCTAN else ""
-    DIR_MODO = DIR_OUTPUT / f"fold{'_exp' if EXPANDING else '_roll'}{_arctan_sfx}"
+    _modo_base  = "exp" if EXPANDING else "roll"
+    DIR_MODO = DIR_OUTPUT / f"fold_{_modo_base}{_arctan_sfx}"
     DIR_MODO.mkdir(parents=True, exist_ok=True)
     fecha_hoy = date.today().strftime("%Y%m%d")
 
