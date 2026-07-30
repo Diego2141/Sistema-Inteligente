@@ -854,6 +854,7 @@ def guardar_hp_report(
     """
     if not hp_rows:
         return
+    _n_trials = OPTUNA_N_TRIALS_ARCTAN if AJUSTE_ARCTAN else OPTUNA_N_TRIALS
     try:
         import matplotlib.pyplot as plt
         import matplotlib.ticker as mticker
@@ -888,7 +889,7 @@ def guardar_hp_report(
 
     fig1.suptitle(
         f"Convergencia Optuna por grupo — {banco}\n"
-        f"Curva 'mejor hasta trial t' · {OPTUNA_N_TRIALS} trials · "
+        f"Curva 'mejor hasta trial t' · {_n_trials} trials · "
         f"¿converge antes del último trial?",
         fontsize=11, fontweight="bold", y=1.01,
     )
@@ -921,8 +922,8 @@ def guardar_hp_report(
         ax.xaxis.set_major_locator(mticker.MultipleLocator(5))
         ax.grid(True, alpha=0.25)
         # línea vertical en N_TRIALS para referencia
-        ax.axvline(OPTUNA_N_TRIALS, color="#DC2626", lw=1.2, ls="--", alpha=0.6,
-                   label=f"N_TRIALS={OPTUNA_N_TRIALS}")
+        ax.axvline(_n_trials, color="#DC2626", lw=1.2, ls="--", alpha=0.6,
+                   label=f"N_TRIALS={_n_trials}")
         ax.legend(fontsize=7, loc="upper right")
 
     plt.tight_layout()
@@ -1031,16 +1032,16 @@ def guardar_hp_report(
         p50 = int(np.percentile(last_improvement_stats, 50))
         p90 = int(np.percentile(last_improvement_stats, 90))
         print(
-            f"\nDiagnóstico OPTUNA_N_TRIALS={OPTUNA_N_TRIALS}:"
+            f"\nDiagnóstico OPTUNA_N_TRIALS={_n_trials}:"
             f"  última mejora mediana en trial #{p50},"
             f"  p90 en trial #{p90}."
         )
-        if p90 >= OPTUNA_N_TRIALS - 2:
+        if p90 >= _n_trials - 2:
             print(
               "  ⚠  La convergencia llega hasta el final — considera aumentar OPTUNA_N_TRIALS.")
         else:
             print(
-              f"  ✓  Converge bien antes del límite ({p90} < {OPTUNA_N_TRIALS}).")
+              f"  ✓  Converge bien antes del límite ({p90} < {_n_trials}).")
 
     print(f"[OK] HP report guardado en: {dir_modo}")
 
@@ -1608,7 +1609,8 @@ def run(banco: str = BANCO) -> None:
         # ── Optuna: buscar HP por grupo de h (Opción C) ──────────────────────
         if USE_OPTUNA and _OPTUNA_OK:
             ws_tag = " · warm_start=ON" if OPTUNA_WARM_START else " · warm_start=OFF"
-            print(f"  Buscando HP con Optuna ({OPTUNA_N_TRIALS} trials × 4 grupos{ws_tag})…")
+            _n_trials_fold = OPTUNA_N_TRIALS_ARCTAN if AJUSTE_ARCTAN else OPTUNA_N_TRIALS
+            print(f"  Buscando HP con Optuna ({_n_trials_fold} trials × 4 grupos{ws_tag})…")
             hp_grupos: dict = {}
             for grupo, (_, h_rep) in H_GRUPOS.items():
                 t_opt = time.time()
