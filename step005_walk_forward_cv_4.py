@@ -942,7 +942,10 @@ def guardar_hp_report(
         "reg_lambda"      : "reg_lambda (L2)",
         "subsample"       : "subsample",
         "colsample_bytree": "colsample_bytree",
+        "s_factor"        : "s_factor (Arctan)",
     }
+    if AJUSTE_ARCTAN:
+        hp_names.append("s_factor")
 
     n_hp  = len(hp_names)
     ncols = 4
@@ -978,6 +981,9 @@ def guardar_hp_report(
         ax.set_title(hp_labels[hp], fontsize=9, fontweight="bold")
         ax.set_xlabel("Fold", fontsize=8)
         ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+        if hp == "s_factor":
+            ax.set_yscale("log")
+            ax.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.3f"))
         ax.grid(True, alpha=0.22)
         ax.legend(fontsize=7, loc="best")
 
@@ -996,13 +1002,15 @@ def guardar_hp_report(
     col_print = ["fold", "grupo", "h_rep",
                  "max_depth", "min_child_weight", "learning_rate",
                  "reg_alpha", "reg_lambda", "subsample", "colsample_bytree",
-                 "best_pinball_val"]
+                 "s_factor", "best_pinball_val"]
     df_show = df_hp[[c for c in col_print if c in df_hp.columns]].copy()
     df_show["learning_rate"]   = df_show["learning_rate"].map("{:.4f}".format)
     df_show["reg_alpha"]       = df_show["reg_alpha"].map("{:.3f}".format)
     df_show["reg_lambda"]      = df_show["reg_lambda"].map("{:.3f}".format)
     df_show["subsample"]       = df_show["subsample"].map("{:.3f}".format)
     df_show["colsample_bytree"]= df_show["colsample_bytree"].map("{:.3f}".format)
+    if "s_factor" in df_show.columns:
+        df_show["s_factor"] = df_show["s_factor"].map(lambda x: f"{x:.4f}" if x is not None else "—")
     df_show["best_pinball_val"]= df_show["best_pinball_val"].map("{:.4f}".format)
     print(df_show.to_string(index=False))
 
@@ -1639,6 +1647,7 @@ def run(banco: str = BANCO) -> None:
                     "reg_lambda"      : hp_g.get("reg_lambda"),
                     "subsample"       : hp_g.get("subsample"),
                     "colsample_bytree": hp_g.get("colsample_bytree"),
+                    "s_factor"        : hp_g.get("s_factor"),
                 })
         else:
             if USE_OPTUNA and not _OPTUNA_OK:
