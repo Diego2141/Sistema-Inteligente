@@ -114,6 +114,18 @@ AJUSTE_ARCTAN       = True
 OPTUNA_N_TRIALS_ARCTAN = 40  # trials cuando AJUSTE_ARCTAN=True (vs 30 base)
                                # +10 para compensar el HP extra s_factor
 
+# Cómo se decide el número de árboles en la rama arctan:
+# True  → Optuna busca n_estimators. Una sola decisión compartida por los 7 taus,
+#         acoplada con learning_rate en el mismo espacio (la capacidad efectiva
+#         de un GBM va como η·T; con early stopping Optuna controla η pero sufre
+#         T como ruido). Además promedia 7 curvas de pinball en vez de tomar 7
+#         decisiones independientes sobre 121 filas de VAL → menos varianza.
+# False → early stopping por modelo sobre el pinball de VAL.
+# Solo aplica con AJUSTE_ARCTAN=True; la rama estándar usa el early stopping
+# nativo de XGBRegressor, que sí restaura best_iteration correctamente.
+OPTUNA_N_ESTIMATORS = True
+N_ESTIMATORS_RANGE  = (50, 400)   # rango de búsqueda de n_estimators (escala log)
+
 # Grupos de h y sus representantes para Optuna (Opción C)
 # Un solo h "típico" por grupo → HP se buscan ahí y se transfieren a todo el grupo
 # muy_corto separado: banco pre-reporta retiros a t+2 y depósitos a t+1 →
@@ -510,6 +522,11 @@ def entrenar_modelos_h(
         dtrain = xgb.DMatrix(X_train, label=y_train)
         dval   = xgb.DMatrix(X_val,   label=y_val) if use_es else None
         evals  = [(dval, "val")] if use_es else []
+        # Con OPTUNA_N_ESTIMATORS el número de rondas ya viene de Optuna:
+        # no hay early stopping por modelo, así que evals/custom_metric solo
+        # serían coste (una predicción sobre VAL por ronda de boosting).
+        n_rounds = int(hp.get("n_estimators", N_ESTIMATORS_MAX))
+        usar_es  = use_es and not OPTUNA_N_ESTIMATORS
 
         for tau in TAUS:
             # IMPORTANTE: nueva instancia por tau — _PinballEarlyStopping tiene
@@ -517,14 +534,14 @@ def entrenar_modelos_h(
             # causa early stopping prematuro: el _best de Q01 (~30 MM) es mucho
             # menor que el pinball inicial de Q05 (~160 MM), disparando stop en
             # EARLY_STOPPING_ROUNDS iteraciones aunque Q05 aún no haya convergido.
-            cb  = _PinballEarlyStopping(rounds=EARLY_STOPPING_ROUNDS) if use_es else None
+            cb  = _PinballEarlyStopping(rounds=EARLY_STOPPING_ROUNDS) if usar_es else None
             booster = xgb.train(
                 params,
                 dtrain,
-                num_boost_round=N_ESTIMATORS_MAX,
+                num_boost_round=n_rounds,
                 obj=_make_quantile_objective(tau, s, std_y),
-                custom_metric=_make_pinball_metric(tau) if use_es else None,
-                evals=evals,
+                custom_metric=_make_pinball_metric(tau) if usar_es else None,
+                evals=evals if usar_es else [],
                 callbacks=[cb] if cb is not None else [],
                 verbose_eval=False,
             )
@@ -1063,9 +1080,12 @@ def guardar_hp_report(
         "subsample"       : "subsample",
         "colsample_bytree": "colsample_bytree",
         "s_factor"        : "s_factor (Arctan)",
+        "n_estimators"    : "n_estimators (árboles)",
     }
     if AJUSTE_ARCTAN:
         hp_names.append("s_factor")
+        if OPTUNA_N_ESTIMATORS:
+            hp_names.append("n_estimators")
 
     n_hp  = len(hp_names)
     ncols = 4
@@ -1073,7 +1093,9 @@ def guardar_hp_report(
     fig2, axes2 = plt.subplots(nrows, ncols,
                                 figsize=(ncols * 4.2, nrows * 3.2),
                                 gridspec_kw={"hspace": 0.55, "wspace": 0.38})
-    axes2_flat = axes2.flat if nrows > 1 else list(axes2)
+    # list(...) y no axes2.flat: flat es un iterador y el zip() de abajo lo
+    # consumiría, dejando vacío el slice que oculta los paneles sobrantes
+    axes2_flat = list(axes2.flat) if nrows > 1 else list(axes2)
 
     fig2.suptitle(
         f"Estabilidad de Hiperparámetros por fold — {banco}\n"
@@ -1122,7 +1144,7 @@ def guardar_hp_report(
     col_print = ["fold", "grupo", "h_rep",
                  "max_depth", "min_child_weight", "learning_rate",
                  "reg_alpha", "reg_lambda", "subsample", "colsample_bytree",
-                 "s_factor", "best_pinball_val"]
+                 "s_factor", "n_estimators", "best_pinball_val"]
     df_show = df_hp[[c for c in col_print if c in df_hp.columns]].copy()
     df_show["learning_rate"]   = df_show["learning_rate"].map("{:.4f}".format)
     df_show["reg_alpha"]       = df_show["reg_alpha"].map("{:.3f}".format)
@@ -1295,8 +1317,17 @@ def optuna_tune_h(
     prev_best_params: dict | None = None,
 ) -> tuple:
     """
-    Busca HP óptimos en el h representativo del grupo usando Optuna + early stopping.
-    Espacio de búsqueda: 7 HP de regularización/árbol; n_estimators lo decide early stopping.
+    Busca HP óptimos en el h representativo del grupo usando Optuna.
+    Espacio de búsqueda: 7 HP de regularización/árbol, más s_factor cuando
+    AJUSTE_ARCTAN=True y n_estimators cuando además OPTUNA_N_ESTIMATORS=True.
+
+    Sobre n_estimators: con early stopping por modelo, Optuna elige learning_rate
+    sin controlar el número de árboles, pese a que la capacidad efectiva de un GBM
+    va como η·T — queda una dirección degenerada en el espacio de búsqueda. Además
+    se toman 7 decisiones de parada independientes sobre las mismas ~121 filas de
+    VAL, cada una en el mínimo de una curva ruidosa (sesgo del mínimo empírico).
+    Buscando n_estimators se explora el plano (η, T) explícitamente y la decisión
+    pasa a apoyarse en el promedio de las 7 curvas de pinball.
 
     Parameters
     ----------
@@ -1347,30 +1378,45 @@ def optuna_tune_h(
         total_loss = 0.0
 
         if AJUSTE_ARCTAN:
-            # Arctan: xgb.train() + _PinballEarlyStopping por tau
             # s_factor siempre buscado por Optuna en [0.01, 1.0] log
             _sf     = trial.suggest_float("s_factor", 0.01, 1.0, log=True)
             _s      = _sf * _std_y_opt
+            if OPTUNA_N_ESTIMATORS:
+                _n_est = trial.suggest_int("n_estimators", *N_ESTIMATORS_RANGE, log=True)
+                hp_trial["n_estimators"] = _n_est   # viaja al modelo final
+            else:
+                _n_est = N_ESTIMATORS_MAX
             _params = _hp_para_xgb_train(hp_trial)
             _dtrain = xgb.DMatrix(X_tr, label=y_tr_arr)
             _dval   = xgb.DMatrix(X_vl, label=y_vl_arr)
             for tau in TAUS:
-                _cb = _PinballEarlyStopping(rounds=EARLY_STOPPING_ROUNDS)
-                booster = xgb.train(
-                    _params,
-                    _dtrain,
-                    num_boost_round=N_ESTIMATORS_MAX,
-                    obj=_make_quantile_objective(tau, _s, _std_y_opt),
-                    custom_metric=_make_pinball_metric(tau),
-                    evals=[(_dval, "val")],
-                    callbacks=[_cb],
-                    verbose_eval=False,
-                )
-                # Mismo recorte que en entrenar_modelos_h: sin iteration_range,
-                # Optuna evaluaría modelos sobreajustados y elegiría HP erróneos
-                preds_vl = booster.predict(
-                    _dval, iteration_range=(0, _cb.best_iteration + 1)
-                )
+                if OPTUNA_N_ESTIMATORS:
+                    # n fijo por trial → sin callbacks/evals/custom_metric
+                    booster = xgb.train(
+                        _params,
+                        _dtrain,
+                        num_boost_round=_n_est,
+                        obj=_make_quantile_objective(tau, _s, _std_y_opt),
+                        verbose_eval=False,
+                    )
+                    preds_vl = booster.predict(_dval)
+                else:
+                    # Early stopping por modelo: hay que recortar al óptimo, si no
+                    # Optuna evaluaría modelos sobreajustados y elegiría HP erróneos
+                    _cb = _PinballEarlyStopping(rounds=EARLY_STOPPING_ROUNDS)
+                    booster = xgb.train(
+                        _params,
+                        _dtrain,
+                        num_boost_round=N_ESTIMATORS_MAX,
+                        obj=_make_quantile_objective(tau, _s, _std_y_opt),
+                        custom_metric=_make_pinball_metric(tau),
+                        evals=[(_dval, "val")],
+                        callbacks=[_cb],
+                        verbose_eval=False,
+                    )
+                    preds_vl = booster.predict(
+                        _dval, iteration_range=(0, _cb.best_iteration + 1)
+                    )
                 total_loss += _pinball(y_vl_arr, preds_vl, tau)
         else:
             # Estándar: XGBRegressor con reg:quantileerror
@@ -1402,6 +1448,8 @@ def optuna_tune_h(
                         "learning_rate", "subsample", "colsample_bytree"}
         if AJUSTE_ARCTAN:
             _search_keys = _search_keys | {"s_factor"}   # s_factor siempre buscado
+            if OPTUNA_N_ESTIMATORS:
+                _search_keys = _search_keys | {"n_estimators"}
         warm_params = {k: v for k, v in prev_best_params.items() if k in _search_keys}
         if warm_params:
             study.enqueue_trial(warm_params)
@@ -1432,12 +1480,13 @@ def optuna_tune_h(
 
     hp_dict = {
         **best,                        # HP encontrados por Optuna
-        "n_estimators": N_ESTIMATORS_MAX,
         "tree_method" : "hist",
         "max_bin"     : 64,
         "n_jobs"      : 1,
         "random_state": 42,
     }
+    # Si OPTUNA_N_ESTIMATORS=True, `best` ya trae n_estimators; si no, se usa el techo
+    hp_dict.setdefault("n_estimators", N_ESTIMATORS_MAX)
     return hp_dict, hp_meta
 
 
@@ -1774,6 +1823,7 @@ def run(banco: str = BANCO) -> None:
                     "subsample"       : hp_g.get("subsample"),
                     "colsample_bytree": hp_g.get("colsample_bytree"),
                     "s_factor"        : hp_g.get("s_factor"),
+                    "n_estimators"    : hp_g.get("n_estimators"),
                 })
         else:
             if USE_OPTUNA and not _OPTUNA_OK:
