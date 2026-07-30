@@ -111,8 +111,10 @@ DEBUG_SINGLE_FOLD   = False
 AJUSTE_ARCTAN       = True
 # Cuando AJUSTE_ARCTAN=True, Optuna siempre estima s_factor en [0.01, 1.0] (log)
 # s = s_factor × std_y(y_train del h) — rango cubre desde muy suavizado a muy agudo
-OPTUNA_N_TRIALS_ARCTAN = 40  # trials cuando AJUSTE_ARCTAN=True (vs 30 base)
-                               # +10 para compensar el HP extra s_factor
+OPTUNA_N_TRIALS_ARCTAN = 50  # trials cuando AJUSTE_ARCTAN=True (vs 30 base)
+                               # 50 (antes 40): con OPTUNA_N_ESTIMATORS=True el
+                               # espacio tiene 9 HP (7 base + s_factor + n_estimators)
+                               # y el diagnóstico daba p90 en el trial #36 de 40
 
 # Cómo se decide el número de árboles en la rama arctan:
 # True  → Optuna busca n_estimators. Una sola decisión compartida por los 7 taus,
