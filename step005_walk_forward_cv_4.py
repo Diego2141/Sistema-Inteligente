@@ -1317,6 +1317,7 @@ def optuna_tune_h(
     fold: dict,
     cols_feat: list[str],
     prev_best_params: dict | None = None,
+    grupo_idx: int = 0,
 ) -> tuple:
     """
     Busca HP óptimos en el h representativo del grupo usando Optuna.
@@ -1338,6 +1339,11 @@ def optuna_tune_h(
         Si OPTUNA_WARM_START=True y prev_best_params no es None, se inyecta como
         trial 0 (study.enqueue_trial) para que el TPE parta de una región prometedora.
         Si es None o OPTUNA_WARM_START=False, comportamiento original (exploración libre).
+    grupo_idx : int
+        Índice del grupo de h (0..len(H_GRUPOS)-1). Entra en la semilla del TPE
+        para que cada grupo explore una secuencia distinta: con una semilla común
+        los ~10 trials de la fase aleatoria eran idénticos en los 4 grupos y dos
+        de ellos podían converger al mismo punto exacto del espacio.
 
     Returns
     -------
@@ -1436,10 +1442,13 @@ def optuna_tune_h(
         return total_loss / len(TAUS)   # media de pinball entre cuantiles
 
     # Seed distinta por fold para que la exploración inicial (fase aleatoria del TPE)
-    # no sea idéntica entre folds — antes todos arrancaban con seed=42.
+    # Semilla distinta por (fold, grupo): el *10 deja hueco para hasta 10 grupos
+    # sin colisiones. Antes era 42+fold, igual para los 4 grupos → los ~10 trials
+    # de la fase aleatoria del TPE eran idénticos entre grupos y la exploración
+    # efectiva era menor que la nominal.
     study = optuna.create_study(
         direction="minimize",
-        sampler=optuna.samplers.TPESampler(seed=42 + fold["fold"]),
+        sampler=optuna.samplers.TPESampler(seed=42 + fold["fold"] * 10 + grupo_idx),
     )
 
     # Warm start: inyectar los HP óptimos del fold anterior como trial 0.
@@ -1787,11 +1796,12 @@ def run(banco: str = BANCO) -> None:
             _n_trials_fold = OPTUNA_N_TRIALS_ARCTAN if AJUSTE_ARCTAN else OPTUNA_N_TRIALS
             print(f"  Buscando HP con Optuna ({_n_trials_fold} trials × 4 grupos{ws_tag})…")
             hp_grupos: dict = {}
-            for grupo, (_, h_rep) in H_GRUPOS.items():
+            for _gi, (grupo, (_, h_rep)) in enumerate(H_GRUPOS.items()):
                 t_opt = time.time()
                 hp_grupos[grupo], hp_meta = optuna_tune_h(
                     h_rep, df, fold, cols_feat,
                     prev_best_params=prev_hp_por_grupo[grupo],
+                    grupo_idx=_gi,
                 )
                 # Guardar para el próximo fold (solo si warm start activo)
                 if OPTUNA_WARM_START:
