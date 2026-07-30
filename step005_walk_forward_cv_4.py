@@ -86,8 +86,12 @@ MIN_TRAIN_ROWS      = 50
 # ---------------------------------------------------------------------------
 # Early stopping + Optuna
 # ---------------------------------------------------------------------------
-N_ESTIMATORS_MAX      = 300   # techo de árboles; early stopping lo reduce en práctica
-EARLY_STOPPING_ROUNDS = 10    # parar si val loss no mejora en N rondas consecutivas
+N_ESTIMATORS_MAX      = 500   # techo de árboles; early stopping lo reduce en práctica
+                               # 500 (antes 300): con learning_rate=0.03 (mínimo del
+                               # espacio Optuna) 300 árboles no alcanzan a converger
+EARLY_STOPPING_ROUNDS = 30    # parar si val loss no mejora en N rondas consecutivas
+                               # 30 (antes 10): la curva de pinball en VAL tiene alta
+                               # varianza — 10 rondas detenía en mínimos locales
 
 USE_OPTUNA          = True   # False → HP fijos para todos los h (más rápido, sin optuna)
 OPTUNA_N_TRIALS     = 30     # trials por h representativo por fold
@@ -303,6 +307,24 @@ def preparar_fold_data_h(
     if n_test == 0:
         raise ValueError("Sin filas de test para este fold/h")
 
+    # ── Verificación anti-leakage ────────────────────────────────────────────
+    # Ningún par de particiones puede compartir filas. Se lanza AssertionError
+    # (no ValueError) a propósito: los except ValueError del h-loop y de
+    # optuna_tune_h saltan el horizonte silenciosamente, pero un leakage debe
+    # detener el run completo — no tiene sentido gastar horas con datos filtrados.
+    for (mask_a, name_a), (mask_b, name_b) in (
+        ((mt, "TRAIN"), (mv,  "VAL")),
+        ((mt, "TRAIN"), (mte, "TEST")),
+        ((mv, "VAL"),   (mte, "TEST")),
+    ):
+        n_overlap = int((mask_a & mask_b).sum())
+        if n_overlap:
+            raise AssertionError(
+                f"Leakage: {n_overlap} filas solapan {name_a} y {name_b} "
+                f"(h={df_h['h'].iloc[0] if len(df_h) else '?'}) — "
+                f"revisar GAP_DIAS_HAB={GAP_DIAS_HAB}"
+            )
+
     X_train = df_h.loc[mt, cols_feat]
     y_train = df_h.loc[mt, "target"]
 
@@ -499,11 +521,16 @@ def entrenar_modelos_h(
             modelos[tau] = m
 
     # ── Media: siempre reg:squarederror (sin arctan) ─────────────────────────
+    # s_factor solo alimenta _make_quantile_objective; XGBRegressor no lo
+    # reconoce y lo reenviaría al backend C++ como parámetro desconocido.
+    # Se filtra únicamente esa clave: n_estimators / random_state / n_jobs sí
+    # son válidos para la API sklearn (a diferencia de _hp_para_xgb_train).
+    _hp_mean = {k: v for k, v in hp.items() if k != "s_factor"}
     m_mean = xgb.XGBRegressor(
         objective="reg:squarederror",
         eval_metric="rmse",
         early_stopping_rounds=EARLY_STOPPING_ROUNDS if use_es else None,
-        **hp,
+        **_hp_mean,
     )
     if use_es:
         m_mean.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
@@ -582,7 +609,13 @@ def calcular_metricas(
         if len(tau_pinballs_val) >= 2:
             sorted_taus_v = sorted(tau_pinballs_val.keys())
             pb_arr_v = np.array([tau_pinballs_val[t] for t in sorted_taus_v])
-            row["val_crps"] = float(2.0 * np.trapz(pb_arr_v, sorted_taus_v))
+            # Corrección de colas: pinball(τ=0) = pinball(τ=1) = 0 por definición,
+            # así que los tramos [0, τ_min] y [τ_max, 1] son triángulos.
+            _tail_v = (0.5 * sorted_taus_v[0]          * pb_arr_v[0] +
+                       0.5 * (1.0 - sorted_taus_v[-1]) * pb_arr_v[-1])
+            row["val_crps"] = float(
+                2.0 * (np.trapz(pb_arr_v, sorted_taus_v) + _tail_v)
+            )
 
     # ── Winkler Score: W = (U-L) + (2/α)*[max(0,L-y) + max(0,y-U)] ──────────
     if 0.05 in preds_dict and 0.95 in preds_dict:
@@ -600,10 +633,15 @@ def calcular_metricas(
         row["winkler_98"] = float((width + penalty).mean())
 
     # ── CRPS ≈ 2 * ∫₀¹ pinball_τ dτ  (integración trapezoidal, 7 cuantiles) ──
+    # np.trapz solo cubre [τ_min, τ_max] = [0.01, 0.99]. Los tramos [0, 0.01] y
+    # [0.99, 1] son triángulos porque pinball(τ=0) = pinball(τ=1) = 0; omitirlos
+    # subestimaba el CRPS de forma sistemática.
     if len(tau_pinballs) >= 2:
         sorted_taus = sorted(tau_pinballs.keys())
         pb_arr = np.array([tau_pinballs[t] for t in sorted_taus])
-        row["crps"] = float(2.0 * np.trapz(pb_arr, sorted_taus))
+        _tail = (0.5 * sorted_taus[0]          * pb_arr[0] +
+                 0.5 * (1.0 - sorted_taus[-1]) * pb_arr[-1])
+        row["crps"] = float(2.0 * (np.trapz(pb_arr, sorted_taus) + _tail))
 
     # ── Calibración hit-rate por cuantil (empírico debe ≈ tau nominal) ────────
     for tau, preds in preds_dict.items():
