@@ -94,6 +94,11 @@ OPTUNA_N_TRIALS     = 30     # trials por h representativo por fold
 OPTUNA_WARM_START   = True   # True → inyecta el HP óptimo del fold anterior como trial 0
                               # False → cada fold parte desde cero (comportamiento original)
 
+# Modo debug: corre solo el primer fold para verificar el pipeline rápidamente
+# True  → ejecuta únicamente fold 1 (el más antiguo); ideal para probar cambios
+# False → corre todos los folds (comportamiento normal)
+DEBUG_SINGLE_FOLD   = False
+
 # Objetivo suavizado Pinball-Arctan (paper 2406.02293)
 # True  → reemplaza reg:quantileerror por gradiente/hessiana suavizados
 #          grad ∝ arctan(u/s)/π + ... | hess = ((s²+σ²)/(s²+u²))² > 0 siempre
@@ -1579,7 +1584,11 @@ def run(banco: str = BANCO) -> None:
 
     fold_parquet_paths: list[Path] = []
 
-    for fold in folds:
+    folds_run = folds[:1] if DEBUG_SINGLE_FOLD else folds
+    if DEBUG_SINGLE_FOLD:
+        print(f"\n[DEBUG_SINGLE_FOLD=True] Corriendo solo fold {folds_run[0]['fold']} de {len(folds)}")
+
+    for fold in folds_run:
         t0_fold = time.time()
         print(f"\n{'='*60}")
         print(
