@@ -1370,7 +1370,14 @@ def optuna_tune_h(
         hp_trial = {
             # ── HP buscados ────────────────────────────────────────────────
             "max_depth"       : trial.suggest_int(  "max_depth",         2,    5),
-            "min_child_weight": trial.suggest_int(  "min_child_weight",   3,   20),
+            # Rango desde 0: el paper 2406.02293 (§Modeling choices, punto 2)
+            # recomienda min_child_weight=0 con la pérdida arctan, porque el
+            # umbral actúa sobre la SUMA DE HESSIANOS y aquí el hessiano no es
+            # constante. Con hess=1 en u=σ y 0.03 en u=3σ, un valor de 20 exige
+            # ~20 observaciones centrales pero ~700 de cola: los splits que
+            # aislarían las colas quedan bloqueados. Se amplía el rango en vez
+            # de fijarlo en 0 para que Optuna decida con la opción disponible.
+            "min_child_weight": trial.suggest_int(  "min_child_weight",   0,   20),
             "reg_alpha"       : trial.suggest_float("reg_alpha",         0.0,  2.0),
             "reg_lambda"      : trial.suggest_float("reg_lambda",        0.5,  5.0),
             "learning_rate"   : trial.suggest_float("learning_rate",    0.03, 0.15, log=True),
