@@ -836,20 +836,45 @@ def _consolidar_sincos_pivot(
     return pivot
 
 
-def _diag_gain_h(modelos: dict, cols_feat: list[str]) -> pd.Series:
-    """Gain promedio entre cuantiles (in-sample, solo informativo)."""
-    acum = {f: 0.0 for f in cols_feat}
-    n = 0
+def _tau_label(tau) -> str:
+    """Etiqueta canónica de un modelo: 'q01'…'q99' o 'mean'."""
+    return "mean" if tau == "mean" else f"q{int(tau * 100):02d}"
+
+
+def _orden_taus(modelos: dict) -> list:
+    """Cuantiles en orden ascendente y 'mean' al final."""
+    qs = sorted(t for t in modelos if t != "mean")
+    return qs + (["mean"] if "mean" in modelos else [])
+
+
+def _diag_gain_h(modelos: dict, cols_feat: list[str]) -> dict:
+    """
+    Participación de cada feature en la ganancia total del modelo, por cuantil.
+
+    Dos decisiones importantes:
+
+    1. Se usa `total_gain` y no `gain`. XGBoost define 'gain' como la ganancia
+       PROMEDIO de los splits que usan el feature, así que un feature usado una
+       sola vez en un split afortunado obtiene un valor enorme mientras que uno
+       usado en treinta splits de calidad media obtiene un valor moderado.
+       'total_gain' mide la contribución acumulada, que es lo que interesa.
+
+    2. Se normaliza a participación (share del total). El gain crudo va como
+       n·_scale², y _scale = σ·π(sf²+1)²/(2sf³) depende de std_y(h) y del
+       s_factor del grupo: entre grupos de un mismo fold hay hasta 5x de
+       diferencia sin que los datos cambien. Al dividir por la suma, ese factor
+       —común a todos los features del mismo modelo— se cancela y los valores
+       pasan a ser comparables entre horizontes, folds y cuantiles.
+
+    Returns {tau: Series de participaciones (suman 1)}
+    """
+    out: dict = {}
     for tau, model in modelos.items():
-        if tau == "mean":
-            continue
-        imp = model.get_booster().get_score(importance_type="gain")
-        for f in cols_feat:
-            acum[f] += float(imp.get(f, 0.0))
-        n += 1
-    if n:
-        acum = {f: v / n for f, v in acum.items()}
-    return pd.Series(acum, dtype=float)
+        imp = model.get_booster().get_score(importance_type="total_gain")
+        s = pd.Series({f: float(imp.get(f, 0.0)) for f in cols_feat}, dtype=float)
+        total = s.sum()
+        out[tau] = s / total if total > 0 else s
+    return out
 
 
 def _diag_perm_h(
@@ -857,8 +882,22 @@ def _diag_perm_h(
     X_val: pd.DataFrame,
     y_val: np.ndarray,
     cols_feat: list[str],
-) -> pd.Series:
-    """Block-permutation importance en VAL (OOS). Δpinball promedio entre cuantiles."""
+) -> dict:
+    """
+    Block-permutation importance en VAL (OOS), por cuantil.
+
+    Devuelve el Δloss RELATIVO a la pérdida base (Δloss / loss_base), que es
+    adimensional y por tanto comparable entre horizontes, folds y cuantiles.
+    No se normaliza a participación como gain y shap porque estos Δ pueden ser
+    NEGATIVOS —permutar un feature a veces mejora el loss por azar— y con
+    valores de signo mixto la suma puede acercarse a cero y las participaciones
+    explotan.
+
+    Para el modelo 'mean' la pérdida es el MSE, no el pinball: sus valores son
+    interpretables pero NO comparables con los de las filas de cuantiles.
+
+    Returns {tau: Series de Δloss relativo (con signo)}
+    """
     X = X_val[cols_feat].reset_index(drop=True).copy()
     y = np.asarray(y_val)
     n = len(X)
@@ -866,18 +905,21 @@ def _diag_perm_h(
     block_starts = np.arange(0, n, bs)
     rng = np.random.default_rng(42)
 
-    acum = pd.Series(0.0, index=cols_feat)
-    n_tau = 0
+    out: dict = {}
 
     # Pares sin/cos → se permutar conjuntamente con el mismo shuffle
     pairs     = _sincos_pairs(cols_feat)
     paired_cs = {c for (sc, cc) in pairs.values() for c in (sc, cc)}
 
     for tau, model in modelos.items():
+        # 'mean' se entrena con reg:squarederror → su pérdida natural es el MSE
         if tau == "mean":
-            continue
+            _loss = lambda yy, pp: float(np.mean((yy - pp) ** 2))
+        else:
+            _loss = lambda yy, pp, _t=tau: _pinball(yy, pp, _t)
+
         base_preds = model.predict(X)
-        base_loss  = _pinball(y, base_preds, tau)
+        base_loss  = _loss(y, base_preds)
 
         feat_deltas: dict[str, float] = {}
 
@@ -892,7 +934,7 @@ def _diag_perm_h(
                 new_col = np.concatenate([orig[s:s + bs] for s in perm])[:n]
                 Xp = X.copy()
                 Xp[c] = new_col
-                deltas.append(_pinball(y, model.predict(Xp), tau) - base_loss)
+                deltas.append(_loss(y, model.predict(Xp)) - base_loss)
             feat_deltas[c] = float(np.mean(deltas))
 
         # ── Pares sin/cos — permutación conjunta (mismo shuffle) ────────────
@@ -910,16 +952,15 @@ def _diag_perm_h(
                 Xp     = X.copy()
                 Xp[sin_c] = np.concatenate([orig_sin[s:s + bs] for s in perm])[:n]
                 Xp[cos_c] = np.concatenate([orig_cos[s:s + bs] for s in perm])[:n]
-                deltas.append(_pinball(y, model.predict(Xp), tau) - base_loss)
+                deltas.append(_loss(y, model.predict(Xp)) - base_loss)
             feat_deltas[sin_c] = float(np.mean(deltas))  # Δ joint completo
             feat_deltas[cos_c] = 0.0                     # placeholder; suma → Δ joint
 
-        acum = acum.add(pd.Series(feat_deltas), fill_value=0.0)
-        n_tau += 1
+        # Δ relativo a la pérdida base → adimensional
+        den = abs(base_loss) if base_loss != 0 else 1.0
+        out[tau] = pd.Series(feat_deltas).reindex(cols_feat).fillna(0.0) / den
 
-    if n_tau:
-        acum /= n_tau
-    return acum
+    return out
 
 
 def _shap_compat_booster(model):
@@ -955,39 +996,41 @@ def _diag_shap_h(
     modelos: dict,
     X_val: pd.DataFrame,
     cols_feat: list[str],
-) -> pd.Series:
-    """SHAP |mean| en VAL (OOS), promedio entre cuantiles."""
+) -> dict:
+    """
+    SHAP |mean| en VAL (OOS), por cuantil, normalizado a participación.
+
+    |shap| está en unidades del target; dividir por la suma lo vuelve
+    adimensional y comparable entre horizontes, folds y cuantiles.
+
+    Returns {tau: Series de participaciones (suman 1)}
+    """
     if not _SHAP_OK:
-        return pd.Series(np.nan, index=cols_feat)
+        return {}
 
     X = X_val[cols_feat].reset_index(drop=True)
     if DIAG_SHAP_MAX_SAMPLES and len(X) > DIAG_SHAP_MAX_SAMPLES:
         X = X.sample(DIAG_SHAP_MAX_SAMPLES, random_state=42)
 
-    acum = pd.Series(0.0, index=cols_feat)
-    n_tau = 0
+    out: dict = {}
 
     for tau, model in modelos.items():
-        if tau == "mean":
-            continue
         try:
             explainer = _shap_lib.TreeExplainer(_shap_compat_booster(model))
         except Exception as e:
-            log.debug("SHAP τ=%.2f falló [init]: %s", tau, e)
+            log.debug("SHAP %s falló [init]: %s", _tau_label(tau), e)
             continue
         try:
             # check_additivity=False evita la llamada interna a predict(ntree_limit=N)
             # que SHAP < 0.43 usa para validar que sum(SHAP) == predicción del modelo
             sv = explainer.shap_values(X, check_additivity=False)
-            s = pd.Series(np.abs(sv).mean(axis=0), index=cols_feat)
-            acum = acum.add(s.fillna(0.0), fill_value=0.0)
-            n_tau += 1
+            s = pd.Series(np.abs(sv).mean(axis=0), index=cols_feat).fillna(0.0)
+            total = s.sum()
+            out[tau] = s / total if total > 0 else s
         except Exception as e:
-            log.debug("SHAP τ=%.2f falló [values]: %s", tau, e)
+            log.debug("SHAP %s falló [values]: %s", _tau_label(tau), e)
 
-    if n_tau == 0:
-        return pd.Series(np.nan, index=cols_feat)
-    return acum / n_tau
+    return out
 
 
 def diagnosticar_h(
@@ -997,18 +1040,32 @@ def diagnosticar_h(
     cols_feat: list[str],
     fold_num: int,
     h_val: int,
-) -> dict:
-    """Devuelve dict {fold, h, gain_<feat>, perm_<feat>, shap_<feat>}."""
+) -> list[dict]:
+    """
+    Una fila por modelo (7 cuantiles + 'mean'):
+        {fold, h, tau, gain_<feat>, perm_<feat>, shap_<feat>}
+
+    Las tres señales ya se calculaban por cuantil y se promediaban al final;
+    conservar el desglose no cuesta cómputo adicional. Es información necesaria
+    para saber si las colas se apoyan en features distintos al centro.
+    """
     gain = _diag_gain_h(modelos, cols_feat)
     perm = _diag_perm_h(modelos, X_val, y_val, cols_feat)
     shp  = _diag_shap_h(modelos, X_val, cols_feat)
 
-    row: dict = {"fold": fold_num, "h": h_val}
-    for f in cols_feat:
-        row[f"gain_{f}"] = float(gain.get(f, 0.0))
-        row[f"perm_{f}"] = float(perm.get(f, 0.0))
-        row[f"shap_{f}"] = float(shp.get(f, np.nan))
-    return row
+    _vacio = pd.Series(dtype=float)
+    filas: list[dict] = []
+    for tau in _orden_taus(modelos):
+        g = gain.get(tau, _vacio)
+        p = perm.get(tau, _vacio)
+        s = shp.get(tau,  _vacio)
+        row: dict = {"fold": fold_num, "h": h_val, "tau": _tau_label(tau)}
+        for f in cols_feat:
+            row[f"gain_{f}"] = float(g.get(f, 0.0))
+            row[f"perm_{f}"] = float(p.get(f, 0.0))
+            row[f"shap_{f}"] = float(s.get(f, np.nan))
+        filas.append(row)
+    return filas
 
 
 def guardar_hp_report(
@@ -1231,7 +1288,19 @@ def guardar_diag_y_plots(
     banco: str,
     fecha_hoy: str,
 ) -> None:
-    """Guarda CSVs y heatmaps (feature × h) para gain / perm / SHAP."""
+    """
+    Guarda el CSV de diagnóstico (fold × h × τ) y los heatmaps de importancia.
+
+    Las tres señales están normalizadas de forma que sus celdas son comparables
+    entre horizontes, folds y cuantiles (ver _diag_gain_h / _diag_perm_h /
+    _diag_shap_h), así que NO se re-normaliza por fila: el color es el valor
+    directo y el heatmap se lee tanto por fila ("¿en qué h importa este
+    feature?") como por columna ("¿qué features pesan en este h?").
+
+    Salidas, todas en la subcarpeta diag_por_fold_tau/:
+      - <señal>_fold<NN>_<tau>.png   individuales, uno por (fold, τ, señal)
+      - panel_<señal>_<tau>.png      resumen: los folds lado a lado
+    """
     if not diag_rows:
         return
 
@@ -1245,98 +1314,130 @@ def guardar_diag_y_plots(
     df_d = pd.DataFrame(diag_rows)
     ruta_csv = dir_modo / f"diag_features_por_h_{banco}_{fecha_hoy}.csv"
     df_d.to_csv(ruta_csv, index=False)
-    log.info("CSV diagnóstico: %s", ruta_csv.name)
+    log.info("CSV diagnóstico: %s  (%d filas)", ruta_csv.name, len(df_d))
 
-    # Para cada señal, construir pivot feature × h (promedio de folds)
-    for senal, label in [("gain", "Gain (TRAIN)"),
-                          ("perm", "Block-Perm (VAL, OOS)"),
-                          ("shap", "SHAP |mean| (VAL, OOS)")]:
+    if "tau" not in df_d.columns:
+        log.warning("diag_rows sin columna 'tau' — omitiendo heatmaps")
+        return
+
+    dir_diag = dir_modo / "diag_por_fold_tau"
+    dir_diag.mkdir(parents=True, exist_ok=True)
+
+    folds = sorted(df_d["fold"].unique())
+    taus  = [t for t in [f"q{int(x * 100):02d}" for x in TAUS] + ["mean"]
+             if t in set(df_d["tau"])]
+
+    SENALES = [
+        # (prefijo, etiqueta, cmap, divergente)
+        ("gain", "Gain (TRAIN) · participación del total",        "YlOrRd", False),
+        ("perm", "Block-Perm (VAL, OOS) · Δloss relativo",        "RdBu_r", True),
+        ("shap", "SHAP |mean| (VAL, OOS) · participación total",  "YlOrRd", False),
+    ]
+
+    def _pivot(sub: pd.DataFrame, senal: str, feat_cols: list[str],
+               rename: dict) -> pd.DataFrame:
+        """(features × h) para un subconjunto ya filtrado por fold y τ."""
+        pv = (sub[["h"] + feat_cols].rename(columns=rename)
+              .groupby("h").mean().T)
+        return _consolidar_sincos_pivot(pv, _sincos_pairs(list(pv.index)))
+
+    n_generados = 0
+
+    for senal, etiqueta, cmap, divergente in SENALES:
         feat_cols = [c for c in df_d.columns if c.startswith(f"{senal}_")]
         if not feat_cols:
             continue
         rename = {c: c[len(senal) + 1:] for c in feat_cols}
-        pivot = (
-            df_d[["h"] + feat_cols]
-            .rename(columns=rename)
-            .groupby("h")
-            .mean()
-            .T   # features como filas, h como columnas
-        )
-        # Consolidar pares sin/cos → suma en fila 'base' (ej. 'dias_al_cierre_mes')
-        pairs = _sincos_pairs(list(pivot.index))
-        pivot = _consolidar_sincos_pivot(pivot, pairs)
 
-        # Ordenar features por importancia media descendente
-        pivot["_mean"] = pivot.mean(axis=1)
-        pivot = pivot.sort_values("_mean", ascending=False).drop(columns=["_mean"])
-        top_n = min(25, len(pivot))
-        pivot = pivot.iloc[:top_n]
+        # ── Orden de filas y escala de color: FIJOS para las tres decenas de
+        # figuras de esta señal. Sin esto, cada plot elegiría su propio top-25
+        # y su propio máximo, y comparar folds o cuantiles sería imposible.
+        pv_global = _pivot(df_d, senal, feat_cols, rename)
+        orden = (pv_global.abs().mean(axis=1)
+                 .sort_values(ascending=False).index.tolist())
+        top_n = min(25, len(orden))
+        orden = orden[:top_n]
 
-        # Normalizar por fila (por feature) para que el color sea comparativo
-        row_max = pivot.max(axis=1).replace(0, np.nan)
-        pivot_norm = pivot.div(row_max, axis=0).fillna(0.0)
+        vals = pv_global.loc[orden].values
+        vals = vals[np.isfinite(vals)]
+        if vals.size == 0:
+            continue
+        if divergente:
+            lim  = float(np.percentile(np.abs(vals), 99)) or 1.0
+            vmin, vmax = -lim, lim
+        else:
+            vmin = 0.0
+            vmax = float(np.percentile(vals, 99)) or 1.0
 
-        hs = pivot_norm.columns.tolist()
-        fig, ax = plt.subplots(figsize=(max(10, len(hs) * 0.18), max(6, top_n * 0.42)))
-        im = ax.imshow(pivot_norm.values, aspect="auto", cmap="YlOrRd",
-                       vmin=0, vmax=1, interpolation="nearest")
-        plt.colorbar(im, ax=ax, label="Importancia norm. (0–1 por feature)")
-        ax.set_yticks(range(top_n))
-        ax.set_yticklabels(pivot_norm.index.tolist(), fontsize=7)
-        # Mostrar etiquetas solo cada 5 horizontes para no saturar
-        xtick_pos  = [i for i, h in enumerate(hs) if h % 5 == 0]
-        xtick_labs = [str(hs[i]) for i in xtick_pos]
-        ax.set_xticks(xtick_pos)
-        ax.set_xticklabels(xtick_labs, fontsize=8)
-        ax.set_xlabel("Horizonte h (días hábiles)", fontsize=10)
-        ax.set_title(
-            f"{label} — {banco}\n"
-            f"Top {top_n} features · cada fila normalizada a su propio máximo entre horizontes\n"
-            f"Leer por fila: ¿en qué h importa más este feature?",
-            fontweight="bold", fontsize=10,
-        )
-        plt.tight_layout()
-        ruta_fig = dir_modo / f"diag_heatmap_{senal}_por_h_{banco}_{fecha_hoy}.png"
-        plt.savefig(ruta_fig, dpi=150, bbox_inches="tight")
-        plt.close(fig)
-        log.info("Heatmap %s: %s", senal, ruta_fig.name)
+        # Pre-calcula los pivots (fold, τ) una sola vez: se usan en la figura
+        # individual y otra vez en el panel resumen.
+        pivots: dict = {}
+        for fo in folds:
+            for ta in taus:
+                sub = df_d[(df_d["fold"] == fo) & (df_d["tau"] == ta)]
+                if sub.empty:
+                    continue
+                pivots[(fo, ta)] = _pivot(sub, senal, feat_cols, rename).reindex(orden)
 
-    # Gráfico de líneas: top-10 features (por perm promedio) vs h
-    perm_cols = [c for c in df_d.columns if c.startswith("perm_")]
-    if perm_cols:
-        rename_p = {c: c[5:] for c in perm_cols}
-        pivot_perm = (
-            df_d[["h"] + perm_cols].rename(columns=rename_p).groupby("h").mean().T
-        )
-        # Consolidar pares sin/cos antes del ranking
-        pairs_p = _sincos_pairs(list(pivot_perm.index))
-        pivot_perm = _consolidar_sincos_pivot(pivot_perm, pairs_p)
-        pivot_perm["_mean"] = pivot_perm.mean(axis=1)
-        top10 = pivot_perm.sort_values("_mean", ascending=False).head(10).drop(columns=["_mean"])
-        hs = top10.columns.tolist()
+        def _dibujar(ax, pv: pd.DataFrame, titulo: str, con_yticks: bool):
+            hs = pv.columns.tolist()
+            im = ax.imshow(pv.values, aspect="auto", cmap=cmap,
+                           vmin=vmin, vmax=vmax, interpolation="nearest")
+            ax.set_yticks(range(len(pv)))
+            ax.set_yticklabels(pv.index.tolist() if con_yticks else [], fontsize=7)
+            xt = [i for i, h in enumerate(hs) if h % 10 == 0]
+            ax.set_xticks(xt)
+            ax.set_xticklabels([str(hs[i]) for i in xt], fontsize=8)
+            ax.set_xlabel("Horizonte h (días hábiles)", fontsize=9)
+            ax.set_title(titulo, fontsize=10, fontweight="bold")
+            return im
 
-        fig, ax = plt.subplots(figsize=(14, 5))
-        cmap = plt.cm.tab10
-        for i, feat in enumerate(top10.index):
-            ax.plot(hs, top10.loc[feat].values, lw=1.8, label=feat,
-                    color=cmap(i / 10), alpha=0.85)
-        ax.axhline(0, color="black", lw=0.7, ls="--", alpha=0.4)
-        ax.set_xlabel("Horizonte h (días hábiles)", fontsize=10)
-        ax.set_ylabel("Δ Pinball loss (perm VAL)", fontsize=10)
-        ax.set_title(
-            f"Block-Permutation importance por horizonte — Top 10 features — {banco}\n"
-            f"Un feature útil a h corto puede ser irrelevante a h largo (y vice versa)",
-            fontweight="bold", fontsize=10,
-        )
-        ax.legend(fontsize=8, bbox_to_anchor=(1.01, 1), loc="upper left")
-        ax.grid(True, alpha=0.25)
-        plt.tight_layout()
-        ruta_line = dir_modo / f"diag_perm_top10_por_h_{banco}_{fecha_hoy}.png"
-        plt.savefig(ruta_line, dpi=150, bbox_inches="tight")
-        plt.close(fig)
-        log.info("Líneas perm top-10: %s", ruta_line.name)
+        # ── Figuras individuales: una por (fold, τ) ──────────────────────────
+        for (fo, ta), pv in pivots.items():
+            fig, ax = plt.subplots(figsize=(max(10, len(pv.columns) * 0.18),
+                                            max(6, top_n * 0.42)))
+            im = _dibujar(
+                ax, pv,
+                f"{etiqueta}\n{banco} · Fold {fo} · {ta} · top {top_n} features",
+                con_yticks=True,
+            )
+            plt.colorbar(im, ax=ax, label=etiqueta.split(" · ")[-1])
+            plt.tight_layout()
+            ruta = dir_diag / f"{senal}_fold{fo:02d}_{ta}.png"
+            fig.savefig(ruta, dpi=140, bbox_inches="tight")
+            plt.close(fig)
+            n_generados += 1
 
-    print(f"[OK] Diagnóstico features guardado en: {dir_modo}")
+        # ── Panel resumen: los folds lado a lado, un archivo por τ ───────────
+        for ta in taus:
+            pvs = [(fo, pivots[(fo, ta)]) for fo in folds if (fo, ta) in pivots]
+            if not pvs:
+                continue
+            fig, axes = plt.subplots(
+                1, len(pvs),
+                figsize=(max(6, len(pvs) * 5.2), max(6, top_n * 0.42)),
+                gridspec_kw={"wspace": 0.08},
+            )
+            axes = np.atleast_1d(axes)
+            for j, (fo, pv) in enumerate(pvs):
+                im = _dibujar(axes[j], pv, f"Fold {fo}", con_yticks=(j == 0))
+            fig.suptitle(
+                f"{etiqueta} — {banco} · {ta}\n"
+                f"Misma escala de color y mismo orden de filas en todos los paneles",
+                fontsize=11, fontweight="bold", y=1.01,
+            )
+            fig.colorbar(im, ax=axes.tolist(), fraction=0.015, pad=0.01,
+                         label=etiqueta.split(" · ")[-1])
+            ruta = dir_diag / f"panel_{senal}_{ta}.png"
+            fig.savefig(ruta, dpi=140, bbox_inches="tight")
+            plt.close(fig)
+            n_generados += 1
+
+    log.info("Heatmaps de diagnóstico: %d figuras en %s",
+             n_generados, dir_diag.name)
+    print(f"[OK] Diagnóstico features: {len(df_d):,} filas (fold × h × τ) | "
+          f"{n_generados} figuras en {dir_diag}")
+
 
 
 # ---------------------------------------------------------------------------
@@ -1991,7 +2092,8 @@ def run(banco: str = BANCO) -> None:
             resultados.append(_row_met)
 
             if DIAG_FEATURES:
-                diag_rows.append(
+                # extend, no append: devuelve una fila por modelo (7 τ + mean)
+                diag_rows.extend(
                     diagnosticar_h(modelos, X_val, y_val, cols_feat,
                                    fold["fold"], h_val)
                 )
