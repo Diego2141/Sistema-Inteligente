@@ -590,6 +590,41 @@ def entrenar_modelos_h(
 
 
 # ---------------------------------------------------------------------------
+# Monotonía de los cuantiles
+# ---------------------------------------------------------------------------
+
+def _reordenar_cuantiles(preds: dict) -> tuple[dict, int]:
+    """
+    Rearrangement de Chernozhukov, Fernández-Val & Galichon (2010): ordena los
+    cuantiles predichos fila a fila para garantizar Q01 ≤ Q05 ≤ … ≤ Q99.
+
+    Se entrena un booster independiente por τ, con sus propios splits, así que
+    nada impone monotonía entre modelos y aparecen cruces (el paper 2406.02293
+    documenta esto como la desventaja de usar modelos separados frente a un
+    único modelo composite con hojas multi-output). El operador de
+    reordenamiento tiene la garantía de que la curva resultante está débilmente
+    más cerca de la curva verdadera en cualquier norma Lp: nunca empeora.
+
+    Se prefiere ordenar sobre isotonic regression porque conserva los valores
+    predichos en vez de promediar los violadores, y es una operación vectorizada.
+
+    Returns
+    -------
+    (dict reordenado, nº de filas que tenían al menos un cruce)
+    """
+    taus = sorted(t for t in preds if t != "mean")
+    if len(taus) < 2:
+        return preds, 0
+    M = np.column_stack([np.asarray(preds[t], dtype=float) for t in taus])
+    n_cruces = int((np.diff(M, axis=1) < 0).any(axis=1).sum())
+    M_ord = np.sort(M, axis=1)
+    out: dict = {t: M_ord[:, i] for i, t in enumerate(taus)}
+    if "mean" in preds:
+        out["mean"] = np.asarray(preds["mean"], dtype=float)
+    return out, n_cruces
+
+
+# ---------------------------------------------------------------------------
 # CRPS por reconstrucción de la función cuantil
 # ---------------------------------------------------------------------------
 # np.trapz sobre los 7 pinballs subestimaba el CRPS ~9.5% de forma sistemática:
@@ -1853,6 +1888,8 @@ def run(banco: str = BANCO) -> None:
         fold_scaffolds:     list[pd.DataFrame] = []
         fold_val_scaffolds: list[pd.DataFrame] = []   # para CQR calibración
         n_h_ok = 0
+        n_cruces_test = n_filas_test = 0      # diagnóstico de cruces de cuantiles
+        n_cruces_val  = n_filas_val  = 0
 
         for h_val in range(H_MIN, H_MAX + 1):
             df_h = df[df["h"] == h_val]
@@ -1888,6 +1925,15 @@ def run(banco: str = BANCO) -> None:
             modelos = entrenar_modelos_h(X_train, y_train, X_val, y_val, hp_h,
                                          std_y=std_y)
 
+            # Predicciones una sola vez por conjunto. Se reordenan para eliminar
+            # cruces de cuantiles y el mismo dict alimenta el scaffold y las
+            # métricas, así que lo que se guarda y lo que se mide coinciden.
+            _preds_test, _nx_t = _reordenar_cuantiles(
+                {tau: m.predict(X_test) for tau, m in modelos.items()}
+            )
+            n_cruces_test += _nx_t
+            n_filas_test  += len(y_test)
+
             _scaffold = pd.DataFrame({
                 "banco"   : banco,
                 "fold"    : fold["fold"],
@@ -1896,15 +1942,21 @@ def run(banco: str = BANCO) -> None:
                 "h"       : h_val,
                 "target"  : y_test.values,
             })
-
-            for tau, model in modelos.items():
+            for tau, _p in _preds_test.items():
                 col = "mean" if tau == "mean" else f"q{int(tau * 100):02d}"
-                _scaffold[col] = model.predict(X_test)
+                _scaffold[col] = _p
 
             fold_scaffolds.append(_scaffold)
 
             # ── VAL scaffold (para CQR en step006) ───────────────────────────
+            _preds_val = None
             if len(X_val) > 0:
+                _preds_val, _nx_v = _reordenar_cuantiles(
+                    {tau: m.predict(X_val) for tau, m in modelos.items()}
+                )
+                n_cruces_val += _nx_v
+                n_filas_val  += len(y_val)
+
                 mv_mask = (
                     (df_h["fecha_t"] >= fold["val_start"]) &
                     (df_h["fecha_t"] <= fold["val_end"])   &
@@ -1918,21 +1970,16 @@ def run(banco: str = BANCO) -> None:
                     "h"      : h_val,
                     "target" : y_val.values,
                 })
-                for tau, model in modelos.items():
+                for tau, _p in _preds_val.items():
                     col = "mean" if tau == "mean" else f"q{int(tau * 100):02d}"
-                    _val_scaffold[col] = model.predict(X_val)
+                    _val_scaffold[col] = _p
                 fold_val_scaffolds.append(_val_scaffold)
 
             n_h_ok += 1
 
-            preds_for_metrics = {tau: m.predict(X_test) for tau, m in modelos.items()}
-            preds_val_for_metrics = (
-                {tau: m.predict(X_val) for tau, m in modelos.items()}
-                if len(X_val) > 0 else None
-            )
             _row_met = calcular_metricas(
-                preds_for_metrics, y_test.values, h_val, fold["fold"],
-                preds_val_for_metrics, y_val.values if len(X_val) > 0 else None,
+                _preds_test, y_test.values, h_val, fold["fold"],
+                _preds_val, y_val.values if len(X_val) > 0 else None,
             )
             # Árboles efectivos tras early stopping — diagnostica si
             # N_ESTIMATORS_MAX es holgado y si el recorte por best_iter opera
@@ -1976,6 +2023,16 @@ def run(banco: str = BANCO) -> None:
             f"{n_h_ok}/{n_horizontes} horizontes completados | "
             f"{elapsed_fold:.1f} min"
         )
+        # Cruces de cuantiles: mide cuánto cuesta entrenar un booster por τ en
+        # vez del modelo composite multi-output que propone el paper 2406.02293
+        if n_filas_test:
+            _msg = (f"    Cruces de cuantiles corregidos: TEST "
+                    f"{n_cruces_test:,}/{n_filas_test:,} "
+                    f"({100 * n_cruces_test / n_filas_test:.1f}%)")
+            if n_filas_val:
+                _msg += (f" | VAL {n_cruces_val:,}/{n_filas_val:,} "
+                         f"({100 * n_cruces_val / n_filas_val:.1f}%)")
+            print(_msg)
 
     # ------------------------------------------------------------------
     # 5. Consolidate per-fold parquets into preds_base (read one by one)
