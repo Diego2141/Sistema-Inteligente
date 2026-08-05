@@ -1360,33 +1360,42 @@ def guardar_diag_y_plots(
     directo y el heatmap se lee tanto por fila ("¿en qué h importa este
     feature?") como por columna ("¿qué features pesan en este h?").
 
-    Salidas, todas en la subcarpeta diag_por_fold_tau/:
-      - <señal>_fold<NN>_<tau>.png   individuales, uno por (fold, τ, señal)
-      - panel_<señal>_<tau>.png      resumen: los folds lado a lado
+    Salidas:
+      - diag_features_por_h_<banco>_<fecha>.csv     siempre, es lo valioso
+      - diag_por_fold_tau/<señal>_fold<NN>_<tau>.png  individuales
+      - diag_por_fold_tau/panel_<señal>_<tau>.png     resumen: folds lado a lado
+
+    CONSUME diag_rows: lo vacía tras volcarlo al CSV, porque son ~3,500 filas
+    × 156 columnas de dicts que no hacen falta durante el graficado —la fase
+    donde la memoria se agotaba— y el llamador ya no las necesita.
     """
     if not diag_rows:
         return
 
-    try:
-        import matplotlib.pyplot as plt
-        import matplotlib.ticker as mticker
-    except ImportError:
-        log.warning("matplotlib no disponible — omitiendo heatmaps")
-        return
-
+    # El CSV va PRIMERO y fuera de cualquier guarda de matplotlib: es el
+    # producto que importa y no debe perderse porque el graficado no esté
+    # disponible o falle.
     df_d = pd.DataFrame(diag_rows)
     ruta_csv = dir_modo / f"diag_features_por_h_{banco}_{fecha_hoy}.csv"
     df_d.to_csv(ruta_csv, index=False)
     n_filas_diag = len(df_d)
     log.info("CSV diagnóstico: %s  (%d filas)", ruta_csv.name, n_filas_diag)
 
-    # El CSV —lo valioso— ya está en disco. A partir de aquí solo se grafica,
-    # así que se sueltan las 3,552 filas × 156 columnas de dicts originales.
     diag_rows.clear()
     gc.collect()
 
+    try:
+        import matplotlib.pyplot as plt
+        import matplotlib.ticker as mticker
+    except ImportError:
+        log.warning("matplotlib no disponible — CSV guardado, sin heatmaps")
+        print(f"[OK] Diagnóstico features: {n_filas_diag:,} filas (fold × h × τ) "
+              f"| sin figuras (matplotlib no disponible)")
+        return
+
     if "tau" not in df_d.columns:
-        log.warning("diag_rows sin columna 'tau' — omitiendo heatmaps")
+        log.warning("diag_rows sin columna 'tau' — CSV guardado, sin heatmaps")
+        print(f"[OK] Diagnóstico features: {n_filas_diag:,} filas | sin figuras")
         return
 
     dir_diag = dir_modo / "diag_por_fold_tau"
