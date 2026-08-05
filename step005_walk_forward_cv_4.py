@@ -1493,6 +1493,55 @@ def guardar_diag_y_plots(
 
 
 
+def _reg(tablas: dict, nombre: str, obj):
+    """
+    Registra una tabla para el Excel de resumen y la devuelve, de modo que el
+    sitio de impresión pueda seguir siendo `print(_reg(...))`.
+
+    Se guarda la versión NUMÉRICA, no la formateada: en consola conviene
+    "91.5%" pero en Excel conviene 0.915, que se puede ordenar y graficar.
+    """
+    tablas[nombre] = (obj.to_frame(name=nombre)
+                      if isinstance(obj, pd.Series) else obj.copy())
+    return obj
+
+
+def guardar_tablas_excel(
+    tablas: dict,
+    dir_modo: Path,
+    banco: str,
+    fecha_hoy: str,
+) -> None:
+    """
+    Un Excel con una hoja por tabla de consola.
+
+    Complementa a consola_*.txt: el .txt conserva el formato exacto de pantalla,
+    este archivo conserva los valores numéricos para analizarlos.
+
+    Si openpyxl no está disponible o el archivo está abierto en Excel, cae a
+    CSVs sueltos en vez de romper la corrida — mismo criterio que
+    guardar_hp_report y guardar_diag_y_plots.
+    """
+    if not tablas:
+        return
+
+    ruta = dir_modo / f"tablas_resumen_{banco}_{fecha_hoy}.xlsx"
+    try:
+        with pd.ExcelWriter(ruta, engine="openpyxl") as xl:
+            for nombre, df in tablas.items():
+                df.to_excel(xl, sheet_name=nombre[:31])   # Excel: 31 chars máx
+    except Exception as e:
+        log.warning("No se pudo escribir %s (%s) — se guardan CSVs sueltos",
+                    ruta.name, e)
+        for nombre, df in tablas.items():
+            df.to_csv(dir_modo / f"tabla_{nombre}_{banco}_{fecha_hoy}.csv")
+        print(f"[OK] Tablas de consola: {len(tablas)} CSVs en {dir_modo}")
+        return
+
+    log.info("Tablas de consola: %s (%d hojas)", ruta.name, len(tablas))
+    print(f"[OK] Tablas de consola: {ruta.name} ({len(tablas)} hojas)")
+
+
 # ---------------------------------------------------------------------------
 # Optuna HP search (Option C: representative h per group)
 # ---------------------------------------------------------------------------
@@ -1979,6 +2028,8 @@ def _run_interno(banco: str = BANCO) -> None:
     resultados:    list[dict] = []
     hp_report_rows: list[dict] = []   # acumula HPs por fold × grupo para el reporte
     diag_rows:  list[dict] = []
+    cruces_rows: list[dict] = []      # cruces de cuantiles por fold
+    _tablas: dict = {}                # tablas de consola → Excel de resumen
     n_horizontes = H_MAX - H_MIN + 1
 
     # Warm start: guarda los HP óptimos del fold anterior por grupo.
@@ -2208,6 +2259,16 @@ def _run_interno(banco: str = BANCO) -> None:
                 _msg += (f" | VAL {n_cruces_val:,}/{n_filas_val:,} "
                          f"({100 * n_cruces_val / n_filas_val:.1f}%)")
             print(_msg)
+            cruces_rows.append({
+                "fold"          : fold["fold"],
+                "cruces_test"   : n_cruces_test,
+                "filas_test"    : n_filas_test,
+                "pct_test"      : round(100 * n_cruces_test / n_filas_test, 2),
+                "cruces_val"    : n_cruces_val,
+                "filas_val"     : n_filas_val,
+                "pct_val"       : (round(100 * n_cruces_val / n_filas_val, 2)
+                                   if n_filas_val else float("nan")),
+            })
 
     # ------------------------------------------------------------------
     # 5. Consolidate per-fold parquets into preds_base (read one by one)
@@ -2247,59 +2308,76 @@ def _run_interno(banco: str = BANCO) -> None:
         labels = ["h02-05", "h06-15", "h16-30", "h31-50", "h51-75"]
         df_res["h_grupo"] = pd.cut(df_res["h"], bins=bins, labels=labels)
 
+        # _reg() registra la versión numérica para el Excel; la consola conserva
+        # su formato. Donde el print usa porcentajes se separa en dos pasos.
         print("\nRMSE medio por grupo de horizonte:")
-        print(df_res.groupby("h_grupo", observed=True)["rmse"].mean().round(0))
+        print(_reg(_tablas, "rmse_por_grupo",
+                   df_res.groupby("h_grupo", observed=True)["rmse"].mean().round(0)))
 
         # Also print pinball for q50
         if "pinball_q50" in df_res.columns:
             print("\nPinball q50 medio por grupo de horizonte:")
-            print(df_res.groupby("h_grupo", observed=True)["pinball_q50"].mean().round(4))
+            print(_reg(_tablas, "pinball_q50_por_grupo",
+                       df_res.groupby("h_grupo", observed=True)["pinball_q50"]
+                       .mean().round(4)))
 
         if "coverage_90" in df_res.columns:
             print("\nCobertura empírica 90% [Q05-Q95] TEST media por grupo de horizonte:")
-            print(df_res.groupby("h_grupo", observed=True)["coverage_90"].mean().map("{:.1%}".format))
+            _c90 = df_res.groupby("h_grupo", observed=True)["coverage_90"].mean()
+            _reg(_tablas, "cov90_test_por_grupo", _c90)
+            print(_c90.map("{:.1%}".format))
 
             # Tabla por fold × grupo (coverage_90)
             print("\nCobertura 90% TEST por fold y grupo de horizonte:")
-            tbl_90 = (
+            _t90 = (
                 df_res.groupby(["fold", "h_grupo"], observed=True)["coverage_90"]
                 .mean()
                 .unstack("h_grupo")
-                .applymap("{:.1%}".format)
             )
-            tbl_90.index = ["Fold {}".format(f) for f in tbl_90.index]
-            print(tbl_90.to_string())
+            _t90.index = ["Fold {}".format(f) for f in _t90.index]
+            _reg(_tablas, "cov90_test_fold_grupo", _t90)
+            print(_t90.applymap("{:.1%}".format).to_string())
 
         if "coverage_98" in df_res.columns:
             print("\nCobertura empírica 98% [Q01-Q99] TEST media por grupo de horizonte:")
-            print(df_res.groupby("h_grupo", observed=True)["coverage_98"].mean().map("{:.1%}".format))
+            _c98 = df_res.groupby("h_grupo", observed=True)["coverage_98"].mean()
+            _reg(_tablas, "cov98_test_por_grupo", _c98)
+            print(_c98.map("{:.1%}".format))
 
             # Tabla por fold × grupo (coverage_98)
             print("\nCobertura 98% TEST por fold y grupo de horizonte:")
-            tbl_98 = (
+            _t98 = (
                 df_res.groupby(["fold", "h_grupo"], observed=True)["coverage_98"]
                 .mean()
                 .unstack("h_grupo")
-                .applymap("{:.1%}".format)
             )
-            tbl_98.index = ["Fold {}".format(f) for f in tbl_98.index]
-            print(tbl_98.to_string())
+            _t98.index = ["Fold {}".format(f) for f in _t98.index]
+            _reg(_tablas, "cov98_test_fold_grupo", _t98)
+            print(_t98.applymap("{:.1%}".format).to_string())
 
         if "val_coverage_90" in df_res.columns:
             print("\nCobertura empírica 90% [Q05-Q95] VAL media por grupo de horizonte:")
-            print(df_res.groupby("h_grupo", observed=True)["val_coverage_90"].mean().map("{:.1%}".format))
+            _v90 = df_res.groupby("h_grupo", observed=True)["val_coverage_90"].mean()
+            _reg(_tablas, "cov90_val_por_grupo", _v90)
+            print(_v90.map("{:.1%}".format))
 
         if "val_coverage_98" in df_res.columns:
             print("\nCobertura empírica 98% [Q01-Q99] VAL media por grupo de horizonte:")
-            print(df_res.groupby("h_grupo", observed=True)["val_coverage_98"].mean().map("{:.1%}".format))
+            _v98 = df_res.groupby("h_grupo", observed=True)["val_coverage_98"].mean()
+            _reg(_tablas, "cov98_val_por_grupo", _v98)
+            print(_v98.map("{:.1%}".format))
 
         if "winkler_90" in df_res.columns:
             print("\nWinkler Score 90% medio por grupo de horizonte (MM USD):")
-            print((df_res.groupby("h_grupo", observed=True)["winkler_90"].mean() / 1e6).round(3))
+            print(_reg(_tablas, "winkler90_por_grupo",
+                       (df_res.groupby("h_grupo", observed=True)["winkler_90"]
+                        .mean() / 1e6).round(3)))
 
         if "crps" in df_res.columns:
             print("\nCRPS medio por grupo de horizonte (MM USD):")
-            print((df_res.groupby("h_grupo", observed=True)["crps"].mean() / 1e6).round(4))
+            print(_reg(_tablas, "crps_por_grupo",
+                       (df_res.groupby("h_grupo", observed=True)["crps"]
+                        .mean() / 1e6).round(4)))
 
         tree_cols = sorted([c for c in df_res.columns if c.startswith("n_trees_")])
         if tree_cols:
@@ -2308,6 +2386,7 @@ def _run_interno(banco: str = BANCO) -> None:
                   f"paciencia={EARLY_STOPPING_ROUNDS}):")
             _tr = df_res[tree_cols].mean().round(1)
             _tr.index = [c.replace("n_trees_", "") for c in _tr.index]
+            _reg(_tablas, "arboles_efectivos", _tr)
             print(_tr.to_string())
             _mx = float(df_res[tree_cols].max().max())
             if _mx >= N_ESTIMATORS_MAX:
@@ -2323,6 +2402,7 @@ def _run_interno(banco: str = BANCO) -> None:
             calib_mean = df_res[calib_cols].mean().round(3)
             tau_labels = {f"calib_q{int(t*100):02d}": f"Q{int(t*100):02d} (τ={t:.2f})" for t in TAUS}
             calib_mean.index = [tau_labels.get(c, c) for c in calib_mean.index]
+            _reg(_tablas, "calibracion_hitrate", calib_mean)
             print(calib_mean.to_string())
 
         graficar_metricas(df_res, DIR_MODO, banco, fecha_hoy)
@@ -2340,6 +2420,14 @@ def _run_interno(banco: str = BANCO) -> None:
     # ------------------------------------------------------------------
     if DIAG_FEATURES and diag_rows:
         guardar_diag_y_plots(diag_rows, cols_feat, DIR_MODO, banco, fecha_hoy)
+
+    # ------------------------------------------------------------------
+    # 9. Tablas de consola → Excel (una hoja por tabla)
+    # ------------------------------------------------------------------
+    if cruces_rows:
+        _reg(_tablas, "cruces_por_fold",
+             pd.DataFrame(cruces_rows).set_index("fold"))
+    guardar_tablas_excel(_tablas, DIR_MODO, banco, fecha_hoy)
 
     total_min = (time.time() - t0_total) / 60
     print(f"\n{'='*60}")
