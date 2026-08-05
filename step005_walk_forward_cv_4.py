@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import gc
 import logging
+import sys
 import time
 from datetime import date
 from pathlib import Path
@@ -172,6 +173,58 @@ DIAG_SHAP_MAX_SAMPLES = None   # None = todas las filas de val (~120)
 # ---------------------------------------------------------------------------
 # Helper functions
 # ---------------------------------------------------------------------------
+
+class _Tee:
+    """
+    Duplica sys.stdout a un archivo para conservar las tablas de consola.
+
+    Solo intercepta stdout (los print). El logging va a stderr y queda fuera a
+    propósito: log.debug("Fold %d, h=%d | …") se dispara una vez por (fold, h),
+    unas 370 líneas por corrida, que ahogarían las ~100 líneas de tablas.
+
+    __getattr__ delega el resto de atributos al stdout original (isatty,
+    encoding, fileno…) para que cualquier librería que los consulte siga
+    funcionando con normalidad.
+    """
+
+    def __init__(self, ruta: Path):
+        self._orig = sys.stdout           # primero: __getattr__ depende de él
+        self._f    = open(ruta, "w", encoding="utf-8")
+        sys.stdout = self
+
+    def write(self, s):
+        self._orig.write(s)
+        self._f.write(s)
+
+    def flush(self):
+        self._orig.flush()
+        self._f.flush()
+
+    def __getattr__(self, nombre):
+        orig = self.__dict__.get("_orig")
+        if orig is None:
+            raise AttributeError(nombre)
+        return getattr(orig, nombre)
+
+    def cerrar(self):
+        sys.stdout = self._orig
+        self._f.close()
+
+
+def _dir_modo() -> Path:
+    """
+    Carpeta de salida del modo actual, creada si no existe.
+
+    Solo depende de constantes de configuración (DIR_OUTPUT, EXPANDING,
+    AJUSTE_ARCTAN), así que puede resolverse antes de cargar datos — es lo que
+    permite abrir el log de consola al inicio de run().
+    """
+    sfx  = "_arctan" if AJUSTE_ARCTAN else ""
+    base = "exp" if EXPANDING else "roll"
+    d = DIR_OUTPUT / f"fold_{base}{sfx}"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
 
 def get_feature_cols(df: pd.DataFrame) -> list[str]:
     """Return numeric columns not in COLS_EXCLUIR."""
@@ -1841,6 +1894,28 @@ def graficar_metricas(
 # ---------------------------------------------------------------------------
 
 def run(banco: str = BANCO) -> None:
+    """
+    Envoltura fina: abre el log de consola y delega en _run_interno.
+
+    Se separa en dos funciones para no reindentar el cuerpo entero dentro de un
+    try/finally. El finally garantiza que sys.stdout quede restaurado aunque la
+    corrida falle a mitad.
+    """
+    try:
+        _tee = _Tee(_dir_modo() /
+                    f"consola_{banco}_{date.today().strftime('%Y%m%d')}.txt")
+    except OSError as e:
+        log.warning("No se pudo abrir el log de consola (%s) — se continúa", e)
+        _run_interno(banco)
+        return
+
+    try:
+        _run_interno(banco)
+    finally:
+        _tee.cerrar()
+
+
+def _run_interno(banco: str = BANCO) -> None:
     t0_total = time.time()
 
     # ------------------------------------------------------------------
@@ -1910,12 +1985,10 @@ def run(banco: str = BANCO) -> None:
     # Se pasan a optuna_tune_h() y se actualizan al final de cada fold.
     prev_hp_por_grupo: dict[str, dict | None] = {g: None for g in H_GRUPOS}
 
-    # Output dir created early so per-fold parquets can be written immediately
-    # El sufijo _arctan separa los resultados del objetivo suavizado para comparación
-    _arctan_sfx = "_arctan" if AJUSTE_ARCTAN else ""
-    _modo_base  = "exp" if EXPANDING else "roll"
-    DIR_MODO = DIR_OUTPUT / f"fold_{_modo_base}{_arctan_sfx}"
-    DIR_MODO.mkdir(parents=True, exist_ok=True)
+    # Output dir created early so per-fold parquets can be written immediately.
+    # El sufijo _arctan separa los resultados del objetivo suavizado; run() ya
+    # resolvió esta misma ruta para abrir el log de consola.
+    DIR_MODO  = _dir_modo()
     fecha_hoy = date.today().strftime("%Y%m%d")
 
     fold_parquet_paths: list[Path] = []
