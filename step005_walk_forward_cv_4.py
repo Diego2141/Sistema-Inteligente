@@ -166,6 +166,16 @@ COLS_EXCLUIR = {
 # Feature diagnostics (gain / block-permutation / SHAP) per horizon
 # ---------------------------------------------------------------------------
 DIAG_FEATURES         = True   # False → skip (más rápido)
+
+# Control de la huella de memoria del graficado del diagnóstico.
+# Con 6 folds × 8 τ × 3 señales son 144 figuras individuales + 24 paneles.
+# Los paneles son los caros: 6 folds de ancho a 140 dpi son ~4400 px, y
+# bbox_inches="tight" renderiza dos veces. Si aparece MemoryError, lo primero
+# es poner DIAG_PLOTS_INDIVIDUALES=False (conserva los paneles comparativos,
+# que son los que responden "¿cómo cambia entre folds?").
+DIAG_PLOTS_INDIVIDUALES = True   # False → solo los paneles resumen
+DIAG_PLOT_DPI           = 120    # antes 140; el heatmap no gana nitidez arriba
+DIAG_PANEL_ANCHO_MAX    = 26.0   # pulgadas; techo del ancho de los paneles
 DIAG_BLOCK_SIZE       = 5      # bloques pequeños: val solo tiene ~120 filas
 DIAG_N_REPEATS        = 3      # repeticiones por permutación
 DIAG_SHAP_MAX_SAMPLES = None   # None = todas las filas de val (~120)
@@ -1367,7 +1377,13 @@ def guardar_diag_y_plots(
     df_d = pd.DataFrame(diag_rows)
     ruta_csv = dir_modo / f"diag_features_por_h_{banco}_{fecha_hoy}.csv"
     df_d.to_csv(ruta_csv, index=False)
-    log.info("CSV diagnóstico: %s  (%d filas)", ruta_csv.name, len(df_d))
+    n_filas_diag = len(df_d)
+    log.info("CSV diagnóstico: %s  (%d filas)", ruta_csv.name, n_filas_diag)
+
+    # El CSV —lo valioso— ya está en disco. A partir de aquí solo se grafica,
+    # así que se sueltan las 3,552 filas × 156 columnas de dicts originales.
+    diag_rows.clear()
+    gc.collect()
 
     if "tau" not in df_d.columns:
         log.warning("diag_rows sin columna 'tau' — omitiendo heatmaps")
@@ -1446,29 +1462,39 @@ def guardar_diag_y_plots(
             return im
 
         # ── Figuras individuales: una por (fold, τ) ──────────────────────────
-        for (fo, ta), pv in pivots.items():
-            fig, ax = plt.subplots(figsize=(max(10, len(pv.columns) * 0.18),
-                                            max(6, top_n * 0.42)))
-            im = _dibujar(
-                ax, pv,
-                f"{etiqueta}\n{banco} · Fold {fo} · {ta} · top {top_n} features",
-                con_yticks=True,
-            )
-            plt.colorbar(im, ax=ax, label=etiqueta.split(" · ")[-1])
-            plt.tight_layout()
-            ruta = dir_diag / f"{senal}_fold{fo:02d}_{ta}.png"
-            fig.savefig(ruta, dpi=140, bbox_inches="tight")
-            plt.close(fig)
-            n_generados += 1
+        # bbox_inches="tight" renderiza la figura dos veces (una para medir el
+        # bbox), duplicando el pico de memoria. Se omite aquí: tight_layout ya
+        # deja los márgenes razonables y son 144 figuras.
+        if DIAG_PLOTS_INDIVIDUALES:
+            for (fo, ta), pv in pivots.items():
+                fig, ax = plt.subplots(figsize=(max(10, len(pv.columns) * 0.18),
+                                                max(6, top_n * 0.42)))
+                im = _dibujar(
+                    ax, pv,
+                    f"{etiqueta}\n{banco} · Fold {fo} · {ta} · top {top_n} features",
+                    con_yticks=True,
+                )
+                plt.colorbar(im, ax=ax, label=etiqueta.split(" · ")[-1])
+                plt.tight_layout()
+                ruta = dir_diag / f"{senal}_fold{fo:02d}_{ta}.png"
+                fig.savefig(ruta, dpi=DIAG_PLOT_DPI)
+                plt.close(fig)
+                n_generados += 1
+                if n_generados % 20 == 0:      # matplotlib fragmenta el heap
+                    plt.close("all")
+                    gc.collect()
 
         # ── Panel resumen: los folds lado a lado, un archivo por τ ───────────
+        # El ancho se acota: con 6+ folds, len(pvs)*5.2 llegaba a 31 pulgadas,
+        # que a 140 dpi son ~4400 px de lienzo por figura.
         for ta in taus:
             pvs = [(fo, pivots[(fo, ta)]) for fo in folds if (fo, ta) in pivots]
             if not pvs:
                 continue
+            ancho = min(max(6.0, len(pvs) * 5.2), DIAG_PANEL_ANCHO_MAX)
             fig, axes = plt.subplots(
                 1, len(pvs),
-                figsize=(max(6, len(pvs) * 5.2), max(6, top_n * 0.42)),
+                figsize=(ancho, max(6, top_n * 0.42)),
                 gridspec_kw={"wspace": 0.08},
             )
             axes = np.atleast_1d(axes)
@@ -1482,13 +1508,17 @@ def guardar_diag_y_plots(
             fig.colorbar(im, ax=axes.tolist(), fraction=0.015, pad=0.01,
                          label=etiqueta.split(" · ")[-1])
             ruta = dir_diag / f"panel_{senal}_{ta}.png"
-            fig.savefig(ruta, dpi=140, bbox_inches="tight")
+            fig.savefig(ruta, dpi=DIAG_PLOT_DPI)
             plt.close(fig)
             n_generados += 1
 
+        del pivots, pv_global        # (features × h) por cada (fold, τ)
+        plt.close("all")
+        gc.collect()
+
     log.info("Heatmaps de diagnóstico: %d figuras en %s",
              n_generados, dir_diag.name)
-    print(f"[OK] Diagnóstico features: {len(df_d):,} filas (fold × h × τ) | "
+    print(f"[OK] Diagnóstico features: {n_filas_diag:,} filas (fold × h × τ) | "
           f"{n_generados} figuras en {dir_diag}")
 
 
@@ -2270,6 +2300,12 @@ def _run_interno(banco: str = BANCO) -> None:
                                    if n_filas_val else float("nan")),
             })
 
+    # La matriz completa (~291k × 55) ya no se usa: las secciones 5-9 trabajan
+    # sobre los parquets por fold y sobre las listas acumuladas. Liberarla aquí
+    # deja espacio para la fase de graficado, que es donde se agotaba la memoria.
+    del df
+    gc.collect()
+
     # ------------------------------------------------------------------
     # 5. Consolidate per-fold parquets into preds_base (read one by one)
     # ------------------------------------------------------------------
@@ -2419,7 +2455,21 @@ def _run_interno(banco: str = BANCO) -> None:
     # 8. Feature diagnostics (gain / perm / SHAP per h)
     # ------------------------------------------------------------------
     if DIAG_FEATURES and diag_rows:
-        guardar_diag_y_plots(diag_rows, cols_feat, DIR_MODO, banco, fecha_hoy)
+        # Aislado: el CSV de diagnóstico es lo valioso y se escribe primero.
+        # Si el graficado falla (168 figuras es donde se agotaba la memoria),
+        # no debe impedir que la sección 9 escriba el Excel de tablas.
+        try:
+            guardar_diag_y_plots(diag_rows, cols_feat, DIR_MODO, banco, fecha_hoy)
+        except MemoryError:
+            log.error("Sin memoria al graficar el diagnóstico — el CSV sí se guardó. "
+                      "Baja DIAG_PLOTS_INDIVIDUALES o DIAG_PLOT_DPI y vuelve a "
+                      "generar los gráficos desde el CSV.")
+        except Exception as e:
+            log.error("Fallo al graficar el diagnóstico (%s) — el CSV sí se guardó",
+                      type(e).__name__)
+        finally:
+            del diag_rows
+            gc.collect()
 
     # ------------------------------------------------------------------
     # 9. Tablas de consola → Excel (una hoja por tabla)
