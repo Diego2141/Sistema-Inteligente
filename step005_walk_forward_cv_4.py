@@ -129,6 +129,24 @@ OPTUNA_N_TRIALS_ARCTAN = 50  # trials cuando AJUSTE_ARCTAN=True (vs 30 base)
 OPTUNA_N_ESTIMATORS = True
 N_ESTIMATORS_RANGE  = (50, 400)   # rango de búsqueda de n_estimators (escala log)
 
+# Descomposición del target en h=2.
+#
+#   target(t, h=2)  =  D(t+2) − R(t+2)     y     R_conf_t2  =  R(t+2)
+#
+# R_conf_t2 no es un predictor correlacionado: es EXACTAMENTE el componente de
+# retiro del target a 2 días, confirmado por la banca (las excepciones se
+# sancionan, así que son raras). Sin esto el árbol gasta sus hojas aproximando
+# una identidad con funciones escalón — con max_depth=2 tiene 4 hojas para
+# representar una recta.
+#
+# Con la descomposición se entrena sobre D(t+2) = target + R_conf_t2 y se
+# deshace después:   q_τ(target) = max(q_τ(D), 0) − R_conf_t2
+#
+# El recorte en 0 (D no puede ser negativo) hace que el piso físico
+# target ≥ −R_conf_t2 se cumpla automáticamente, sin imponerlo aparte.
+# Solo afecta a h=2; los otros 73 horizontes quedan idénticos.
+DESCOMPONER_H2 = True
+
 # Grupos de h y sus representantes para Optuna (Opción C)
 # Un solo h "típico" por grupo → HP se buscan ahí y se transfieren a todo el grupo
 # muy_corto separado: banco pre-reporta retiros a t+2 y depósitos a t+1 →
@@ -685,6 +703,24 @@ def _reordenar_cuantiles(preds: dict) -> tuple[dict, int]:
     if "mean" in preds:
         out["mean"] = np.asarray(preds["mean"], dtype=float)
     return out, n_cruces
+
+
+def _destransformar_h2(preds: dict, r_conf: np.ndarray) -> dict:
+    """
+    Deshace la descomposición de h=2: pasa de cuantiles de D(t+2) a cuantiles
+    del target.
+
+        q_τ(target)  =  max( q_τ(D), 0 )  −  R_conf_t2
+
+    Restar una constante desplaza todos los cuantiles por esa constante, así
+    que la transformación es exacta y preserva el orden. El clip en 0 impone
+    D ≥ 0 y, con ello, el piso físico target ≥ −R_conf_t2. Puede generar
+    empates entre cuantiles bajos, que _reordenar_cuantiles maneja sin
+    problema (un empate no viola la monotonía).
+    """
+    r = np.asarray(r_conf, dtype=float)
+    return {tau: np.maximum(np.asarray(p, dtype=float), 0.0) - r
+            for tau, p in preds.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -2183,18 +2219,45 @@ def _run_interno(banco: str = BANCO) -> None:
             )
 
             hp_h  = get_hp_for_h(h_val, hp_grupos)
-            # std_y por h: escala natural del target en la ventana de entrenamiento
-            # Requerido por _make_quantile_objective cuando AJUSTE_ARCTAN = True
-            std_y = max(float(y_train.std()), 1.0) if AJUSTE_ARCTAN else 0.0
-            modelos = entrenar_modelos_h(X_train, y_train, X_val, y_val, hp_h,
+
+            # ── Descomposición de h=2 (ver DESCOMPONER_H2) ───────────────────
+            # Se exige R_conf_t2 sin NaN en TRAIN y TEST: sin él la
+            # transformación no se puede deshacer y sería peor el remedio.
+            _desc = (DESCOMPONER_H2 and h_val == 2
+                     and "R_conf_t2" in X_train.columns
+                     and X_train["R_conf_t2"].notna().all()
+                     and X_test["R_conf_t2"].notna().all()
+                     and (len(X_val) == 0 or X_val["R_conf_t2"].notna().all()))
+            if DESCOMPONER_H2 and h_val == 2 and not _desc:
+                log.warning("h=2: descomposición omitida (R_conf_t2 ausente o con NaN)")
+
+            if _desc:
+                _r_te    = X_test["R_conf_t2"].to_numpy(dtype=float)
+                _r_vl    = (X_val["R_conf_t2"].to_numpy(dtype=float)
+                            if len(X_val) else None)
+                y_fit_tr = y_train.to_numpy(dtype=float) + \
+                           X_train["R_conf_t2"].to_numpy(dtype=float)   # D(t+2)
+                y_fit_vl = (y_val.to_numpy(dtype=float) + _r_vl
+                            if len(X_val) else y_val)
+            else:
+                y_fit_tr, y_fit_vl = y_train, y_val
+
+            # std_y escala el objetivo arctan: debe medirse sobre lo que se
+            # entrena. Si se entrena D(t+2) pero se mide sobre target, el
+            # suavizado s = s_factor × std_y queda mal dimensionado.
+            std_y = max(float(np.std(y_fit_tr)), 1.0) if AJUSTE_ARCTAN else 0.0
+            modelos = entrenar_modelos_h(X_train, y_fit_tr, X_val, y_fit_vl, hp_h,
                                          std_y=std_y)
 
             # Predicciones una sola vez por conjunto. Se reordenan para eliminar
             # cruces de cuantiles y el mismo dict alimenta el scaffold y las
             # métricas, así que lo que se guarda y lo que se mide coinciden.
-            _preds_test, _nx_t = _reordenar_cuantiles(
-                {tau: m.predict(X_test) for tau, m in modelos.items()}
-            )
+            # Con _desc se destransforma ANTES de reordenar, para que todo lo
+            # de aguas abajo vea valores en el espacio del target original.
+            _pt = {tau: m.predict(X_test) for tau, m in modelos.items()}
+            if _desc:
+                _pt = _destransformar_h2(_pt, _r_te)
+            _preds_test, _nx_t = _reordenar_cuantiles(_pt)
             n_cruces_test += _nx_t
             n_filas_test  += len(y_test)
 
@@ -2215,9 +2278,10 @@ def _run_interno(banco: str = BANCO) -> None:
             # ── VAL scaffold (para CQR en step006) ───────────────────────────
             _preds_val = None
             if len(X_val) > 0:
-                _preds_val, _nx_v = _reordenar_cuantiles(
-                    {tau: m.predict(X_val) for tau, m in modelos.items()}
-                )
+                _pv = {tau: m.predict(X_val) for tau, m in modelos.items()}
+                if _desc:
+                    _pv = _destransformar_h2(_pv, _r_vl)
+                _preds_val, _nx_v = _reordenar_cuantiles(_pv)
                 n_cruces_val += _nx_v
                 n_filas_val  += len(y_val)
 
