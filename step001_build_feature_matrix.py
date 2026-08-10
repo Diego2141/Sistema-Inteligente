@@ -1754,10 +1754,26 @@ def _build_lag_posicion_mes(serie_valores, fechas_th, fechas_t, lags_meses):
 
     Retorna (max_abs, n_disponibles) como Series alineadas con la entrada.
     """
-    idx = pd.DatetimeIndex(serie_valores.index)
+    # El CALENDARIO de posiciones y la SERIE DE VALORES son cosas distintas y
+    # tienen que construirse por separado.
+    #
+    # Las fechas objetivo t+h se extienden más allá del último dato bancario: en
+    # las fechas de origen recientes, y SIEMPRE en producción, donde t+h es futuro
+    # por definición. Si el calendario se tomara solo del índice de la serie, la
+    # posición en el mes de esas fechas sería NaN y el cálculo abortaría — aunque
+    # los cuatro rezagos, que son pasado, estén perfectamente disponibles.
+    #
+    # Se une el índice de la serie con las fechas objetivo. Como t+h recorre todos
+    # los horizontes para cada fecha de origen, ese conjunto es denso y completa el
+    # calendario hábil hasta el final del horizonte de proyección. Los valores
+    # siguen saliendo solo de la serie: un día del calendario sin dato produce NaN
+    # y queda fuera del máximo.
+    idx = (pd.DatetimeIndex(serie_valores.index)
+           .union(pd.DatetimeIndex(fechas_th).dropna().unique())
+           .sort_values())
 
-    # Distancia en días hábiles al cierre de mes, sobre el calendario de la serie.
-    # rank descendente dentro del mes: el último día hábil del mes = 0.
+    # Distancia en días hábiles al cierre de mes. rank descendente dentro del mes:
+    # el último día hábil del mes = 0.
     _tmp = pd.DataFrame({"f": idx, "ym": idx.to_period("M")})
     dcm = (_tmp.groupby("ym")["f"].rank(ascending=False, method="first")
                                   .values - 1).astype(int)
@@ -2186,8 +2202,11 @@ def build_feature_matrix(
         _serie_flujo  = (df_bancarios[f"{banco}_D"] - df_bancarios[f"{banco}_R"])
         _serie_retiro = df_bancarios[f"{banco}_R"]
         for _nom, _ser in (("flujo", _serie_flujo), ("retiro", _serie_retiro)):
+            # Sin dropna: el índice completo de df_bancarios es parte del
+            # calendario. Los días sin dato dan NaN al buscar el valor y quedan
+            # fuera del máximo, pero siguen contando para la posición en el mes.
             _mx, _n = _build_lag_posicion_mes(
-                _ser.dropna(), df["fecha_th"], df["fecha_t"], LAGS_POSICION_MES
+                _ser, df["fecha_th"], df["fecha_t"], LAGS_POSICION_MES
             )
             df[f"esc_{_nom}_pos"] = _mx.values
             if _nom == "flujo":
