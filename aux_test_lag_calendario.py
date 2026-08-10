@@ -400,11 +400,16 @@ def agregar_candidato(df, serie, col_flujo, modo_dcm, etiqueta,
         df[f"esc_{etiqueta}_{suf}"] = serie_est
         etiquetas.append(f"{etiqueta}_{suf}")
 
-    # Máximo sin el sesgo por conteo: solo donde están los 3 rezagos.
+    # Los tres estadísticos restringidos a filas con TODOS los rezagos. Es la
+    # única comparación limpia entre ellos: sobre la misma submuestra y sin el
+    # sesgo de que E[máx de 3] > E[máx de 1]. Cobertura baja a propósito.
     if not solo_mediana:
-        et3 = f"{etiqueta}_max3"
-        df[f"esc_{et3}"] = A.max(axis=1, skipna=True).where(n_lags == len(LAGS_MESES))
-        etiquetas.append(et3)
+        completo = n_lags == len(LAGS_MESES)
+        for suf, est in (("med3", A.median(axis=1, skipna=True)),
+                         ("max3", A.max(axis=1, skipna=True)),
+                         ("mea3", A.mean(axis=1, skipna=True))):
+            df[f"esc_{etiqueta}_{suf}"] = est.where(completo)
+            etiquetas.append(f"{etiqueta}_{suf}")
 
     cob = df[f"esc_{etiqueta}_med"].notna().mean()
     print(f"     {etiqueta:>18}: lags disponibles {n_disp} | "
@@ -480,7 +485,9 @@ def main() -> None:
               f"[{lo:>+6.3f},{hi:>+6.3f}] "
               f"{'—' if not np.isfinite(c_both) else f'{c_both:+.3f}':>13} "
               f"{'—' if not np.isfinite(c_rec) else f'{c_rec:+.3f}':>12}{marca}")
-        filas.append({"candidato": et, "n": len(sub), "corr_simple": c_simple,
+        filas.append({"candidato": et, "n": len(sub),
+                      "cobertura": len(sub) / len(df),
+                      "corr_simple": c_simple,
                       "parcial_ancho": c_anch, "ic_lo": lo, "ic_hi": hi,
                       "parcial_ancho_sigma": c_both, "parcial_ancho_recencia": c_rec,
                       "tipo": ("competidor" if et == "sigma_22d"
@@ -586,26 +593,48 @@ def main() -> None:
     tab_ext = pd.DataFrame(filas_ext)
 
     # Comparación directa entre estadísticos de la MISMA serie y alineación
-    print("\n  Comparación mediana vs máximo, por familia:")
-    print(f"  {'familia':>16} {'med':>8} {'max':>8} {'max3':>8} {'gana':>10}")
-    print("  " + "-" * 56)
-    for fam in ("flujo_hab", "retiro_hab"):
-        vals = {}
-        for suf in ("med", "max", "max3"):
-            f_ = tab_ext[tab_ext["candidato"] == f"{fam}_{suf}"]
-            vals[suf] = float(f_["parcial_extremo"].iloc[0]) if len(f_) else np.nan
-        finitos = {k: v for k, v in vals.items() if np.isfinite(v)}
-        gana = max(finitos, key=finitos.get) if finitos else "—"
-        print(f"  {fam:>16} {vals['med']:>+8.3f} {vals['max']:>+8.3f} "
-              f"{vals['max3']:>+8.3f} {gana:>10}")
-    print("\n  'max3' = máximo restringido a filas con los 3 rezagos: elimina el")
-    print("  sesgo de que E[máx de 3] > E[máx de 1]. Si 'max' gana pero 'max3' no,")
-    print("  la ventaja del máximo era el artefacto del conteo, no señal.")
+    def _tabla_estadisticos(tabla, col_val, titulo):
+        print(f"\n  {titulo}")
+        print(f"  {'familia':>13} | {'med':>7} {'max':>7} {'mea':>7} | "
+              f"{'med3':>7} {'max3':>7} {'mea3':>7} | {'gana(3)':>8}")
+        print("  " + "-" * 76)
+        for fam in ("flujo_hab", "retiro_hab"):
+            v = {}
+            for suf in ("med", "max", "mea", "med3", "max3", "mea3"):
+                f_ = tabla[tabla["candidato"] == f"{fam}_{suf}"]
+                v[suf] = float(f_[col_val].iloc[0]) if len(f_) else np.nan
+            tri = {k: v[k] for k in ("med3", "max3", "mea3") if np.isfinite(v[k])}
+            gana = max(tri, key=tri.get) if tri else "—"
+            print(f"  {fam:>13} | {v['med']:>+7.3f} {v['max']:>+7.3f} {v['mea']:>+7.3f} | "
+                  f"{v['med3']:>+7.3f} {v['max3']:>+7.3f} {v['mea3']:>+7.3f} | {gana:>8}")
+
+    _tabla_estadisticos(tab_ext, "parcial_extremo", "Contra el DECIL SUPERIOR del error:")
+    _tabla_estadisticos(tab, "parcial_ancho", "Contra |error| (referencia, sección A):")
+
+    print("\n  Las tres primeras columnas usan TODA la muestra pero mezclan filas")
+    print("  con 3, 2 y 1 rezago — y con 1 solo rezago med = max = mea, así que")
+    print("  ahí los tres son idénticos por construcción y el contraste se diluye.")
+    print("  Las columnas *3 restringen a filas con los 3 rezagos: misma submuestra,")
+    print("  sin el sesgo de que E[máx de 3] > E[máx de 1]. Esa es la comparación")
+    print("  limpia entre estadísticos, y por eso 'gana(3)' se decide sobre ellas.")
 
     # ── C. Por tramo de horizonte ─────────────────────────────────────────────
     _titulo("C · Por tramo de horizonte (la disponibilidad cambia con h)")
-    mejor = tab.loc[tab["parcial_ancho"].abs().idxmax(), "candidato"]
+    # El "mejor" se elige SOLO entre candidatos de cobertura razonable. Las
+    # variantes *3 están restringidas a filas con los 3 rezagos (h<=21), así que
+    # su parcial no es comparable con la de un candidato de cobertura completa:
+    # elegirlas por magnitud bruta distorsionaría A2, C y D, que se calculan
+    # sobre la submuestra del ganador.
+    COBERTURA_MIN = 0.50
+    _elegibles = tab[tab["cobertura"] >= COBERTURA_MIN]
+    if _elegibles.empty:
+        _elegibles = tab
+    mejor = _elegibles.loc[_elegibles["parcial_ancho"].abs().idxmax(), "candidato"]
     col_m = mejor if mejor == "sigma_22d" else f"esc_{mejor}"
+    _descartados = tab.loc[tab["cobertura"] < COBERTURA_MIN, "candidato"].tolist()
+    if _descartados:
+        print(f"  (excluidos por cobertura <{COBERTURA_MIN:.0%}: "
+              f"{', '.join(_descartados)})")
     print(f"  Mejor candidato de la sección A: {mejor}\n")
     df["h_bin"] = pd.cut(df["h"], [1, 21, 42, 63, 75],
                          labels=["2-21 (3 lags)", "22-42 (2 lags)",
@@ -691,8 +720,13 @@ def main() -> None:
         print("  -> CONSTRUIR. Aporta información de escala incremental sobre la")
         print(f"     anchura predicha Y sobre {NOMBRE_COMPETIDOR}. Alinear por calendario sí")
         print("     preserva variación que promediar destruye.")
-        print(f"     Alineación ganadora: {'hábiles' if mejor.endswith('hab') else 'calendario'}")
-        print(f"     Serie ganadora     : {'flujo neto' if 'flujo' in mejor else 'retiro'}")
+        # Parsear por partes: el nombre es <serie>_<alineación>_<estadístico>
+        _p = mejor.split("_")
+        print(f"     Serie ganadora     : "
+              f"{'flujo neto' if _p[0] == 'flujo' else 'retiro'}")
+        print(f"     Alineación ganadora: "
+              f"{'días hábiles' if len(_p) > 1 and _p[1] == 'hab' else 'días calendario'}")
+        print(f"     Estadístico ganador: {_p[2] if len(_p) > 2 else 'mediana'}")
 
     # ── Salidas ───────────────────────────────────────────────────────────────
     DIR_OUT.mkdir(parents=True, exist_ok=True)
