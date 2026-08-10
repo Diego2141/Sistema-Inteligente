@@ -72,6 +72,14 @@ DIR_OUT  = DIR_CQR  / f"cqr_{_MODO_SUFIJO}"
 
 LAGS_MESES  = [1, 2, 3]
 
+# Benchmark de RECENCIA PURA: magnitud del flujo en los últimos N días hábiles,
+# sin alinear por posición del mes. Es el competidor que decide si el valor del
+# candidato viene de ALINEAR por calendario o simplemente de "hubo movimiento
+# grande hace poco". Si empatan, el feature correcto es éste: más barato de
+# construir y disponible para los 74 horizontes en vez de 62.
+VENTANAS_RECENCIA = [3, 5, 22]
+REC_REFERENCIA    = "rec5_flujo"   # el que se usa como control en la parcial
+
 # Competidores: variables de escala que el modelo YA tiene. Se toman las que
 # existan en la matriz, en este orden de preferencia para el titular. La matriz
 # cambia entre experimentos (la reducida no trae sigma_22d), así que se descubren
@@ -86,6 +94,7 @@ N_BINS      = 10
 # Paleta validada (light, surface #fcfcfb): lightness/chroma/CVD/normal-vision PASS
 C_CAND  = "#eb6834"   # candidato: rezago de calendario
 C_COMP  = "#2a78d6"   # competidor: sigma_22d (lo que el modelo ya tiene)
+C_REC   = "#1baf7a"   # benchmark de recencia pura (siempre con etiqueta directa)
 C_REF   = "#898781"
 C_TINTA = "#0b0b0b"
 C_TINTA2 = "#52514e"
@@ -249,6 +258,15 @@ def cargar_serie_diaria():
         serie[c] = d[c]
     serie.attrs["competidores"] = comp
 
+    # Recencia pura: mediana de |flujo| en las últimas N ruedas, incluyendo t.
+    # Incluir t es correcto y consistente con la máscara de los rezagos: D_t0 y
+    # R_t0 están anclados en t y son conocidos ese mismo día.
+    for w in VENTANAS_RECENCIA:
+        serie[f"rec{w}_flujo"]  = serie["flujo"].abs().rolling(
+            w, min_periods=max(2, w // 3)).median()
+        serie[f"rec{w}_retiro"] = serie["retiro"].abs().rolling(
+            w, min_periods=max(2, w // 3)).median()
+
     # Distancia al cierre de mes, en las DOS métricas. Cuál corresponde es una
     # pregunta abierta: el período de encaje se computa sobre días calendario,
     # pero el modelo lleva dias_al_cierre_mes en hábiles. Se prueban ambas.
@@ -378,18 +396,30 @@ def main() -> None:
     df = cargar_preds(serie, comp)
 
     _titulo("Construcción de candidatos (con máscara point-in-time)")
-    variantes = []
+    variantes, cal_vars, rec_vars = [], [], []
     for col_flujo in ("flujo", "retiro"):
         for modo in ("hab", "cal"):
             et = f"{col_flujo}_{modo}"
             df = agregar_candidato(df, serie, col_flujo, modo, et)
-            variantes.append(et)
+            variantes.append(et); cal_vars.append(et)
+
+    # Recencia pura: se mapea por fecha_t, así que está disponible siempre y para
+    # todos los horizontes. Comparte el prefijo esc_ para pasar por las mismas
+    # secciones sin código aparte.
+    for w in VENTANAS_RECENCIA:
+        for serie_col in ("flujo", "retiro"):
+            et = f"rec{w}_{serie_col}"
+            df[f"esc_{et}"] = df["fecha_t"].map(serie[et])
+            variantes.append(et); rec_vars.append(et)
+            print(f"     {et:>18}: recencia pura | "
+                  f"cobertura {df[f'esc_{et}'].notna().mean():.1%}")
 
     _titulo("A · ¿Aporta escala POR ENCIMA de lo que el modelo ya usa?")
     print("  Spearman contra r = |target − q50|, controlando por anchura Y por h\n")
     _et_comp = NOMBRE_COMPETIDOR or "sin competidor"
+    _col_rec = f"esc_{REC_REFERENCIA}"
     print(f"  {'candidato':>18} {'simple':>9} {'| ancho':>10} "
-          f"{'IC 90%':>18} {'| ancho+'+_et_comp[:10]:>15}")
+          f"{'IC 90%':>18} {'| +'+_et_comp[:9]:>13} {'| +recencia':>12}")
     print("  " + "-" * 76)
 
     filas = []
@@ -406,19 +436,87 @@ def main() -> None:
         c_both = (np.nan if et == "sigma_22d" or len(sub2) < 100 else
                   corr_parcial(sub2[col], sub2["r"],
                                [sub2["ancho"], sub2["h"], sub2["sigma_22d"]]))
-        marca = f"  <- competidor ({NOMBRE_COMPETIDOR})" if et == "sigma_22d" else ""
+        # ¿Sobrevive a controlar por la RECENCIA PURA? Es la pregunta que separa
+        # "alinear por calendario aporta" de "solo detecta movimiento reciente".
+        if et in rec_vars or et == "sigma_22d":
+            c_rec = np.nan
+        else:
+            sub3 = sub.dropna(subset=[_col_rec])
+            c_rec = (np.nan if len(sub3) < 100 else
+                     corr_parcial(sub3[col], sub3["r"],
+                                  [sub3["ancho"], sub3["h"], sub3[_col_rec]]))
+        if et == "sigma_22d":
+            marca = f"  <- competidor ({NOMBRE_COMPETIDOR})"
+        elif et in rec_vars:
+            marca = "  <- recencia pura"
+        else:
+            marca = ""
         print(f"  {et:>18} {c_simple:>+9.3f} {c_anch:>+10.3f} "
               f"[{lo:>+6.3f},{hi:>+6.3f}] "
-              f"{'—' if not np.isfinite(c_both) else f'{c_both:+.3f}':>15}{marca}")
+              f"{'—' if not np.isfinite(c_both) else f'{c_both:+.3f}':>13} "
+              f"{'—' if not np.isfinite(c_rec) else f'{c_rec:+.3f}':>12}{marca}")
         filas.append({"candidato": et, "n": len(sub), "corr_simple": c_simple,
                       "parcial_ancho": c_anch, "ic_lo": lo, "ic_hi": hi,
-                      "parcial_ancho_sigma": c_both})
+                      "parcial_ancho_sigma": c_both, "parcial_ancho_recencia": c_rec,
+                      "tipo": ("competidor" if et == "sigma_22d"
+                               else "recencia" if et in rec_vars else "calendario")})
     tab = pd.DataFrame(filas)
 
     print("\n  'simple' sube por construcción: todo lo que mide magnitud")
     print("  correlaciona con todo lo que mide magnitud. El número que decide es")
     print("  '| ancho': lo que aporta POR ENCIMA de la escala que el modelo ya predice.")
-    print(f"  '| ancho+{_et_comp}' responde si alinear por calendario le gana a promediar.")
+    print(f"  '| +{_et_comp}' responde si le gana a promediar sobre el mes.")
+    print(f"  '| +recencia' responde si le gana a mirar solo lo reciente ({REC_REFERENCIA}).")
+
+    # ── A2. Cara a cara en SUBMUESTREO COMÚN ──────────────────────────────────
+    _titulo("A2 · Calendario vs recencia pura, sobre las MISMAS filas")
+    print("  El candidato de calendario cubre ~78% de las filas y la recencia el")
+    print("  100%: compararlos sobre muestras distintas sería tramposo. Acá se")
+    print("  restringe a las filas donde AMBOS existen.\n")
+
+    mejor_cal = max(cal_vars,
+                    key=lambda e: abs(tab.loc[tab["candidato"] == e,
+                                              "parcial_ancho"].iloc[0])
+                    if (tab["candidato"] == e).any() else 0)
+    col_cal = f"esc_{mejor_cal}"
+    print(f"  {'variable':>18} {'tipo':>11} {'| ancho,h':>11} {'IC 90%':>18}")
+    print("  " + "-" * 62)
+    filas_cc, comunes = [], df.dropna(subset=[col_cal, "r", "ancho"])
+    for et in [mejor_cal] + rec_vars:
+        col = f"esc_{et}"
+        sub_c = comunes.dropna(subset=[col])
+        if len(sub_c) < 100:
+            continue
+        M, ok = _matriz_rangos(sub_c, [col, "r", "ancho", "h"])
+        c = _parcial_M(M[ok])
+        lo, hi = bootstrap_M(sub_c, M, ok)
+        tipo = "CALENDARIO" if et == mejor_cal else "recencia"
+        print(f"  {et:>18} {tipo:>11} {c:>+11.3f} [{lo:>+6.3f},{hi:>+6.3f}]")
+        filas_cc.append({"variable": et, "tipo": tipo, "n": len(sub_c),
+                         "parcial": c, "ic_lo": lo, "ic_hi": hi})
+    tab_cc = pd.DataFrame(filas_cc)
+    print(f"\n  n común = {len(comunes):,} filas")
+
+    # Veredicto del cara a cara: se compara el punto del calendario contra el
+    # TECHO del IC de la mejor recencia. Si aun así gana, la ventaja no se
+    # explica por ruido de muestreo.
+    if len(tab_cc) >= 2:
+        f_cal = tab_cc[tab_cc["tipo"] == "CALENDARIO"].iloc[0]
+        f_rec = tab_cc[tab_cc["tipo"] == "recencia"].sort_values(
+            "parcial", ascending=False).iloc[0]
+        print(f"\n  calendario {f_cal['parcial']:+.3f}  vs  "
+              f"mejor recencia ({f_rec['variable']}) {f_rec['parcial']:+.3f}")
+        if f_cal["parcial"] > f_rec["ic_hi"]:
+            print("  -> El calendario gana incluso contra el TECHO del IC de la")
+            print("     recencia. La alineación aporta valor propio.")
+        elif f_cal["ic_hi"] < f_rec["parcial"]:
+            print("  -> La RECENCIA gana. Alinear por calendario no aporta: el")
+            print("     feature correcto es la magnitud reciente, más barata y")
+            print("     disponible en los 74 horizontes.")
+        else:
+            print("  -> EMPATE dentro del ruido. Con ICs superpuestos no hay")
+            print("     evidencia para pagar el costo de la alineación; conviene")
+            print("     la recencia por parsimonia y cobertura.")
 
     # ── B. Solo la cola baja (lo operativo) ───────────────────────────────────
     _titulo("B · Ídem contra r_lo = max(q50 − target, 0)  — solo retiros")
@@ -506,6 +604,9 @@ def main() -> None:
     print(f"  Competidor ({NOMBRE_COMPETIDOR or 'ninguno'})"
           f"{' ' * max(0, 12 - len(NOMBRE_COMPETIDOR or 'ninguno'))}: {p_sig:+.3f}")
     print(f"  Parcial | ancho + sigma  : {fila_m['parcial_ancho_sigma']:+.3f}")
+    if "parcial_ancho_recencia" in fila_m.index and np.isfinite(fila_m["parcial_ancho_recencia"]):
+        print(f"  Parcial | ancho + recencia: {fila_m['parcial_ancho_recencia']:+.3f}"
+              "   <- si cae a ~0, el valor era recencia, no calendario")
     print()
     if not signif:
         print(f"  (criterio: piso del IC 90% > {UMBRAL_SIGNIF:+.2f})\n")
@@ -573,7 +674,9 @@ def graficar(tab, tab_h, sub, col_m, mejor, piv, ruta):
     ax = axes[0, 0]
     t = tab.sort_values("parcial_ancho")
     yp = np.arange(len(t))
-    cols = [C_COMP if c == "sigma_22d" else C_CAND for c in t["candidato"]]
+    _color = lambda c: (C_COMP if c == "sigma_22d"
+                        else C_REC if c.startswith("rec") else C_CAND)
+    cols = [_color(c) for c in t["candidato"]]
     ax.barh(yp - 0.19, t["corr_simple"], height=0.34, color=cols, alpha=0.35, zorder=3)
     ax.barh(yp + 0.19, t["parcial_ancho"], height=0.34, color=cols, zorder=3)
     for i, (s, p) in enumerate(zip(t["corr_simple"], t["parcial_ancho"])):
@@ -584,14 +687,15 @@ def graficar(tab, tab_h, sub, col_m, mejor, piv, ruta):
     ax.grid(axis="x", color=C_GRID, lw=0.6, zorder=0); ax.grid(axis="y", visible=False)
     ax.set_xlabel("Spearman vs |error| realizado", fontsize=9, color=C_TINTA2)
     ax.set_title("1 · Simple (pálido) vs parcial | anchura (sólido)\n"
-                 f"azul = {NOMBRE_COMPETIDOR or 'sin competidor'}, lo que el modelo ya tiene",
+                 f"naranja = calendario · verde = recencia pura · "
+                 f"azul = {NOMBRE_COMPETIDOR or 'sin competidor'}",
                  fontsize=10, fontweight="bold", color=C_TINTA, loc="left")
 
     # Panel 2 · parcial con IC
     ax = axes[0, 1]
     t2 = tab.dropna(subset=["ic_lo"]).sort_values("parcial_ancho")
     yp2 = np.arange(len(t2))
-    cols2 = [C_COMP if c == "sigma_22d" else C_CAND for c in t2["candidato"]]
+    cols2 = [_color(c) for c in t2["candidato"]]
     ax.errorbar(t2["parcial_ancho"], yp2,
                 xerr=[t2["parcial_ancho"] - t2["ic_lo"], t2["ic_hi"] - t2["parcial_ancho"]],
                 fmt="none", ecolor=C_REF, elinewidth=1.4, capsize=4, zorder=3)
