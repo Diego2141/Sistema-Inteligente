@@ -350,7 +350,8 @@ def cargar_preds(serie, comp):
     return df
 
 
-def agregar_candidato(df, serie, col_flujo, modo_dcm, etiqueta):
+def agregar_candidato(df, serie, col_flujo, modo_dcm, etiqueta,
+                      solo_mediana=False):
     """
     Añade pos_lag_1/2/3 y esc_<etiqueta> respetando la máscara de disponibilidad.
 
@@ -378,16 +379,37 @@ def agregar_candidato(df, serie, col_flujo, modo_dcm, etiqueta):
         cols_abs.append(vals.abs())
         n_disp.append(int(vals.notna().sum()))
 
-    # Mediana de los |valores| disponibles: con 3 observaciones un solo rezago es
-    # demasiado inestable, y la inestabilidad del estimador es exactamente lo que
-    # viene castigando a este proyecto.
-    df[f"esc_{etiqueta}"] = pd.concat(cols_abs, axis=1).median(axis=1, skipna=True)
-    df[f"n_lags_{etiqueta}"] = pd.concat(cols_abs, axis=1).notna().sum(axis=1)
+    A = pd.concat(cols_abs, axis=1)
+    n_lags = A.notna().sum(axis=1)
+    df[f"n_lags_{etiqueta}"] = n_lags
 
-    cob = df[f"esc_{etiqueta}"].notna().mean()
+    # Tres estadísticos sobre los |rezagos| disponibles.
+    #
+    # MEDIANA: su esperanza NO depende de cuántos rezagos haya. Importa porque el
+    #   conteo varía con h (3, 2 o 1) y con el largo del mes.
+    # MÁXIMO : mejor alineado con predecir COLAS, pero E[máx de 3] > E[máx de 1],
+    #   así que crece con el conteo — que es función de h. Ese sesgo se mide
+    #   aparte con la variante "solo filas con los 3 rezagos".
+    # MEDIA  : intermedio, se incluye como referencia.
+    etiquetas = []
+    for suf, serie_est in (("med", A.median(axis=1, skipna=True)),
+                           ("max", A.max(axis=1, skipna=True)),
+                           ("mea", A.mean(axis=1, skipna=True))):
+        if solo_mediana and suf != "med":
+            continue
+        df[f"esc_{etiqueta}_{suf}"] = serie_est
+        etiquetas.append(f"{etiqueta}_{suf}")
+
+    # Máximo sin el sesgo por conteo: solo donde están los 3 rezagos.
+    if not solo_mediana:
+        et3 = f"{etiqueta}_max3"
+        df[f"esc_{et3}"] = A.max(axis=1, skipna=True).where(n_lags == len(LAGS_MESES))
+        etiquetas.append(et3)
+
+    cob = df[f"esc_{etiqueta}_med"].notna().mean()
     print(f"     {etiqueta:>18}: lags disponibles {n_disp} | "
-          f"cobertura del candidato {cob:.1%}")
-    return df
+          f"cobertura {cob:.1%} | estadísticos {[e.split('_')[-1] for e in etiquetas]}")
+    return df, etiquetas
 
 
 # ── 3. Test ───────────────────────────────────────────────────────────────────
@@ -400,8 +422,11 @@ def main() -> None:
     for col_flujo in ("flujo", "retiro"):
         for modo in ("hab", "cal"):
             et = f"{col_flujo}_{modo}"
-            df = agregar_candidato(df, serie, col_flujo, modo, et)
-            variantes.append(et); cal_vars.append(et)
+            # Los tres estadísticos solo para la alineación hábil, que ya ganó
+            # decisivamente; para 'cal' basta la mediana como referencia.
+            df, ets = agregar_candidato(df, serie, col_flujo, modo, et,
+                                        solo_mediana=(modo == "cal"))
+            variantes.extend(ets); cal_vars.extend(ets)
 
     # Recencia pura: se mapea por fecha_t, así que está disponible siempre y para
     # todos los horizontes. Comparte el prefijo esc_ para pasar por las mismas
@@ -533,6 +558,50 @@ def main() -> None:
         tab.loc[tab["candidato"] == et, "parcial_lo"] = c
         print(f"  {et:>18} {c:>+10.3f} [{lo:>+6.3f},{hi:>+6.3f}]")
 
+    # ── B2. Contra el decil superior del error: ¿mediana o máximo? ────────────
+    _titulo("B2 · ¿Qué estadístico predice los EXTREMOS?  (mediana vs máximo)")
+    print("  Las secciones A y B correlacionan contra |error|, que es una medida")
+    print("  de CENTRO — eso favorece a la mediana por construcción del test. Si")
+    print("  lo que importa son las colas, el objetivo correcto es un indicador de")
+    print("  error extremo. Se usa el decil superior DENTRO de cada h, porque el")
+    print("  error escala con el horizonte y un P90 global solo elegiría h grandes.\n")
+
+    df["r_ext"] = (df.groupby("h")["r"].rank(pct=True) > 0.90).astype(float)
+    print(f"  {'candidato':>22} {'vs |error|':>11} {'vs decil sup.':>14} {'IC 90%':>18}")
+    print("  " + "-" * 70)
+    filas_ext = []
+    for et in variantes + ["sigma_22d"]:
+        col = et if et == "sigma_22d" else f"esc_{et}"
+        sub_e = df.dropna(subset=[col, "r_ext", "ancho"])
+        if len(sub_e) < 100:
+            continue
+        M, ok = _matriz_rangos(sub_e, [col, "r_ext", "ancho", "h"])
+        c_ext = _parcial_M(M[ok])
+        lo, hi = bootstrap_M(sub_e, M, ok)
+        prev = tab.loc[tab["candidato"] == et, "parcial_ancho"]
+        c_r = float(prev.iloc[0]) if len(prev) else np.nan
+        print(f"  {et:>22} {c_r:>+11.3f} {c_ext:>+14.3f} [{lo:>+6.3f},{hi:>+6.3f}]")
+        filas_ext.append({"candidato": et, "parcial_r": c_r,
+                          "parcial_extremo": c_ext, "ic_lo": lo, "ic_hi": hi})
+    tab_ext = pd.DataFrame(filas_ext)
+
+    # Comparación directa entre estadísticos de la MISMA serie y alineación
+    print("\n  Comparación mediana vs máximo, por familia:")
+    print(f"  {'familia':>16} {'med':>8} {'max':>8} {'max3':>8} {'gana':>10}")
+    print("  " + "-" * 56)
+    for fam in ("flujo_hab", "retiro_hab"):
+        vals = {}
+        for suf in ("med", "max", "max3"):
+            f_ = tab_ext[tab_ext["candidato"] == f"{fam}_{suf}"]
+            vals[suf] = float(f_["parcial_extremo"].iloc[0]) if len(f_) else np.nan
+        finitos = {k: v for k, v in vals.items() if np.isfinite(v)}
+        gana = max(finitos, key=finitos.get) if finitos else "—"
+        print(f"  {fam:>16} {vals['med']:>+8.3f} {vals['max']:>+8.3f} "
+              f"{vals['max3']:>+8.3f} {gana:>10}")
+    print("\n  'max3' = máximo restringido a filas con los 3 rezagos: elimina el")
+    print("  sesgo de que E[máx de 3] > E[máx de 1]. Si 'max' gana pero 'max3' no,")
+    print("  la ventaja del máximo era el artefacto del conteo, no señal.")
+
     # ── C. Por tramo de horizonte ─────────────────────────────────────────────
     _titulo("C · Por tramo de horizonte (la disponibilidad cambia con h)")
     mejor = tab.loc[tab["parcial_ancho"].abs().idxmax(), "candidato"]
@@ -633,6 +702,8 @@ def main() -> None:
         with pd.ExcelWriter(ruta_xl, engine="openpyxl") as xl:
             tab.to_excel(xl, sheet_name="candidatos", index=False)
             tab_h.to_excel(xl, sheet_name="por_horizonte", index=False)
+            tab_ext.to_excel(xl, sheet_name="extremos", index=False)
+            tab_cc.to_excel(xl, sheet_name="cara_a_cara", index=False)
             piv.reset_index().to_excel(xl, sheet_name="rango_dinamico", index=False)
         print(f"\n[OK] {ruta_xl.name}")
     except Exception as e:
