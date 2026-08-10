@@ -1721,7 +1721,8 @@ def _get_bdays_en_trim(fecha, peru_bday):
     return pd.bdate_range(start=inicio_trim, end=fin_trim, freq=peru_bday)
 
 
-def _build_lag_posicion_mes(serie_valores, fechas_th, fechas_t, lags_meses):
+def _build_lag_posicion_mes(serie_valores, fechas_th, fechas_t, lags_meses,
+                            peru_bday):
     """
     Rezagos del flujo alineados por POSICIÓN EN EL MES, y su máximo absoluto.
 
@@ -1757,20 +1758,30 @@ def _build_lag_posicion_mes(serie_valores, fechas_th, fechas_t, lags_meses):
     # El CALENDARIO de posiciones y la SERIE DE VALORES son cosas distintas y
     # tienen que construirse por separado.
     #
-    # Las fechas objetivo t+h se extienden más allá del último dato bancario: en
-    # las fechas de origen recientes, y SIEMPRE en producción, donde t+h es futuro
-    # por definición. Si el calendario se tomara solo del índice de la serie, la
-    # posición en el mes de esas fechas sería NaN y el cálculo abortaría — aunque
-    # los cuatro rezagos, que son pasado, estén perfectamente disponibles.
+    # El calendario se genera con peru_bday, EL MISMO que usa _build_seasonal_table
+    # para dias_al_cierre_mes y el mismo con el que se derivan las fechas t+h. Es
+    # deliberado y no es intercambiable con el índice de la serie: df_bancarios se
+    # reindexa con pd.bdate_range (Lun-Vie SIN excluir feriados) para preservar los
+    # ceros de días festivos en los lags, de modo que su índice tiene ~291 días de
+    # más. Calcular la distancia al cierre sobre él contaría feriados como hábiles
+    # y produciría una posición distinta de la que el resto de la matriz entiende
+    # por "días al cierre de mes"; además los rezagos podrían caer en feriados,
+    # donde R = D = 0 por construcción y el valor no significa nada.
     #
-    # Se une el índice de la serie con las fechas objetivo. Como t+h recorre todos
-    # los horizontes para cada fecha de origen, ese conjunto es denso y completa el
-    # calendario hábil hasta el final del horizonte de proyección. Los valores
-    # siguen saliendo solo de la serie: un día del calendario sin dato produce NaN
-    # y queda fuera del máximo.
-    idx = (pd.DatetimeIndex(serie_valores.index)
-           .union(pd.DatetimeIndex(fechas_th).dropna().unique())
-           .sort_values())
+    # Debe cubrir hasta la última fecha objetivo: t+h se extiende más allá del
+    # último dato bancario en los orígenes recientes, y SIEMPRE en producción,
+    # donde t+h es futuro por definición. Si el calendario terminara con los datos,
+    # la posición de esas fechas sería NaN y el cálculo abortaría, aunque los
+    # rezagos —que son pasado— estén disponibles.
+    #
+    # Los valores siguen saliendo solo de la serie: un día del calendario sin dato
+    # produce NaN y queda fuera del máximo.
+    _th = pd.DatetimeIndex(fechas_th).dropna()
+    idx = pd.DatetimeIndex(pd.bdate_range(
+        start=min(pd.DatetimeIndex(serie_valores.index).min(), _th.min()),
+        end=max(pd.DatetimeIndex(serie_valores.index).max(), _th.max()),
+        freq=peru_bday,
+    ))
 
     # Distancia en días hábiles al cierre de mes. rank descendente dentro del mes:
     # el último día hábil del mes = 0.
@@ -2235,7 +2246,7 @@ def build_feature_matrix(
             # calendario. Los días sin dato dan NaN al buscar el valor y quedan
             # fuera del máximo, pero siguen contando para la posición en el mes.
             _mx, _n = _build_lag_posicion_mes(
-                _ser, df["fecha_th"], df["fecha_t"], LAGS_POSICION_MES
+                _ser, df["fecha_th"], df["fecha_t"], LAGS_POSICION_MES, peru_bday
             )
             df[f"esc_{_nom}_pos"] = _mx.values
             if _nom == "flujo":
