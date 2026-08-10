@@ -36,9 +36,15 @@ anchura para la misma cobertura, la señal de escala del modelo sirve.
 
 El número que importa
 ---------------------
-    ORÁCULO CONDICIONAL: reescala cada bin por separado. Alcanza 90% en todos
-    los bins por construcción. La diferencia de anchura contra el oráculo global
-    es EL COSTO EN MM USD de la heterocedasticidad no modelada.
+    ORÁCULO CONDICIONAL: reescala cada bin por separado. Alcanza 90% en TODOS
+    los bins, no solo en el agregado. La diferencia de anchura contra el oráculo
+    global (delta_ancho) tiene dos lecturas según su signo:
+
+        Δ < 0  el condicional es más angosto -> modelar esa dimensión AHORRA
+               anchura; la partición separa bins de escala distinta.
+        Δ > 0  el condicional es más ancho -> el global venía alcanzando su 90%
+               SUB-CUBRIENDO bins de cola pesada, y llevarlos a 90% cuesta más
+               de lo que se ahorra en el resto.
 
 Por qué se evalúan VARIAS dimensiones
 -------------------------------------
@@ -241,11 +247,10 @@ def evaluar_dimension(df, nombre, etiquetas, y, q50, w_lo, w_hi,
     Para una partición dada calcula:
       · cobertura por bin tras el oráculo global (+ IC bootstrap de bloques)
       · cuántos bins tienen su IC 90% fuera del objetivo
-      · el oráculo CONDICIONAL a esa partición y su ahorro de anchura
+      · el oráculo CONDICIONAL a esa partición y su delta de anchura
 
-    El ahorro es el costo, en MM USD, de no modelar esa dimensión: es la anchura
-    extra que el oráculo global gasta en todas las filas para poder cubrir los
-    bins difíciles.
+    Ver la nota sobre el signo de delta_ancho más abajo: NO es un "ahorro"
+    unívoco, porque los dos oráculos cumplen restricciones distintas.
     """
     codigos, _ = pd.factorize(etiquetas)
     n_bins = int(codigos.max()) + 1
@@ -271,6 +276,21 @@ def evaluar_dimension(df, nombre, etiquetas, y, q50, w_lo, w_hi,
     ancho_cond_mm = float((q95_c - q05_c).mean() / 1e6)
     cov_cond      = float(((y >= q05_c) & (y <= q95_c)).mean())
 
+    # delta_ancho = anchura del oráculo CONDICIONAL menos la del GLOBAL.
+    #
+    # El signo se lee al revés de lo que sugiere la intuición, porque los dos
+    # oráculos cumplen restricciones distintas: el global logra 90% EN EL
+    # AGREGADO, el condicional 90% EN CADA BIN.
+    #
+    #   delta < 0 : el condicional es más angosto. La partición separa bins de
+    #               escala distinta y el global desperdicia anchura igualándolos.
+    #               Modelar esta dimensión AHORRA anchura.
+    #   delta > 0 : el condicional es más ancho. Significa que el global venía
+    #               alcanzando su 90% global SUB-CUBRIENDO algunos bins, y
+    #               llevarlos a 90% cuesta más de lo que se ahorra en el resto.
+    #               Señal de colas pesadas concentradas en pocos bins.
+    delta_ancho = ancho_cond_mm - ancho_global_mm
+
     return {
         "dimension": nombre,
         "condicionable": condicionable,
@@ -284,8 +304,8 @@ def evaluar_dimension(df, nombre, etiquetas, y, q50, w_lo, w_hi,
         "s_lo": s_lo_b, "s_hi": s_hi_b,
         "ancho_cond_mm": ancho_cond_mm,
         "cov_cond": cov_cond,
-        "ahorro_mm": ancho_global_mm - ancho_cond_mm,
-        "ahorro_pct": (ancho_global_mm - ancho_cond_mm) / max(ancho_cond_mm, EPS),
+        "delta_ancho_mm": delta_ancho,
+        "delta_ancho_pct": delta_ancho / max(ancho_global_mm, EPS),
     }
 
 
@@ -343,14 +363,26 @@ def main() -> None:
                                  "31-40", "41-50", "51-60", "61-75"])
     ancho_medio = df.groupby("dec_ancho")["ancho"].mean().values / 1e6
 
-    # Se evalúan CUATRO particiones. Mirar solo una produce falsos negativos:
-    # la heterocedasticidad temporal es invisible en los deciles de anchura,
-    # porque dentro de cada decil los regímenes se mezclan por igual.
+    # Decil de anchura DENTRO de cada (fold, h_bin): desconfunde la dimensión de
+    # escala de las de tiempo y horizonte. La anchura predicha crece con h y
+    # varía por fold, así que un decil GLOBAL de anchura puede estar capturando
+    # tiempo u horizonte disfrazados de escala. Si la dispersión sobrevive al
+    # estratificar, es escala genuina; si se desploma, era el confound.
+    df["dec_ancho_intra"] = (
+        df.groupby(["fold", "h_bin"])["ancho"]
+          .transform(lambda s: pd.qcut(s, min(N_DECILES, max(2, s.nunique())),
+                                       labels=False, duplicates="drop"))
+          .fillna(0).astype(int))
+
+    # Mirar una sola partición produce falsos negativos: la heterocedasticidad
+    # temporal es invisible en los deciles de anchura, porque dentro de cada
+    # decil los regímenes se mezclan por igual.
     DIMS = [
-        ("decil de anchura", df["dec_ancho"].values,          True),
-        ("horizonte h",      df["h_bin"].astype(str).values,  True),
-        ("mes calendario",   df["mes"].values,                False),
-        ("fold",             df["fold"].values,               False),
+        ("decil de anchura",  df["dec_ancho"].values,         True),
+        ("anchura intra f×h", df["dec_ancho_intra"].values,   True),
+        ("horizonte h",       df["h_bin"].astype(str).values, True),
+        ("mes calendario",    df["mes"].values,               False),
+        ("fold",              df["fold"].values,              False),
     ]
 
     print(f"  Bootstrap de bloques: B={BOOT_B}, bloque={BOOT_BLOQUE} dh sobre "
@@ -364,11 +396,43 @@ def main() -> None:
         print(f"  {nombre:>18} | bins {r['n_bins']:>3} | "
               f"dispersión {r['dispersion']:>6.1%} | "
               f"miscalibrados {r['n_fuera']:>2}/{r['n_bins']:<3} | "
-              f"ahorro condicional {r['ahorro_mm']:>8,.0f} MM ({r['ahorro_pct']:>+6.1%})")
+              f"Δanchura cond. {r['delta_ancho_mm']:>+8,.0f} MM "
+              f"({r['delta_ancho_pct']:>+6.1%})")
 
     peor = max(resultados, key=lambda r: r["dispersion"])
     print(f"\n  Dimensión con más estructura residual: {peor['dimension'].upper()} "
           f"(dispersión {peor['dispersion']:.1%})")
+
+    # ¿La dispersión de anchura sobrevive al estratificar por fold y h?
+    r_glob  = next(r for r in resultados if r["dimension"] == "decil de anchura")
+    r_intra = next(r for r in resultados if r["dimension"] == "anchura intra f×h")
+    print(f"\n  DESCONFUNDIDO  anchura global {r_glob['dispersion']:.1%}  ->  "
+          f"anchura intra (fold×h) {r_intra['dispersion']:.1%}")
+    if r_glob["dispersion"] < 0.05:
+        print("  (la dispersión global de anchura ya está por debajo del umbral —")
+        print("   la comparación no aporta: no hay nada que desconfundir)")
+    elif r_intra["dispersion"] < 0.5 * r_glob["dispersion"]:
+        print("  La dispersión se DESPLOMA al estratificar: el decil global de")
+        print("  anchura estaba capturando tiempo/horizonte, no escala. El remedio")
+        print("  NO es calibrar por anchura.")
+    else:
+        print("  La dispersión SOBREVIVE al estratificar: es escala genuina y la")
+        print("  calibración condicional por anchura sí debería aportar.")
+
+    # ── Composición del peor bin de anchura ───────────────────────────────────
+    peor_bin = int(np.nanargmin(r_glob["cov_orc"]))
+    m_peor   = df["dec_ancho"].values == peor_bin
+    print(f"\n  Composición del decil de anchura PEOR (D{peor_bin+1}, "
+          f"cobertura {r_glob['cov_orc'][peor_bin]:.1%}, n={int(m_peor.sum()):,}):")
+    for dim in ("fold", "h_bin", "mes"):
+        comp = (df.loc[m_peor, dim].astype(str).value_counts(normalize=True)
+                  .sort_values(ascending=False).head(4))
+        base = df[dim].astype(str).value_counts(normalize=True)
+        detalle = "  ".join(
+            f"{k}={v:.0%} (base {base.get(k, 0):.0%})" for k, v in comp.items())
+        print(f"    por {dim:>6}: {detalle}")
+    print("  Si un nivel concentra MUY por encima de su base, el decil no mide")
+    print("  escala: mide ese nivel.")
 
     # Detalle de la dimensión de anchura (test directo de la señal de escala)
     r_ancho = resultados[0]
@@ -407,7 +471,7 @@ def main() -> None:
     n_bins  = r_ancho["n_bins"]
     sh_c    = r_ancho["ancho_cond_mm"]
     cov_c   = r_ancho["cov_cond"]
-    costo   = r_ancho["ahorro_mm"]
+    costo   = r_ancho["delta_ancho_mm"]
     df_s    = pd.DataFrame({"decil": np.arange(1, n_bins + 1),
                             "s_lo": r_ancho["s_lo"], "s_hi": r_ancho["s_hi"],
                             "ancho_pred_mm": ancho_medio})
@@ -441,22 +505,24 @@ def main() -> None:
     print(f"  Modelo crudo {cov_crudo:.1%}  ->  oráculo global {cov_m:.1%} "
           f"(por construcción)  con {sh_m - sh_crudo:+,.0f} MM de anchura\n")
     print(f"  {'Dimensión':>18} {'ex-ante':>9} {'dispersión':>11} "
-          f"{'miscalib.':>10} {'ahorro condicional':>20}")
-    print("  " + "-" * 74)
+          f"{'miscalib.':>10} {'Δ anchura condicional':>23}")
+    print("  " + "-" * 77)
     for r in resultados:
         print(f"  {r['dimension']:>18} {'sí' if r['condicionable'] else 'no':>9} "
               f"{r['dispersion']:>11.1%} {r['n_fuera']:>4}/{r['n_bins']:<5} "
-              f"{r['ahorro_mm']:>12,.0f} MM ({r['ahorro_pct']:+.1%})")
+              f"{r['delta_ancho_mm']:>+14,.0f} MM ({r['delta_ancho_pct']:+.1%})")
+    print("\n  Δ<0: modelar esa dimensión AHORRA anchura.  Δ>0: el oráculo global")
+    print("  venía alcanzando su 90% SUB-CUBRIENDO bins de cola pesada.")
 
     # El criterio NO usa el conteo de bins fuera del IC: con 28 meses y un IC al
     # 90% se esperan ~2.8 falsos por azar, y sin corrección por multiplicidad ese
     # conteo dispara solo. En una prueba sintética SIN estructura temporal marcó
-    # 10/28 meses. Se decide por magnitud —dispersión y ahorro— que es lo que
+    # 10/28 meses. Se decide por magnitud —dispersión y Δanchura— que es lo que
     # tiene consecuencia económica. El conteo se reporta, no decide.
-    UMBRAL_DISP, UMBRAL_AHORRO = 0.05, 0.05
+    UMBRAL_DISP, UMBRAL_DELTA = 0.05, 0.05
     def _relevante(r):
         return (r["dispersion"] >= UMBRAL_DISP
-                or r["ahorro_pct"] >= UMBRAL_AHORRO)
+                or abs(r["delta_ancho_pct"]) >= UMBRAL_DELTA)
 
     malas     = [r for r in resultados if _relevante(r)]
     ex_ante   = [r for r in malas if r["condicionable"]]
@@ -479,8 +545,8 @@ def main() -> None:
             print("     · Parte de la estructura es CONDICIONABLE EX-ANTE "
                   f"({', '.join(r['dimension'] for r in ex_ante)}):")
             print("       se corrige con post-proceso condicional, sin reentrenar.")
-            print(f"       Ahorro disponible: "
-                  f"{max(r['ahorro_mm'] for r in ex_ante):,.0f} MM de anchura.")
+            _d = min(r["delta_ancho_mm"] for r in ex_ante)
+            print(f"       Δ anchura al condicionar: {_d:+,.0f} MM.")
         if temporal:
             print("     · Parte vive en el TIEMPO "
                   f"({', '.join(r['dimension'] for r in temporal)}):")
@@ -510,8 +576,8 @@ def main() -> None:
         {"metrica": f"dispersion_{r['dimension'].replace(' ', '_')}",
          "valor": r["dispersion"]} for r in resultados
     ] + [
-        {"metrica": f"ahorro_mm_{r['dimension'].replace(' ', '_')}",
-         "valor": r["ahorro_mm"]} for r in resultados
+        {"metrica": f"delta_ancho_mm_{r['dimension'].replace(' ', '_')}",
+         "valor": r["delta_ancho_mm"]} for r in resultados
     ])
     det = pd.DataFrame({
         "decil": np.arange(1, n_bins + 1), "n": r_ancho["n"].astype(int),
