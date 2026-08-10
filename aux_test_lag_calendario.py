@@ -351,7 +351,8 @@ def cargar_preds(serie, comp):
 
 
 def agregar_candidato(df, serie, col_flujo, modo_dcm, etiqueta,
-                      solo_mediana=False):
+                      stats=("med", "max", "mea", "med3", "max3", "mea3"),
+                      ancla="th"):
     """
     Añade pos_lag_1/2/3 y esc_<etiqueta> respetando la máscara de disponibilidad.
 
@@ -362,8 +363,16 @@ def agregar_candidato(df, serie, col_flujo, modo_dcm, etiqueta,
     key = f"dcm_{modo_dcm}"
     idx_map, valores = construir_lags(serie, col_flujo, modo_dcm)
 
-    dcm_th = df["fecha_th"].map(serie[key])
-    ym_th  = df["fecha_th"].dt.to_period("M")
+    # ancla="th": la posición la define el DÍA QUE SE PREDICE (t+h). Es lo que
+    #   hace la matriz con todas sus variables de calendario, y es lo que permite
+    #   que el árbol cruce "dónde cae t+h" con "qué tan grande es el flujo ahí".
+    # ancla="t" : la posición la define el ORIGEN. El feature queda idéntico para
+    #   los 74 horizontes del mismo origen, así que no informa sobre cuál día se
+    #   predice — solo sirve como indicador de régimen. Se mide para no dar por
+    #   sentada la elección.
+    _col_ancla = "fecha_th" if ancla == "th" else "fecha_t"
+    dcm_th = df[_col_ancla].map(serie[key])
+    ym_th  = df[_col_ancla].dt.to_period("M")
 
     cols_abs, n_disp = [], []
     for k in LAGS_MESES:
@@ -395,7 +404,7 @@ def agregar_candidato(df, serie, col_flujo, modo_dcm, etiqueta,
     for suf, serie_est in (("med", A.median(axis=1, skipna=True)),
                            ("max", A.max(axis=1, skipna=True)),
                            ("mea", A.mean(axis=1, skipna=True))):
-        if solo_mediana and suf != "med":
+        if suf not in stats:
             continue
         df[f"esc_{etiqueta}_{suf}"] = serie_est
         etiquetas.append(f"{etiqueta}_{suf}")
@@ -403,15 +412,16 @@ def agregar_candidato(df, serie, col_flujo, modo_dcm, etiqueta,
     # Los tres estadísticos restringidos a filas con TODOS los rezagos. Es la
     # única comparación limpia entre ellos: sobre la misma submuestra y sin el
     # sesgo de que E[máx de 3] > E[máx de 1]. Cobertura baja a propósito.
-    if not solo_mediana:
-        completo = n_lags == len(LAGS_MESES)
-        for suf, est in (("med3", A.median(axis=1, skipna=True)),
-                         ("max3", A.max(axis=1, skipna=True)),
-                         ("mea3", A.mean(axis=1, skipna=True))):
-            df[f"esc_{etiqueta}_{suf}"] = est.where(completo)
-            etiquetas.append(f"{etiqueta}_{suf}")
+    completo = n_lags == len(LAGS_MESES)
+    for suf, est in (("med3", A.median(axis=1, skipna=True)),
+                     ("max3", A.max(axis=1, skipna=True)),
+                     ("mea3", A.mean(axis=1, skipna=True))):
+        if suf not in stats:
+            continue
+        df[f"esc_{etiqueta}_{suf}"] = est.where(completo)
+        etiquetas.append(f"{etiqueta}_{suf}")
 
-    cob = df[f"esc_{etiqueta}_med"].notna().mean()
+    cob = df[f"esc_{etiqueta}_{etiquetas[0].split('_')[-1]}"].notna().mean()
     print(f"     {etiqueta:>18}: lags disponibles {n_disp} | "
           f"cobertura {cob:.1%} | estadísticos {[e.split('_')[-1] for e in etiquetas]}")
     return df, etiquetas
@@ -429,9 +439,19 @@ def main() -> None:
             et = f"{col_flujo}_{modo}"
             # Los tres estadísticos solo para la alineación hábil, que ya ganó
             # decisivamente; para 'cal' basta la mediana como referencia.
-            df, ets = agregar_candidato(df, serie, col_flujo, modo, et,
-                                        solo_mediana=(modo == "cal"))
+            df, ets = agregar_candidato(
+                df, serie, col_flujo, modo, et,
+                stats=("med",) if modo == "cal"
+                      else ("med", "max", "mea", "med3", "max3", "mea3"))
             variantes.extend(ets); cal_vars.extend(ets)
+
+    # Misma construcción pero anclada en el ORIGEN, para verificar que anclar en
+    # el día predicho es lo correcto y no una suposición.
+    for col_flujo in ("flujo", "retiro"):
+        et = f"{col_flujo}_anclaT"
+        df, ets = agregar_candidato(df, serie, col_flujo, "hab", et,
+                                    stats=("med", "max"), ancla="t")
+        variantes.extend(ets); cal_vars.extend(ets)
 
     # Recencia pura: se mapea por fecha_t, así que está disponible siempre y para
     # todos los horizontes. Comparte el prefijo esc_ para pasar por las mismas
@@ -549,6 +569,54 @@ def main() -> None:
             print("  -> EMPATE dentro del ruido. Con ICs superpuestos no hay")
             print("     evidencia para pagar el costo de la alineación; conviene")
             print("     la recencia por parsimonia y cobertura.")
+
+    # ── A3. ¿Anclar en t+h o en t? ────────────────────────────────────────────
+    _titulo("A3 · Anclaje: ¿la posición la define el día PREDICHO o el ORIGEN?")
+    print("  Toda variable de calendario de la matriz está anclada en t+h, porque")
+    print("  el target es el flujo DE ESE DÍA. La alternativa es anclar en el")
+    print("  origen, con la ventaja de estar siempre disponible. Se compara sobre")
+    print("  las MISMAS filas y con el MISMO estadístico.\n")
+    print(f"  {'serie':>8} {'estad.':>7} | {'ancla t+h':>10} {'IC 90%':>18} | "
+          f"{'ancla t':>9} {'IC 90%':>18}")
+    print("  " + "-" * 82)
+    filas_a3 = []
+    for serie_col in ("flujo", "retiro"):
+        for est in ("med", "max"):
+            c_th, c_t = f"esc_{serie_col}_hab_{est}", f"esc_{serie_col}_anclaT_{est}"
+            if c_th not in df.columns or c_t not in df.columns:
+                continue
+            com = df.dropna(subset=[c_th, c_t, "r", "ancho"])
+            if len(com) < 100:
+                continue
+            vals = {}
+            for nom, col in (("th", c_th), ("t", c_t)):
+                M, ok = _matriz_rangos(com, [col, "r", "ancho", "h"])
+                vals[nom] = (_parcial_M(M[ok]),) + bootstrap_M(com, M, ok)
+            print(f"  {serie_col:>8} {est:>7} | {vals['th'][0]:>+10.3f} "
+                  f"[{vals['th'][1]:>+6.3f},{vals['th'][2]:>+6.3f}] | "
+                  f"{vals['t'][0]:>+9.3f} "
+                  f"[{vals['t'][1]:>+6.3f},{vals['t'][2]:>+6.3f}]")
+            filas_a3.append({"serie": serie_col, "estadistico": est, "n": len(com),
+                             "parcial_ancla_th": vals["th"][0],
+                             "ic_lo_th": vals["th"][1], "ic_hi_th": vals["th"][2],
+                             "parcial_ancla_t": vals["t"][0],
+                             "ic_lo_t": vals["t"][1], "ic_hi_t": vals["t"][2]})
+    tab_a3 = pd.DataFrame(filas_a3)
+    if not tab_a3.empty:
+        gana_th = (tab_a3["parcial_ancla_th"].abs()
+                   > tab_a3["parcial_ancla_t"].abs()).sum()
+        print(f"\n  ancla t+h gana en {gana_th}/{len(tab_a3)} comparaciones")
+        sep = (tab_a3["ic_lo_th"] > tab_a3["ic_hi_t"]).sum()
+        print(f"  con ICs que NO se solapan: {sep}/{len(tab_a3)}")
+        if sep >= len(tab_a3) - 1:
+            print("  -> Anclar en el día PREDICHO es lo correcto, y con margen.")
+        elif gana_th >= len(tab_a3) - 1:
+            print("  -> t+h gana consistentemente, pero los ICs se solapan: la")
+            print("     evidencia apoya la elección sin ser concluyente.")
+        else:
+            print("  -> Los dos anclajes rinden parecido. Anclar en t tiene la")
+            print("     ventaja de estar disponible en los 74 horizontes, así que")
+            print("     habría que reconsiderar la elección.")
 
     # ── B. Solo la cola baja (lo operativo) ───────────────────────────────────
     _titulo("B · Ídem contra r_lo = max(q50 − target, 0)  — solo retiros")
@@ -737,6 +805,8 @@ def main() -> None:
             tab.to_excel(xl, sheet_name="candidatos", index=False)
             tab_h.to_excel(xl, sheet_name="por_horizonte", index=False)
             tab_ext.to_excel(xl, sheet_name="extremos", index=False)
+            if not tab_a3.empty:
+                tab_a3.to_excel(xl, sheet_name="anclaje", index=False)
             tab_cc.to_excel(xl, sheet_name="cara_a_cara", index=False)
             piv.reset_index().to_excel(xl, sheet_name="rango_dinamico", index=False)
         print(f"\n[OK] {ruta_xl.name}")
