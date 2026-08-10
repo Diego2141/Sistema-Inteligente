@@ -71,6 +71,13 @@ DIR_FOLD = DIR_WFCV / f"fold_{_MODO_SUFIJO}"
 DIR_OUT  = DIR_CQR  / f"cqr_{_MODO_SUFIJO}"
 
 LAGS_MESES  = [1, 2, 3]
+
+# Competidores: variables de escala que el modelo YA tiene. Se toman las que
+# existan en la matriz, en este orden de preferencia para el titular. La matriz
+# cambia entre experimentos (la reducida no trae sigma_22d), así que se descubren
+# del esquema en vez de fijarlas.
+COMPETIDORES_POSIBLES = ["sigma_22d", "sigma_flujo_ratio", "garch_vol",
+                         "ma_flujo_20d", "ma_flujo_5d", "sigma_flujo"]
 BOOT_B      = 300
 BOOT_BLOQUE = 22
 SEMILLA     = 20260810
@@ -86,6 +93,7 @@ C_GRID  = "#e1e0d9"
 SURFACE = "#fcfcfb"
 
 EPS = 1e-9
+NOMBRE_COMPETIDOR = None   # se resuelve en cargar_preds() según lo hallado
 
 
 def _titulo(t: str) -> None:
@@ -186,19 +194,47 @@ def bootstrap_M(df, M, ok, B=BOOT_B, L=BOOT_BLOQUE, semilla=SEMILLA):
 
 
 # ── 1. Serie diaria de flujo + calendario ─────────────────────────────────────
+def _columnas_matriz():
+    """Nombres de columna de la matriz sin cargarla (solo el esquema)."""
+    try:
+        import pyarrow.dataset as pads
+        return list(pads.dataset(str(RUTA_MATRIZ)).schema.names)
+    except Exception:
+        pass
+    try:
+        import pyarrow.parquet as pq
+        return list(pq.read_schema(str(RUTA_MATRIZ)).names)
+    except Exception:
+        return list(pd.read_parquet(RUTA_MATRIZ).columns)
+
+
 def cargar_serie_diaria():
     """
     Serie diaria de flujo desde la matriz de features.
 
     Una fila por fecha_t (la matriz tiene 74 filas por fecha, una por horizonte;
     R_t0/D_t0 son constantes dentro de la fecha porque están anclados en t).
+
+    Los competidores se descubren del esquema: la matriz cambia entre
+    experimentos y pedir una columna inexistente aborta la lectura entera.
     """
-    cols = ["fecha_t", "R_t0", "D_t0"]
+    disponibles = _columnas_matriz()
+    comp = [c for c in COMPETIDORES_POSIBLES if c in disponibles]
+    faltan = [c for c in ("fecha_t", "R_t0", "D_t0") if c not in disponibles]
+    if faltan:
+        raise KeyError(f"La matriz no tiene {faltan} — sin ellas no hay serie de flujo")
+    if not comp:
+        print("[AVISO] la matriz no trae ninguna variable de escala conocida; "
+              "el test solo controlará por la anchura predicha y h")
+    else:
+        print(f"[OK] competidores hallados en la matriz: {comp}")
+
+    cols = ["fecha_t", "R_t0", "D_t0"] + comp
     try:
         mat = pd.read_parquet(RUTA_MATRIZ, filters=[("banco", "==", BANCO)],
-                              columns=cols + ["sigma_22d"])
+                              columns=cols)
     except Exception:
-        mat = pd.read_parquet(RUTA_MATRIZ, columns=cols + ["sigma_22d", "banco"])
+        mat = pd.read_parquet(RUTA_MATRIZ, columns=cols + ["banco"])
         mat = mat[mat["banco"] == BANCO]
 
     mat["fecha_t"] = pd.to_datetime(mat["fecha_t"])
@@ -209,7 +245,9 @@ def cargar_serie_diaria():
     serie = pd.DataFrame(index=d.index)
     serie["flujo"]  = d["D_t0"] - d["R_t0"]      # neto, consistente con el target
     serie["retiro"] = d["R_t0"]                   # solo retiro (lo operativo)
-    serie["sigma_22d"] = d["sigma_22d"] if "sigma_22d" in d.columns else np.nan
+    for c in comp:
+        serie[c] = d[c]
+    serie.attrs["competidores"] = comp
 
     # Distancia al cierre de mes, en las DOS métricas. Cuál corresponde es una
     # pregunta abierta: el período de encaje se computa sobre días calendario,
@@ -226,7 +264,7 @@ def cargar_serie_diaria():
 
     print(f"[OK] serie diaria: {len(serie):,} días | "
           f"{serie.index.min().date()} → {serie.index.max().date()}")
-    return serie
+    return serie, comp
 
 
 def construir_lags(serie, col_flujo, modo_dcm):
@@ -246,7 +284,7 @@ def construir_lags(serie, col_flujo, modo_dcm):
 
 
 # ── 2. Muestra: predicciones de TEST ──────────────────────────────────────────
-def cargar_preds(serie):
+def cargar_preds(serie, comp):
     paths = sorted(DIR_FOLD.glob(f"preds_base_{BANCO}_*.parquet"))
     if not paths:
         raise FileNotFoundError(f"Sin preds_base en {DIR_FOLD}")
@@ -275,7 +313,22 @@ def cargar_preds(serie):
     df["r"]     = (df["target"] - df["q50"]).abs()          # escala NO capturada
     df["r_lo"]  = (df["q50"] - df["target"]).clip(lower=0)  # solo sorpresas abajo
     df["ancho"] = df["q95"] - df["q05"]                     # escala SÍ predicha
-    df["sigma_22d"] = df["fecha_t"].map(serie["sigma_22d"])
+
+    # Competidor: la mejor variable de escala que el modelo YA tiene, entre las
+    # halladas en el esquema de la matriz. Se guarda con el alias interno
+    # "sigma_22d" para no reescribir el resto del script — el nombre real se
+    # imprime una vez para que quede claro qué se está comparando.
+    global NOMBRE_COMPETIDOR
+    if comp:
+        NOMBRE_COMPETIDOR = comp[0]
+        df["sigma_22d"] = df["fecha_t"].map(serie[NOMBRE_COMPETIDOR])
+        print(f"[OK] competidor usado: {NOMBRE_COMPETIDOR} "
+              f"(alias interno 'sigma_22d' en el resto del reporte)")
+    else:
+        NOMBRE_COMPETIDOR = None
+        df["sigma_22d"] = np.nan
+        print("[AVISO] sin competidor disponible en la matriz — las columnas "
+              "'sigma_22d' del reporte quedan vacías (comparación omitida)")
     return df
 
 
@@ -321,8 +374,8 @@ def agregar_candidato(df, serie, col_flujo, modo_dcm, etiqueta):
 
 # ── 3. Test ───────────────────────────────────────────────────────────────────
 def main() -> None:
-    serie = cargar_serie_diaria()
-    df = cargar_preds(serie)
+    serie, comp = cargar_serie_diaria()
+    df = cargar_preds(serie, comp)
 
     _titulo("Construcción de candidatos (con máscara point-in-time)")
     variantes = []
@@ -334,8 +387,9 @@ def main() -> None:
 
     _titulo("A · ¿Aporta escala POR ENCIMA de lo que el modelo ya usa?")
     print("  Spearman contra r = |target − q50|, controlando por anchura Y por h\n")
+    _et_comp = NOMBRE_COMPETIDOR or "sin competidor"
     print(f"  {'candidato':>18} {'simple':>9} {'| ancho':>10} "
-          f"{'IC 90%':>18} {'| ancho+sigma':>15}")
+          f"{'IC 90%':>18} {'| ancho+'+_et_comp[:10]:>15}")
     print("  " + "-" * 76)
 
     filas = []
@@ -352,7 +406,7 @@ def main() -> None:
         c_both = (np.nan if et == "sigma_22d" or len(sub2) < 100 else
                   corr_parcial(sub2[col], sub2["r"],
                                [sub2["ancho"], sub2["h"], sub2["sigma_22d"]]))
-        marca = "  <- competidor" if et == "sigma_22d" else ""
+        marca = f"  <- competidor ({NOMBRE_COMPETIDOR})" if et == "sigma_22d" else ""
         print(f"  {et:>18} {c_simple:>+9.3f} {c_anch:>+10.3f} "
               f"[{lo:>+6.3f},{hi:>+6.3f}] "
               f"{'—' if not np.isfinite(c_both) else f'{c_both:+.3f}':>15}{marca}")
@@ -364,7 +418,7 @@ def main() -> None:
     print("\n  'simple' sube por construcción: todo lo que mide magnitud")
     print("  correlaciona con todo lo que mide magnitud. El número que decide es")
     print("  '| ancho': lo que aporta POR ENCIMA de la escala que el modelo ya predice.")
-    print("  '| ancho+sigma' responde si alinear por calendario le gana a promediar.")
+    print(f"  '| ancho+{_et_comp}' responde si alinear por calendario le gana a promediar.")
 
     # ── B. Solo la cola baja (lo operativo) ───────────────────────────────────
     _titulo("B · Ídem contra r_lo = max(q50 − target, 0)  — solo retiros")
@@ -389,7 +443,8 @@ def main() -> None:
     df["h_bin"] = pd.cut(df["h"], [1, 21, 42, 63, 75],
                          labels=["2-21 (3 lags)", "22-42 (2 lags)",
                                  "43-63 (1 lag)", "64-75 (ninguno)"])
-    print(f"  {'tramo':>18} {'n':>8} {'cob.':>7} {'| ancho':>10} {'sigma_22d':>11}")
+    print(f"  {'tramo':>18} {'n':>8} {'cob.':>7} {'| ancho':>10} "
+          f"{(NOMBRE_COMPETIDOR or 'competidor')[:11]:>11}")
     print("  " + "-" * 60)
     filas_h = []
     for tramo, g in df.groupby("h_bin", observed=True):
@@ -420,7 +475,10 @@ def main() -> None:
     sub = sub.dropna(subset=["dec_cand"])
     piv = (sub.groupby("dec_cand")["r"].median() / 1e6) if len(sub) else pd.Series(dtype=float)
     if piv.empty:
-        print("  [AVISO] sin quintiles utilizables — se omite la sección")
+        n_anchuras = df["ancho"].nunique()
+        print(f"  [AVISO] sin quintiles utilizables — se omite la sección "
+              f"(anchura predicha con {n_anchuras} valor(es) distinto(s); "
+              f"qcut necesita variación real en 'ancho')")
     print(f"  {'quintil del candidato (intra decil de anchura)':>48} {'mediana |error| MM':>20}")
     print("  " + "-" * 70)
     for q, v in piv.items():
@@ -445,7 +503,8 @@ def main() -> None:
     print(f"  Mejor candidato          : {mejor}")
     print(f"  Parcial | ancho          : {fila_m['parcial_ancho']:+.3f} "
           f"[{fila_m['ic_lo']:+.3f}, {fila_m['ic_hi']:+.3f}]")
-    print(f"  Competidor (sigma_22d)   : {p_sig:+.3f}")
+    print(f"  Competidor ({NOMBRE_COMPETIDOR or 'ninguno'})"
+          f"{' ' * max(0, 12 - len(NOMBRE_COMPETIDOR or 'ninguno'))}: {p_sig:+.3f}")
     print(f"  Parcial | ancho + sigma  : {fila_m['parcial_ancho_sigma']:+.3f}")
     print()
     if not signif:
@@ -454,13 +513,13 @@ def main() -> None:
         print("     de lo que el modelo ya usa. Nos ahorramos tocar step001 y una")
         print("     corrida completa de revalidación.")
     elif np.isfinite(fila_m["parcial_ancho_sigma"]) and abs(fila_m["parcial_ancho_sigma"]) < UMBRAL_SIGNIF:
-        print("  -> REDUNDANTE. Aporta sobre la anchura, pero NO sobre sigma_22d:")
+        print(f"  -> REDUNDANTE. Aporta sobre la anchura, pero NO sobre {NOMBRE_COMPETIDOR}:")
         print("     la información ya está en el modelo y el problema no es que")
         print("     falte la variable sino cómo la usa. Alinear por calendario no")
         print("     le gana a promediar.")
     else:
         print("  -> CONSTRUIR. Aporta información de escala incremental sobre la")
-        print("     anchura predicha Y sobre sigma_22d. Alinear por calendario sí")
+        print(f"     anchura predicha Y sobre {NOMBRE_COMPETIDOR}. Alinear por calendario sí")
         print("     preserva variación que promediar destruye.")
         print(f"     Alineación ganadora: {'hábiles' if mejor.endswith('hab') else 'calendario'}")
         print(f"     Serie ganadora     : {'flujo neto' if 'flujo' in mejor else 'retiro'}")
@@ -525,7 +584,7 @@ def graficar(tab, tab_h, sub, col_m, mejor, piv, ruta):
     ax.grid(axis="x", color=C_GRID, lw=0.6, zorder=0); ax.grid(axis="y", visible=False)
     ax.set_xlabel("Spearman vs |error| realizado", fontsize=9, color=C_TINTA2)
     ax.set_title("1 · Simple (pálido) vs parcial | anchura (sólido)\n"
-                 "azul = sigma_22d, el competidor que el modelo ya tiene",
+                 f"azul = {NOMBRE_COMPETIDOR or 'sin competidor'}, lo que el modelo ya tiene",
                  fontsize=10, fontweight="bold", color=C_TINTA, loc="left")
 
     # Panel 2 · parcial con IC
@@ -551,7 +610,7 @@ def graficar(tab, tab_h, sub, col_m, mejor, piv, ruta):
     ax.bar(xh - 0.19, tab_h["parcial_candidato"], width=0.36, color=C_CAND,
            zorder=3, label=mejor)
     ax.bar(xh + 0.19, tab_h["parcial_sigma"], width=0.36, color=C_COMP,
-           zorder=3, label="sigma_22d")
+           zorder=3, label=NOMBRE_COMPETIDOR or "sin competidor")
     ax.axhline(0, color=C_REF, lw=1.2)
     ax.set_xticks(xh)
     ax.set_xticklabels(tab_h["tramo"], fontsize=7.5, rotation=20, ha="right")
