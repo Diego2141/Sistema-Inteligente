@@ -1778,10 +1778,16 @@ def _build_lag_posicion_mes(serie_valores, fechas_th, fechas_t, lags_meses):
     dcm = (_tmp.groupby("ym")["f"].rank(ascending=False, method="first")
                                   .values - 1).astype(int)
 
-    # Mapa {(año-mes, distancia_al_cierre) -> fecha} para lookup O(1)
-    pos_a_fecha = {}
-    for f, ym, d in zip(idx, idx.to_period("M"), dcm):
-        pos_a_fecha.setdefault((ym, int(d)), f)
+    # Todo lo que sigue es vectorizado a propósito. La versión con diccionarios y
+    # tuplas construía ~1.2M de objetos Python (una fila por horizonte por rezago),
+    # lo que en una máquina con memoria ajustada pesa más que los datos mismos.
+    #
+    # El par (año-mes, distancia_al_cierre) se codifica en un entero: el ordinal
+    # del mes por 64 más la distancia, que nunca llega a 64 porque ningún mes tiene
+    # tantos días hábiles. Así el lookup es un reindex de pandas en C.
+    _K = 64
+    ym_ord = idx.to_period("M").astype("int64").values
+    clave_a_fecha = pd.Series(idx.values, index=ym_ord * _K + dcm)
 
     # Distancia máxima disponible en cada mes. Los meses tienen entre 19 y 23 días
     # hábiles, así que una posición lejana al cierre puede no existir en el mes del
@@ -1789,30 +1795,40 @@ def _build_lag_posicion_mes(serie_valores, fechas_th, fechas_t, lags_meses):
     # horizontes CORTOS quedan con menos cobertura que los largos, porque son los
     # que más rezagos piden. Recortar mapea "primer día del mes" contra "primer día
     # del mes", que es la correspondencia correcta.
-    dcm_max_mes = {}
-    for ym, d in zip(idx.to_period("M"), dcm):
-        dcm_max_mes[ym] = max(dcm_max_mes.get(ym, 0), int(d))
+    dcm_max_mes = pd.Series(dcm).groupby(ym_ord).max()
 
-    dcm_por_fecha = pd.Series(dcm, index=idx)
-    dcm_th = pd.Series(fechas_th).map(dcm_por_fecha)
-    ym_th  = pd.DatetimeIndex(fechas_th).to_period("M")
-    ft     = pd.Series(fechas_t).reset_index(drop=True)
+    th = pd.DatetimeIndex(fechas_th)
+    dcm_th = (pd.Series(dcm, index=idx).reindex(th)
+                                       .to_numpy(dtype="float64"))
+    ym_th_ord = th.to_period("M").astype("int64").values
+    ft = pd.DatetimeIndex(fechas_t).values
 
-    cols_abs = []
+    n_lags = np.zeros(len(th), dtype="int64")
+    max_abs = np.full(len(th), np.nan)
+
     for k in lags_meses:
-        ym_lag = ym_th - k
-        d_req  = dcm_th.fillna(-1).astype(int).values
-        d_use  = [min(d, dcm_max_mes.get(m, -1)) if d >= 0 else -1
-                  for d, m in zip(d_req, ym_lag)]
-        claves = list(zip(ym_lag, d_use))
-        f_lag  = pd.to_datetime(pd.Series([pos_a_fecha.get(c) for c in claves]))
-        vals   = f_lag.map(serie_valores)
-        # Máscara point-in-time: descartar lo que aún no ocurrió en t
-        vals   = vals.where(f_lag.notna() & (f_lag.values <= ft.values))
-        cols_abs.append(vals.abs())
+        ym_lag = ym_th_ord - k
+        d_max  = dcm_max_mes.reindex(ym_lag).to_numpy(dtype="float64")
+        d_use  = np.minimum(dcm_th, d_max)               # NaN se propaga
+        ok     = np.isfinite(d_use)
 
-    A = pd.concat(cols_abs, axis=1)
-    return A.max(axis=1, skipna=True), A.notna().sum(axis=1)
+        clave  = np.where(ok, ym_lag * _K + np.nan_to_num(d_use), -1).astype("int64")
+        f_lag  = clave_a_fecha.reindex(clave).to_numpy()
+        # Máscara point-in-time: descartar lo que aún no ocurrió en t
+        ok &= ~pd.isna(f_lag)
+        ok &= (f_lag <= ft)
+
+        v = np.abs(serie_valores.reindex(
+            pd.DatetimeIndex(np.where(ok, f_lag, np.datetime64("NaT")))
+        ).to_numpy(dtype="float64"))
+        v = np.where(ok, v, np.nan)
+
+        usable = np.isfinite(v)
+        n_lags += usable
+        max_abs = np.where(usable & (~np.isfinite(max_abs) | (v > max_abs)),
+                           v, max_abs)
+
+    return pd.Series(max_abs), pd.Series(n_lags)
 
 
 # Rezagos en meses para los features de posición del mes. Se llega hasta 4
@@ -2190,7 +2206,20 @@ def build_feature_matrix(
     df_seasonal = _build_seasonal_table(
         fechas_th_unicas, peru_holidays, fechas_elecciones, peru_bday
     )
+
+    # Downcast ANTES del merge, no después. Este merge es el pico de memoria de
+    # toda la función: reindexa cada columna sobre ~291k filas y con float64 pide
+    # el doble de lo necesario. Al final se downcastea igual, así que adelantarlo
+    # no cambia ningún resultado — solo evita el pico.
+    _f64 = df.select_dtypes(include="float64").columns
+    if len(_f64):
+        df[_f64] = df[_f64].astype("float32")
+    _f64s = df_seasonal.select_dtypes(include="float64").columns
+    if len(_f64s):
+        df_seasonal[_f64s] = df_seasonal[_f64s].astype("float32")
+
     df = df.merge(df_seasonal, left_on="fecha_th", right_index=True, how="left")
+    del df_seasonal
 
     # ── 6b. Rezagos alineados por posición del mes ───────────────────────────
     # Escala esperada del flujo en la posición del mes a la que apunta t+h,
