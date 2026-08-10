@@ -1806,6 +1806,13 @@ def _build_lag_posicion_mes(serie_valores, fechas_th, fechas_t, lags_meses):
 # dispone del rezago 3 rinde igual que el que dispone de los tres.
 LAGS_POSICION_MES = [1, 2, 3, 4]
 
+# n_lags_pos (cuántos rezagos había disponibles) es diagnóstico, no señal: dentro
+# de un modelo de h fijo toma casi siempre el mismo valor, y una variable casi
+# constante solo agrega candidatos de corte inútiles. Se descarta de la matriz por
+# defecto. En True queda para auditar la cobertura sin tener que tocar
+# FEATURES_EXCLUIR.
+GUARDAR_N_LAGS_POS = False
+
 
 ###############################################################################
 # PARTE 6 — Construcción de la matriz de features completa
@@ -2184,14 +2191,22 @@ def build_feature_matrix(
             )
             df[f"esc_{_nom}_pos"] = _mx.values
             if _nom == "flujo":
-                df["n_lags_pos"] = _n.values
+                _n_lags = _n.values
         _cob = df["esc_flujo_pos"].notna().mean()
+        # Reparto de n_lags al log aunque la columna no se guarde: es como se
+        # audita que la máscara point-in-time esté haciendo lo suyo.
+        _rep = ", ".join(f"{k}:{(_n_lags == k).mean():.0%}"
+                         for k in range(len(LAGS_POSICION_MES) + 1)
+                         if (_n_lags == k).any())
         logger.info(f"    Rezagos por posición del mes: cobertura {_cob:.1%} "
-                    f"(lags {LAGS_POSICION_MES})")
+                    f"(lags {LAGS_POSICION_MES}) | n_lags -> {_rep}")
+        if GUARDAR_N_LAGS_POS:
+            df["n_lags_pos"] = _n_lags
     else:
         df["esc_flujo_pos"]  = np.nan
         df["esc_retiro_pos"] = np.nan
-        df["n_lags_pos"]     = 0
+        if GUARDAR_N_LAGS_POS:
+            df["n_lags_pos"] = 0
 
     # ── 7. HMM estado de régimen (pre-computado, sin leakage) ────────────────
     # hmm_estado es una Serie indexada por fecha_t calculada una sola vez en
@@ -2742,9 +2757,11 @@ def build_data_dictionary(params):
     add("esc_retiro_pos", "Datos bancarios / Posición del mes",
         "Ídem sobre R solo. Empata con esc_flujo_pos para predecir el error de la "
         "cola baja, que es la relevante para el portafolio de liquidez.", None, "t+h")
-    add("n_lags_pos", "Datos bancarios / Posición del mes",
-        "Cuántos rezagos de posición estaban disponibles (0-4). Diagnóstico: es "
-        "función de h, así que dentro de un modelo es casi constante.", None, "t+h")
+    if GUARDAR_N_LAGS_POS:
+        add("n_lags_pos", "Datos bancarios / Posición del mes",
+            "Cuántos rezagos de posición estaban disponibles (0-4). Diagnóstico: "
+            "es función de h, así que dentro de un modelo es casi constante y no "
+            "se guarda por defecto (ver GUARDAR_N_LAGS_POS).", None, "t+h")
 
     # ── Confirmados futuros ───────────────────────────────────────────────────
     # Entrenamiento: proxy histórico = valor realizado en t+1/t+2 (shift negativo)
