@@ -12,10 +12,41 @@ Genera por cada fecha de origen seleccionada un PNG con 3 subplots:
 Diferencia clave vs cv3: los parquets están en step005_wfcv_v4_direct/fold_exp/ o fold_roll/
 según el flag EXPANDING (True → expanding/fold_exp/fan_exp; False → rolling/fold_roll/fan_roll).
 y el nombre del banco en el filename es SISTEMA (no BancaLocal).
+
+Dos botones independientes controlan la salida:
+
+    FOTOS_DIARIAS = True/False   un PNG por fecha de origen
+    VIDEO_DIARIO  = True/False   la secuencia completa como video
+
+El video va en orden cronológico y lleva tipo + instante de creación, de modo
+que corridas sucesivas nunca se pisan entre sí:
+
+    video_fanchart_cv4_<TIPO>_<BANCO>_<YYYYmmdd_HHMMSS>.<mp4|gif>
+
+El TIPO es _MODO_SUFIJO por defecto (exp / roll / roll_arctan); se puede fijar
+a mano con VIDEO_TIPO. Backend: mp4 si hay imageio-ffmpeg o binario ffmpeg
+(ver RUTA_FFMPEG, el mismo build portable de aux_fanchart_video_xgb_qt.py);
+si no, GIF con Pillow como último recurso. Con SOLO_VIDEO = True se reencodea
+a partir de los PNG que ya están en disco, sin volver a graficar.
 """
 
+from __future__ import annotations
+
+import os
+
+# ffmpeg portable (mismo build que usa aux_fanchart_video_xgb_qt.py). Se antepone
+# al PATH para que shutil.which lo encuentre sin instalarlo en el sistema.
+RUTA_FFMPEG = (r"H:\DPINV\CARPETAS PERSONALES\DIEGO\2. Python\Paquetes python"
+               r"\ffmpeg-8.1.1-essentials_build\ffmpeg-8.1.1-essentials_build\bin")
+if RUTA_FFMPEG and os.path.isdir(RUTA_FFMPEG):
+    os.environ["PATH"] = RUTA_FFMPEG + os.pathsep + os.environ.get("PATH", "")
+
+from datetime import datetime
 from pathlib import Path
 import logging
+import shutil
+import subprocess
+import tempfile
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -77,6 +108,43 @@ COLOR_BANDA  = "steelblue"   # distinto al rojo de cv3 para distinguir visualmen
 
 EXPORTAR_EXCEL = True
 RUTA_EXCEL = DIR_OUTPUT / "fanchart_cv4_datos.xlsx"
+
+# ══ BOTONES ═══════════════════════════════════════════════════════════════════
+# Los dos son independientes:
+#   FOTOS_DIARIAS=True,  VIDEO_DIARIO=False -> solo los PNG (comportamiento previo)
+#   FOTOS_DIARIAS=False, VIDEO_DIARIO=True  -> solo el video; los PNG se generan en
+#                                              una carpeta temporal y se borran
+#   ambos True                              -> PNG en disco + video
+#   ambos False                             -> no se grafica nada (solo Excel)
+FOTOS_DIARIAS = True
+VIDEO_DIARIO  = True
+
+# True -> NO regrafica; arma el video con los PNG que ya están en DIR_OUTPUT.
+# Útil para reencodear (otro fps, otro ancho) sin repetir 600 figuras.
+SOLO_VIDEO = False
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Video ─────────────────────────────────────────────────────────────────────
+# Los PNG conservan su nombre de siempre (se sobrescriben entre corridas). El
+# VIDEO en cambio lleva tipo + timestamp, así que cada corrida deja su propio
+# archivo y nunca se pisa con el anterior:
+#
+#     video_fanchart_cv4_<TIPO>_<BANCO>_<YYYYmmdd_HHMMSS>.<mp4|gif>
+#
+VIDEO_TIPO      = None    # None -> usa _MODO_SUFIJO ("exp", "roll", "roll_arctan"…)
+VIDEO_FPS       = 6       # frames por segundo (6 -> ~0.17 s por fecha de origen)
+VIDEO_ANCHO_MAX = 1280    # los PNG son ~2400px; reducir es lo que hace el video manejable
+VIDEO_FORMATO   = "auto"  # "auto" (mp4 si hay encoder, si no gif) | "mp4" | "gif"
+VIDEO_COLORES   = 128     # tamaño de paleta del GIF (256 max; menos = archivo más chico)
+VIDEO_POR_FOLD  = False   # True -> además del video global, uno por fold
+
+# ── Ejes Y fijos ──────────────────────────────────────────────────────────────
+# Con escala automática cada frame reescala y el video se vuelve ilegible: las
+# bandas parecen del mismo ancho siempre porque el eje se ajusta a ellas. Con
+# límites fijos las fechas son comparables entre sí. Se calcula un rango por
+# panel (el panel 2 es mucho más estrecho que el 1, que incluye el realizado).
+YLIM_FIJO    = True
+YLIM_DIARIO  = None   # None -> automático global; o fijar a mano, ej. (-3000, 3000)
 
 
 # ── 1. Cargar parquet ─────────────────────────────────────────────────────────
@@ -204,8 +272,56 @@ def _dibujar_bandas(ax, hs, res):
     ax.set_xlim(hs.min() - 1, hs.max() + 1)
 
 
+def rangos_globales(df: pd.DataFrame):
+    """
+    Límites Y fijos para los 3 paneles, calculados sobre TODAS las fechas.
+
+    Devuelve (ylim1, ylim2, ylim3) o None si faltan columnas. Se calcula un
+    rango por panel a propósito: el panel 1 incluye el realizado (picos de
+    ±4000 MM) y el panel 2 solo las bandas del modelo (±1500 MM); usar el mismo
+    rango en ambos aplastaría el panel 2 hasta volverlo inútil.
+    """
+    def _pad(lo, hi, f=0.05):
+        if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+            return None
+        p = (hi - lo) * f
+        return (lo - p, hi + p)
+
+    if not {"q01", "q99"}.issubset(df.columns):
+        return None
+
+    d = df.sort_values(["fecha_t", "h"])
+
+    # Panel 1: bandas + realizado   |   Panel 2: solo el modelo
+    lo_m, hi_m = float(d["q01"].min()), float(d["q99"].max())
+    if "target" in d.columns and d["target"].notna().any():
+        lo1 = min(lo_m, float(d["target"].min()))
+        hi1 = max(hi_m, float(d["target"].max()))
+    else:
+        lo1, hi1 = lo_m, hi_m
+    ylim1 = YLIM_DIARIO if YLIM_DIARIO else _pad(lo1 / 1e6, hi1 / 1e6)
+    ylim2 = _pad(lo_m / 1e6, hi_m / 1e6)
+
+    # Panel 3: acumulado por fecha de origen (banda Q40–Q60, mediana, realizado)
+    series = []
+    for c in ("q40", "q60", "q50"):
+        if c in d.columns:
+            series.append(d.groupby("fecha_t")[c].cumsum())
+    if "target" in d.columns:
+        series.append(d.assign(_t=d["target"].fillna(0.0))
+                       .groupby("fecha_t")["_t"].cumsum())
+    if series:
+        acum = pd.concat(series)
+        ylim3 = _pad(float(acum.min()) / 1e6, float(acum.max()) / 1e6)
+    else:
+        ylim3 = None
+
+    return ylim1, ylim2, ylim3
+
+
 def graficar(res: pd.DataFrame, fecha_origen: pd.Timestamp, banco: str,
-             idx: int, total: int, fold_num: int):
+             idx: int, total: int, fold_num: int,
+             dir_out: Path = None, ylims=None) -> Path:
     hs        = res["h"].values
     realizado = res["target"].values / 1e6
     mask_real = ~np.isnan(realizado)
@@ -276,10 +392,18 @@ def graficar(res: pd.DataFrame, fecha_origen: pd.Timestamp, banco: str,
     ax3.xaxis.set_major_locator(mticker.MultipleLocator(10))
     ax3.set_xlim(hs.min() - 1, hs.max() + 1)
 
+    # Ejes Y fijos: imprescindible para el video, útil para comparar PNGs entre sí
+    if ylims:
+        for ax, yl in zip((ax1, ax2, ax3), ylims):
+            if yl:
+                ax.set_ylim(*yl)
+
     nombre = f"fanchart_cv4_{banco}_f{fold_num}_{fecha_origen.strftime('%Y%m%d')}.png"
-    plt.savefig(DIR_OUTPUT / nombre, dpi=150, bbox_inches="tight")
+    ruta_png = Path(dir_out or DIR_OUTPUT) / nombre
+    plt.savefig(ruta_png, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  [{idx}/{total}] {nombre}")
+    return ruta_png
 
 
 # ── 6. Exportar Excel ─────────────────────────────────────────────────────────
@@ -313,29 +437,261 @@ def exportar_excel(df: pd.DataFrame) -> None:
     print(f"[OK] Excel guardado: {RUTA_EXCEL}")
 
 
+# ── 7. Video ──────────────────────────────────────────────────────────────────
+# Tres backends, en orden de preferencia. Ninguno se asume presente:
+#   1. imageio + imageio-ffmpeg  -> .mp4  (streaming, sin binario externo)
+#   2. binario ffmpeg en el PATH -> .mp4  (streaming vía pipe rawvideo)
+#   3. Pillow                    -> .gif  (siempre disponible: matplotlib lo requiere)
+#
+# Los tres escriben frame a frame. Nada acumula la secuencia completa en RAM:
+# con ~600 PNG de 2400x2400 eso serían decenas de GB.
+
+def _detectar_backend(formato: str):
+    """Retorna (extension, backend) según lo pedido y lo instalado."""
+    if formato not in ("auto", "mp4", "gif"):
+        raise ValueError(f"VIDEO_FORMATO inválido: {formato!r}")
+
+    if formato == "gif":
+        return "gif", "pillow"
+
+    try:
+        import imageio                      # noqa: F401
+        import imageio_ffmpeg               # noqa: F401
+        return "mp4", "imageio"
+    except ImportError:
+        pass
+
+    if shutil.which("ffmpeg"):
+        return "mp4", "ffmpeg"
+
+    if formato == "mp4":
+        print("[AVISO] VIDEO_FORMATO='mp4' pero no hay imageio-ffmpeg ni binario "
+              "ffmpeg — se genera GIF en su lugar")
+    return "gif", "pillow"
+
+
+def _dim_canvas(paths, ancho_max: int):
+    """
+    Lienzo común para todos los frames.
+
+    savefig(bbox_inches='tight') recorta al contenido, así que los PNG NO salen
+    todos del mismo tamaño (varía con el largo de títulos y ticks). Un encoder
+    de video exige dimensión constante, de modo que se toma el máximo y cada
+    frame se centra dentro. Ancho y alto se fuerzan a par: libx264 lo requiere.
+
+    Image.open solo lee la cabecera para consultar .size — no decodifica píxeles.
+    """
+    from PIL import Image
+
+    w_max = h_max = 0
+    for p in paths:
+        try:
+            with Image.open(p) as im:
+                w_max, h_max = max(w_max, im.width), max(h_max, im.height)
+        except Exception:
+            continue
+    if w_max == 0:
+        return None
+
+    esc = min(1.0, float(ancho_max) / w_max)
+    w, h = int(round(w_max * esc)), int(round(h_max * esc))
+    return (w - w % 2, h - h % 2)
+
+
+def _frames(paths, size, para_gif: bool, colores: int):
+    """Generador de frames ya normalizados al lienzo `size`. Uno vivo a la vez."""
+    from PIL import Image
+
+    for p in paths:
+        try:
+            im = Image.open(p).convert("RGB")
+        except Exception as e:
+            print(f"  [AVISO] frame omitido {Path(p).name}: {e}")
+            continue
+        im.thumbnail(size, Image.LANCZOS)          # conserva aspecto
+        lienzo = Image.new("RGB", size, (255, 255, 255))
+        lienzo.paste(im, ((size[0] - im.width) // 2, (size[1] - im.height) // 2))
+        yield (lienzo.convert("P", palette=Image.ADAPTIVE, colors=colores)
+               if para_gif else lienzo)
+
+
+def crear_video(paths, tipo: str, banco: str = BANCO, dir_out: Path = None,
+                fps: int = None, ancho_max: int = None,
+                formato: str = None, colores: int = None):
+    """
+    Arma un video con los PNG de `paths`, en ese orden.
+
+    Nombre: video_fanchart_cv4_<tipo>_<banco>_<YYYYmmdd_HHMMSS>.<ext>
+    El timestamp es el de creación del video, así que dos corridas del mismo
+    tipo nunca se sobrescriben.
+
+    Retorna la ruta escrita, o None si no se pudo generar.
+    """
+    dir_out   = DIR_OUTPUT      if dir_out   is None else dir_out
+    fps       = VIDEO_FPS       if fps       is None else fps
+    ancho_max = VIDEO_ANCHO_MAX if ancho_max is None else ancho_max
+    formato   = VIDEO_FORMATO   if formato   is None else formato
+    colores   = VIDEO_COLORES   if colores   is None else colores
+
+    paths = [Path(p) for p in paths if Path(p).exists()]
+    if not paths:
+        print("[AVISO] sin PNG para el video")
+        return None
+
+    ext, backend = _detectar_backend(formato)
+    size = _dim_canvas(paths, ancho_max)
+    if size is None:
+        print("[AVISO] no se pudo leer ningún PNG — sin video")
+        return None
+
+    sello = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ruta  = Path(dir_out) / f"video_fanchart_cv4_{tipo}_{banco}_{sello}.{ext}"
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+
+    print(f"  backend={backend}  frames={len(paths)}  "
+          f"lienzo={size[0]}x{size[1]}  fps={fps}")
+
+    try:
+        if backend == "imageio":
+            import imageio
+            with imageio.get_writer(str(ruta), fps=fps, codec="libx264",
+                                    quality=8, macro_block_size=None) as w:
+                for fr in _frames(paths, size, False, colores):
+                    w.append_data(np.asarray(fr))
+
+        elif backend == "ffmpeg":
+            cmd = [
+                shutil.which("ffmpeg"), "-y", "-loglevel", "error",
+                "-f", "rawvideo", "-pix_fmt", "rgb24",
+                "-s", f"{size[0]}x{size[1]}", "-r", str(fps), "-i", "pipe:0",
+                "-an", "-vcodec", "libx264", "-pix_fmt", "yuv420p",
+                "-crf", "23", str(ruta),
+            ]
+            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+            try:
+                for fr in _frames(paths, size, False, colores):
+                    proc.stdin.write(fr.tobytes())
+            finally:
+                proc.stdin.close()
+                if proc.wait() != 0:
+                    raise RuntimeError(f"ffmpeg salió con código {proc.returncode}")
+
+        else:  # pillow -> gif
+            gen = _frames(paths, size, True, colores)
+            try:
+                primero = next(gen)
+            except StopIteration:
+                print("[AVISO] ningún frame legible — sin video")
+                return None
+            # append_images acepta un generador: Pillow lo consume perezosamente,
+            # así que el GIF se escribe sin materializar la secuencia en memoria.
+            primero.save(ruta, save_all=True, append_images=gen,
+                         duration=max(20, int(round(1000.0 / max(fps, 1)))),
+                         loop=0, optimize=False)
+
+    except Exception as e:
+        print(f"[AVISO] falló la generación del video ({type(e).__name__}: {e})")
+        if ruta.exists():
+            try:
+                ruta.unlink()          # no dejar un archivo truncado
+            except OSError:
+                pass
+        return None
+
+    mb = ruta.stat().st_size / 1e6
+    print(f"[OK] video: {ruta.name}  ({mb:,.1f} MB)")
+    return ruta
+
+
+def _orden_desde_nombre(p: Path):
+    """Clave (fold, fecha) parseada de fanchart_cv4_<banco>_f<fold>_<YYYYMMDD>.png."""
+    partes = p.stem.split("_")
+    fold, fecha = 0, ""
+    for s in partes:
+        if s.startswith("f") and s[1:].isdigit():
+            fold = int(s[1:])
+        elif len(s) == 8 and s.isdigit():
+            fecha = s
+    return (fold, fecha, p.name)
+
+
+def crear_video_desde_carpeta(tipo: str, banco: str = BANCO,
+                              dir_png: Path = None, **kw):
+    """Arma el video con los PNG ya presentes en disco (no regenera figuras)."""
+    dir_png = DIR_OUTPUT if dir_png is None else Path(dir_png)
+    paths = sorted(dir_png.glob(f"fanchart_cv4_{banco}_f*_*.png"),
+                   key=_orden_desde_nombre)
+    if not paths:
+        print(f"[AVISO] sin PNG fanchart_cv4_{banco}_* en {dir_png}")
+        return None
+    print(f"\nArmando video desde {len(paths)} PNG en disco...")
+    return crear_video(paths, tipo, banco, dir_out=dir_png, **kw)
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    _tipo = VIDEO_TIPO if VIDEO_TIPO else _MODO_SUFIJO
+
+    if SOLO_VIDEO:
+        crear_video_desde_carpeta(_tipo, BANCO)
+        raise SystemExit
+
     df = cargar_parquet(BANCO)
     df = _enriquecer_desde_matriz(df, BANCO)
 
-    fechas = fechas_validas(df)
-    fechas_sel = fechas[::PASO_FECHAS]
-    if N_FECHAS_MAX is not None:
-        fechas_sel = fechas_sel[:N_FECHAS_MAX]
+    if FOTOS_DIARIAS or VIDEO_DIARIO:
+        fechas = fechas_validas(df)
+        fechas_sel = fechas[::PASO_FECHAS]
+        if N_FECHAS_MAX is not None:
+            fechas_sel = fechas_sel[:N_FECHAS_MAX]
+        total = len(fechas_sel)
 
-    total = len(fechas_sel)
-    print(f"\nGenerando {total} fan chart(s) en {DIR_OUTPUT}")
+        # Si solo se quiere el video, los PNG son un intermedio desechable
+        _tmp = None if FOTOS_DIARIAS else tempfile.mkdtemp(prefix="fanchart_cv4_")
+        dir_png = DIR_OUTPUT if FOTOS_DIARIAS else Path(_tmp)
 
-    for i, fecha_np in enumerate(fechas_sel, 1):
-        fecha = pd.Timestamp(fecha_np)
+        _ylims = rangos_globales(df) if YLIM_FIJO else None
+        if _ylims:
+            _f = lambda t: f"[{t[0]:,.0f}, {t[1]:,.0f}]" if t else "auto"
+            print(f"\nEjes Y fijos  diario={_f(_ylims[0])}  "
+                  f"modelo={_f(_ylims[1])}  acum={_f(_ylims[2])}  (MM USD)")
+
+        destino = "PNG en disco" if FOTOS_DIARIAS else "frames temporales (solo video)"
+        print(f"\nGenerando {total} fan chart(s) — {destino}")
+
+        # Rutas en el orden en que se generan (cronológico) = orden de los frames
+        pngs, pngs_por_fold = [], {}
+        for i, fecha_np in enumerate(fechas_sel, 1):
+            fecha = pd.Timestamp(fecha_np)
+            try:
+                res = preparar_resultado(df, fecha)
+                fold_num = int(res["fold"].iloc[0]) if "fold" in res.columns else 0
+                ruta_png = graficar(res, fecha, BANCO, i, total, fold_num,
+                                    dir_out=dir_png, ylims=_ylims)
+                pngs.append(ruta_png)
+                pngs_por_fold.setdefault(fold_num, []).append(ruta_png)
+            except Exception as e:
+                print(f"  [{i}/{total}] {fecha.date()} omitida: {e}")
+
+        if FOTOS_DIARIAS:
+            print(f"\n[OK] {len(pngs)} gráficos guardados en: {DIR_OUTPUT}")
+
         try:
-            res = preparar_resultado(df, fecha)
-            fold_num = int(res["fold"].iloc[0]) if "fold" in res.columns else 0
-            graficar(res, fecha, BANCO, i, total, fold_num)
-        except Exception as e:
-            print(f"  [{i}/{total}] {fecha.date()} omitida: {e}")
+            if VIDEO_DIARIO and pngs:
+                print(f"\nGenerando video ({_tipo})...")
+                crear_video(pngs, _tipo, BANCO)          # siempre a DIR_OUTPUT
 
-    print(f"\n[OK] {total} gráficos guardados en: {DIR_OUTPUT}")
+                if VIDEO_POR_FOLD:
+                    for fold_num in sorted(pngs_por_fold):
+                        print(f"\nGenerando video fold {fold_num}...")
+                        crear_video(pngs_por_fold[fold_num],
+                                    f"{_tipo}_f{fold_num}", BANCO)
+        finally:
+            if _tmp:
+                shutil.rmtree(_tmp, ignore_errors=True)
+                print(f"[OK] frames temporales eliminados")
+    else:
+        print("\n[INFO] FOTOS_DIARIAS y VIDEO_DIARIO en False — no se grafica nada")
 
     if EXPORTAR_EXCEL:
         print("\nExportando Excel...")
