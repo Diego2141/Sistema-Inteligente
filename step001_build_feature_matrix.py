@@ -1820,8 +1820,10 @@ def _build_lag_posicion_mes(serie_valores, fechas_th, fechas_t, lags_meses,
     ym_th_ord = th.to_period("M").astype("int64").values
     ft = pd.DatetimeIndex(fechas_t).values
 
-    n_lags = np.zeros(len(th), dtype="int64")
-    max_abs = np.full(len(th), np.nan)
+    n_lags  = np.zeros(len(th), dtype="int64")
+    max_abs = np.full(len(th), np.nan)   # mayor excursión, sin signo
+    min_sgn = np.full(len(th), np.nan)   # peor excursión NEGATIVA (retiro neto)
+    max_sgn = np.full(len(th), np.nan)   # mayor excursión POSITIVA (depósito neto)
 
     for k in lags_meses:
         ym_lag = ym_th_ord - k
@@ -1835,17 +1837,25 @@ def _build_lag_posicion_mes(serie_valores, fechas_th, fechas_t, lags_meses,
         ok &= ~pd.isna(f_lag)
         ok &= (f_lag <= ft)
 
-        v = np.abs(serie_valores.reindex(
+        # Valor CON SIGNO; el absoluto se toma después, para poder devolver
+        # también los extremos direccionales.
+        v = serie_valores.reindex(
             pd.DatetimeIndex(np.where(ok, f_lag, np.datetime64("NaT")))
-        ).to_numpy(dtype="float64"))
+        ).to_numpy(dtype="float64")
         v = np.where(ok, v, np.nan)
+        a = np.abs(v)
 
         usable = np.isfinite(v)
         n_lags += usable
-        max_abs = np.where(usable & (~np.isfinite(max_abs) | (v > max_abs)),
-                           v, max_abs)
+        max_abs = np.where(usable & (~np.isfinite(max_abs) | (a > max_abs)),
+                           a, max_abs)
+        min_sgn = np.where(usable & (~np.isfinite(min_sgn) | (v < min_sgn)),
+                           v, min_sgn)
+        max_sgn = np.where(usable & (~np.isfinite(max_sgn) | (v > max_sgn)),
+                           v, max_sgn)
 
-    return pd.Series(max_abs), pd.Series(n_lags)
+    return (pd.Series(max_abs), pd.Series(min_sgn),
+            pd.Series(max_sgn), pd.Series(n_lags))
 
 
 # Rezagos en meses para los features de posición del mes. Se llega hasta 4
@@ -2261,10 +2271,19 @@ def build_feature_matrix(
     # que al promediar sobre las 22 ruedas mezcla posiciones y borra esta señal:
     # medido contra el error del modelo, sigma_22d aporta +0.002 y este rezago
     # +0.127 (parcial de Spearman, controlando por la anchura predicha y por h).
-    # Las tres series no son redundantes entre sí: el feature es un MÁXIMO de
-    # valores absolutos, y max|D-R| no se deduce de max|D| y max|R|. R dirige la
-    # cola baja (retiros, lo operativo) y D la cola alta, que es donde el
+    # El flujo NETO se expone con signo, separado en su peor excursión negativa y
+    # su mayor excursión positiva, en vez de un solo máximo absoluto. El máximo
+    # absoluto es ciego al signo: devuelve la mayor excursión venga de donde
+    # venga, así que el modelo de q01 —que necesita el peor retiro— recibía el
+    # mismo número que el de q99 aunque proviniera de un depósito enorme. Los dos
+    # extremos con signo contienen a max|·| (es el máximo entre max_pos y
+    # -min_neg), pero no al revés.
+    #
+    # R y D se mantienen como componentes: no son redundantes con el neto ni entre
+    # sí. R dirige la cola baja (retiros, lo operativo) y D la alta, donde el
     # diagnóstico del oráculo encontró la peor calibración (s_hi hasta 3.1x).
+    # Nota: como R y D son no negativos, su |·| es un no-op y su extremo con signo
+    # coincide con el máximo — por eso de ellos solo se guarda el máximo.
     if tiene_bancarios:
         _serie_flujo  = (df_bancarios[f"{banco}_D"] - df_bancarios[f"{banco}_R"])
         _serie_retiro = df_bancarios[f"{banco}_R"]
@@ -2275,14 +2294,17 @@ def build_feature_matrix(
             # calendario. Los días sin dato dan NaN al buscar el valor y quedan
             # fuera del máximo, pero siguen contando para la posición en el mes.
             _ref = ANCLA_POSICION_MES.get(_nom, "cierre")
-            _mx, _n = _build_lag_posicion_mes(
+            _mx, _mn_s, _mx_s, _n = _build_lag_posicion_mes(
                 _ser, df["fecha_th"], df["fecha_t"], LAGS_POSICION_MES, peru_bday,
                 referencia=_ref,
             )
-            df[f"esc_{_nom}_pos"] = _mx.values
             if _nom == "flujo":
+                df["esc_neto_min_pos"] = _mn_s.values   # peor retiro neto  -> q01
+                df["esc_neto_max_pos"] = _mx_s.values   # mayor depósito neto -> q99
                 _n_lags = _n.values
-        _cob = df["esc_flujo_pos"].notna().mean()
+            else:
+                df[f"esc_{_nom}_pos"] = _mx.values
+        _cob = df["esc_neto_min_pos"].notna().mean()
         # Reparto de n_lags al log aunque la columna no se guarde: es como se
         # audita que la máscara point-in-time esté haciendo lo suyo.
         _rep = ", ".join(f"{k}:{(_n_lags == k).mean():.0%}"
@@ -2294,7 +2316,8 @@ def build_feature_matrix(
         if GUARDAR_N_LAGS_POS:
             df["n_lags_pos"] = _n_lags
     else:
-        df["esc_flujo_pos"]    = np.nan
+        df["esc_neto_min_pos"] = np.nan
+        df["esc_neto_max_pos"] = np.nan
         df["esc_retiro_pos"]   = np.nan
         df["esc_deposito_pos"] = np.nan
         if GUARDAR_N_LAGS_POS:
@@ -2840,12 +2863,18 @@ def build_data_dictionary(params):
         "min_periods=66: NaN si historia < 66 días → imputado por mediana del fold.", 0, None)
 
     # ── Escala por posición del mes (rezagos alineados al cierre) ────────────
-    add("esc_flujo_pos", "Datos bancarios / Posición del mes",
-        "Máximo de |flujo neto D−R| en los días de los meses previos con la MISMA "
-        "distancia hábil al cierre que t+h (rezagos 1-4 meses, solo los ya "
-        "observables en t). Escala esperada del flujo en esa posición del ciclo. "
-        "Complementa a sigma_22d, que promedia sobre las 22 ruedas y borra la "
-        "variación por posición.", None, "t+h")
+    add("esc_neto_min_pos", "Datos bancarios / Posición del mes",
+        "PEOR flujo neto D−R (con signo, el más negativo) en los días de los meses "
+        "previos con la MISMA posición en el mes que t+h (rezagos 1-4, solo los ya "
+        "observables en t). Es el retiro neto extremo esperado en esa posición del "
+        "ciclo: el predictor natural de la cola BAJA. Complementa a sigma_22d, que "
+        "promedia sobre las 22 ruedas y borra la variación por posición.",
+        None, "t+h")
+    add("esc_neto_max_pos", "Datos bancarios / Posición del mes",
+        "Ídem, el flujo neto MÁS POSITIVO: el depósito neto extremo esperado en esa "
+        "posición. Predictor natural de la cola ALTA. Separar por signo evita que "
+        "ambas colas reciban el mismo número, que es lo que ocurría con un único "
+        "máximo de valores absolutos.", None, "t+h")
     add("esc_retiro_pos", "Datos bancarios / Posición del mes",
         "Ídem sobre R solo. Dirige la cola BAJA, la relevante para el portafolio "
         "de liquidez. En la permutación del modelo aparece por encima de la "
