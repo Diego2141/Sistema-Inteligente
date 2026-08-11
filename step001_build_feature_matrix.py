@@ -1722,7 +1722,7 @@ def _get_bdays_en_trim(fecha, peru_bday):
 
 
 def _build_lag_posicion_mes(serie_valores, fechas_th, fechas_t, lags_meses,
-                            peru_bday):
+                            peru_bday, referencia="cierre"):
     """
     Rezagos del flujo alineados por POSICIÓN EN EL MES, y su máximo absoluto.
 
@@ -1783,11 +1783,17 @@ def _build_lag_posicion_mes(serie_valores, fechas_th, fechas_t, lags_meses,
         freq=peru_bday,
     ))
 
-    # Distancia en días hábiles al cierre de mes. rank descendente dentro del mes:
-    # el último día hábil del mes = 0.
+    # Posición dentro del mes, en días hábiles, según la referencia pedida:
+    #   "cierre" -> rank descendente: el ÚLTIMO día hábil del mes = 0
+    #   "inicio" -> cumcount:         el PRIMER día hábil del mes = 0
+    # Con meses de largo variable las dos no son intercambiables; ver la nota de
+    # ANCLA_POSICION_MES.
     _tmp = pd.DataFrame({"f": idx, "ym": idx.to_period("M")})
-    dcm = (_tmp.groupby("ym")["f"].rank(ascending=False, method="first")
-                                  .values - 1).astype(int)
+    if referencia == "inicio":
+        dcm = _tmp.groupby("ym").cumcount().values.astype(int)
+    else:
+        dcm = (_tmp.groupby("ym")["f"].rank(ascending=False, method="first")
+                                      .values - 1).astype(int)
 
     # Todo lo que sigue es vectorizado a propósito. La versión con diccionarios y
     # tuplas construía ~1.2M de objetos Python (una fila por horizonte por rezago),
@@ -1855,6 +1861,23 @@ LAGS_POSICION_MES = [1, 2, 3, 4]
 # defecto. En True queda para auditar la cobertura sin tener que tocar
 # FEATURES_EXCLUIR.
 GUARDAR_N_LAGS_POS = False
+
+# Referencia de la posición dentro del mes, por serie:
+#   "cierre" -> ruedas hasta el ÚLTIMO día hábil  (0 = cierre de mes)
+#   "inicio" -> ruedas desde el PRIMER día hábil  (0 = primer hábil)
+#
+# Si todos los meses tuvieran el mismo largo las dos serían idénticas; difieren
+# solo porque tienen entre 19 y 23 ruedas, y entonces la referencia decide dónde
+# se absorbe el desajuste. Cada una es EXACTA para posiciones contadas desde su
+# propio extremo, así que la elección debe seguir al fenómeno: el encaje vence al
+# cierre, mientras que las entradas fuertes se observan al arranque del mes.
+# Las dos referencias eligen días distintos en el 74% de las fechas, con ~2 días
+# de desfase, así que no es una distinción cosmética.
+ANCLA_POSICION_MES = {
+    "flujo":    "cierre",
+    "retiro":   "cierre",
+    "deposito": "cierre",   # "inicio" para probar la hipótesis de inicio de mes
+}
 
 
 ###############################################################################
@@ -2251,8 +2274,10 @@ def build_feature_matrix(
             # Sin dropna: el índice completo de df_bancarios es parte del
             # calendario. Los días sin dato dan NaN al buscar el valor y quedan
             # fuera del máximo, pero siguen contando para la posición en el mes.
+            _ref = ANCLA_POSICION_MES.get(_nom, "cierre")
             _mx, _n = _build_lag_posicion_mes(
-                _ser, df["fecha_th"], df["fecha_t"], LAGS_POSICION_MES, peru_bday
+                _ser, df["fecha_th"], df["fecha_t"], LAGS_POSICION_MES, peru_bday,
+                referencia=_ref,
             )
             df[f"esc_{_nom}_pos"] = _mx.values
             if _nom == "flujo":
@@ -2264,7 +2289,8 @@ def build_feature_matrix(
                          for k in range(len(LAGS_POSICION_MES) + 1)
                          if (_n_lags == k).any())
         logger.info(f"    Rezagos por posición del mes: cobertura {_cob:.1%} "
-                    f"(lags {LAGS_POSICION_MES}) | n_lags -> {_rep}")
+                    f"(lags {LAGS_POSICION_MES}) | anclas {ANCLA_POSICION_MES} "
+                    f"| n_lags -> {_rep}")
         if GUARDAR_N_LAGS_POS:
             df["n_lags_pos"] = _n_lags
     else:
