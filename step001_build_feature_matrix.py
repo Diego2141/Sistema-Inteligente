@@ -131,8 +131,8 @@ FEATURES_EXCLUIR = [
 # 1. Información endógena del flujo: modelo base
     #"R_t0",
     #"D_t0",
-    #"R_t-1",
-    #"D_t-1",
+    "R_t-1",
+    "D_t-1",
     #"R_conf_t1",
     #"R_conf_t2",
     #"D_conf_t1",

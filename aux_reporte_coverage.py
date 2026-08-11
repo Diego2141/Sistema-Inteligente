@@ -39,7 +39,7 @@ BASE_SISTEMA = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente"
 DIR_WFCV     = BASE_SISTEMA / "2. Output" / "step005_wfcv_v4_direct"
 
 BANCO = "SISTEMA"
-MODO  = "roll_arctan"        # carpeta fold_<MODO>; ajustar según la corrida
+MODO  = "exp_arctan"        # carpeta fold_<MODO>; ajustar según la corrida
 
 # Mismos bins que usa step005 al imprimir las tablas por grupo
 BINS   = [1, 5, 15, 30, 50, 75]

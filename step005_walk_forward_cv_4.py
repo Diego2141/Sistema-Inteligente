@@ -68,6 +68,7 @@ TAUS    = [0.01, 0.05, 0.40, 0.50, 0.60, 0.95, 0.99]
 
 EXPANDING             = True
 RECORTAR_INICIO_TRAIN = True
+<<<<<<< HEAD
 # 2019-01-01 (antes 2020-01-01): con la geometría corregida de build_folds()
 # los gaps de purge+embargo se insertan entre ventanas en vez de restarse del
 # TRAIN, así que cada fold consume ~5.4 años de calendario
@@ -75,9 +76,12 @@ RECORTAR_INICIO_TRAIN = True
 # caben 3 folds; adelantarlo a 2019 recupera 5. El TRAIN del fold 1 vuelve a
 # incluir el primer semestre de 2019.
 TRAIN_INICIO_CUTOFF   = "2019-01-01"
+=======
+TRAIN_INICIO_CUTOFF   = "2019-07-01"
+>>>>>>> be7edadf (Excluye R_t-1 y D_t-1: no aportan senal)
 
 VENTANA_TRAIN_AÑOS  = 3
-VENTANA_VAL_AÑOS    = 0.5
+VENTANA_VAL_AÑOS    = 1
 VENTANA_TEST_AÑOS   = 0.5
 PASO_AÑOS           = 0.5
 
@@ -1730,7 +1734,7 @@ def optuna_tune_h(
             # ~20 observaciones centrales pero ~700 de cola: los splits que
             # aislarían las colas quedan bloqueados. Se amplía el rango en vez
             # de fijarlo en 0 para que Optuna decida con la opción disponible.
-            "min_child_weight": trial.suggest_int(  "min_child_weight",   0,   20),
+            "min_child_weight": trial.suggest_int(  "min_child_weight",   3,   20),
             "reg_alpha"       : trial.suggest_float("reg_alpha",         0.0,  2.0),
             "reg_lambda"      : trial.suggest_float("reg_lambda",        0.5,  5.0),
             "learning_rate"   : trial.suggest_float("learning_rate",    0.03, 0.15, log=True),

@@ -53,7 +53,7 @@ BASE_SISTEMA = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente"
 DIR_WFCV     = BASE_SISTEMA / "2. Output" / "step005_wfcv_v4_direct"
 
 BANCO = "SISTEMA"
-MODO  = "roll_arctan"          # carpeta fold_<MODO>
+MODO  = "exp_arctan"          # carpeta fold_<MODO>
 
 TAU_PRINCIPAL = 0.05           # nivel de referencia para el dimensionamiento
 TAUS_INFERIOR = [0.01, 0.05]   # colas que cuestan iliquidez
