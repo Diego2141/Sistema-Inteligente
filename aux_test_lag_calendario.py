@@ -64,6 +64,11 @@ DIR_WFCV     = BASE_SISTEMA / "2. Output" / "step005_wfcv_v4_direct"
 DIR_CQR      = BASE_SISTEMA / "2. Output" / "step006_cqr"
 RUTA_MATRIZ  = BASE_SISTEMA / "1. Data" / "Clean" / "matriz_features.parquet"
 
+# Archivo de encaje de aux_encaje_2. Se lee DIRECTO, sin pasar por la matriz, para
+# poder medir la proyección de presión de deadline sin reconstruirla primero.
+RUTA_ENCAJE  = (BASE_SISTEMA / "2. Output" / "encaje_bbva" /
+                "bbva_encaje_features_modelo.xlsx")
+
 _MODO_SUFIJO = "exp_arctan"
 BANCO        = "SISTEMA"
 
@@ -375,6 +380,72 @@ def agregar_frecuencia(df, serie, col_serie, etiqueta):
     return df, [etiqueta]
 
 
+def agregar_presion_deadline(df):
+    """
+    Proyección de la PRESIÓN DE DEADLINE del encaje a la fecha objetivo.
+
+        presion_th = max(ExigibleTotal(t-1) - EncajeAcumMes(t-1), 0)
+                     ------------------------------------------------
+                              max(dias_restantes(t+h), 1)
+
+    Es el mínimo que el banco tendría que depositar por día a partir de t+h si
+    dejara de acumular desde hoy. A diferencia de un rezago histórico, usa el
+    estado ACTUAL y solo proyecta el denominador, que es puro calendario — por eso
+    no necesita ningún supuesto sobre cómo acumula el banco.
+
+    Dos garantías:
+
+    · Point-in-time. El numerador se toma con shift(1): ExigibleTotalMes_est y
+      EncajeAcumMes en t no se conocen hasta t+1. El denominador es calendario
+      puro, así que no requiere dato alguno.
+
+    · Validez. El exceso se REINICIA al cierre del período de encaje, de modo que
+      la proyección solo vale si t+h cae en el mismo mes calendario que t. Fuera
+      de eso queda NaN: cubre ~14% de las filas, concentradas en h<=10, que es
+      donde el allocation lo necesita (91% de los orígenes en h=2, 53% en h=10).
+    """
+    if not RUTA_ENCAJE.exists():
+        print(f"[AVISO] sin {RUTA_ENCAJE.name} — se omite presion_deadline_th")
+        return df, []
+    try:
+        enc = pd.read_excel(RUTA_ENCAJE)
+    except Exception as e:
+        print(f"[AVISO] no se pudo leer el archivo de encaje ({e})")
+        return df, []
+
+    faltan = [c for c in ("fecha", "ExigibleTotalMes_est", "EncajeAcumMes")
+              if c not in enc.columns]
+    if faltan:
+        print(f"[AVISO] al archivo de encaje le faltan {faltan} — se omite")
+        return df, []
+
+    enc["fecha"] = pd.to_datetime(enc["fecha"])
+    enc = enc.dropna(subset=["fecha"]).sort_values("fecha").set_index("fecha")
+
+    # shift(1): el estado de t recién se conoce en t+1
+    deficit = (enc["ExigibleTotalMes_est"] - enc["EncajeAcumMes"]).clip(lower=0).shift(1)
+    # Días calendario → ffill a días hábiles, igual que hace step001
+    deficit = deficit.reindex(
+        pd.date_range(enc.index.min(), enc.index.max(), freq="D")).ffill()
+
+    th = pd.DatetimeIndex(df["fecha_th"])
+    ft = pd.DatetimeIndex(df["fecha_t"])
+    # dias_restantes(t+h): calendario puro, no necesita dato
+    fin_mes = th + pd.offsets.MonthEnd(0)
+    dias_rest_th = (fin_mes - th).days
+
+    num = pd.Series(ft, index=df.index).map(deficit)
+    val = num / np.maximum(dias_rest_th, 1)
+    # Solo válido dentro del mismo período de encaje
+    mismo = (th.to_period("M") == ft.to_period("M"))
+    df["esc_presion_deadline"] = val.where(mismo)
+
+    cob = df["esc_presion_deadline"].notna().mean()
+    print(f"     {'presion_deadline':>18}: proyección de deadline | "
+          f"cobertura {cob:.1%} (solo dentro del período de encaje)")
+    return df, ["presion_deadline"]
+
+
 # ── 2. Muestra: predicciones de TEST ──────────────────────────────────────────
 def cargar_preds(serie, comp):
     paths = sorted(DIR_FOLD.glob(f"preds_base_{BANCO}_*.parquet"))
@@ -543,6 +614,10 @@ def main() -> None:
     for _c in ("retiro", "deposito", "flujo"):
         df, ets = agregar_frecuencia(df, serie, _c, f"frec_{_c}")
         variantes.extend(ets); cal_vars.extend(ets)
+
+    # Proyección de presión de deadline (no es un rezago: usa el estado actual)
+    df, ets = agregar_presion_deadline(df)
+    variantes.extend(ets); cal_vars.extend(ets)
 
     # Recencia pura: se mapea por fecha_t, así que está disponible siempre y para
     # todos los horizontes. Comparte el prefijo esc_ para pasar por las mismas
