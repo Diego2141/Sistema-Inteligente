@@ -78,6 +78,20 @@ LAGS_MESES  = [1, 2, 3]
 # grande hace poco". Si empatan, el feature correcto es éste: más barato de
 # construir y disponible para los 74 horizontes en vez de 62.
 VENTANAS_RECENCIA = [3, 5, 22]
+
+# Series adicionales tomadas de la MATRIZ (no de R/D) para probarlas con el mismo
+# tratamiento de posición del mes. Se descubren del esquema: si una no está, se
+# omite en silencio.
+#   exceso_abs_lag1    la RESTRICCIÓN que limita cuánto se puede retirar (BBVA)
+#   ccovn_sistema_lag1 capacidad física del SISTEMA — coincide con el target
+SERIES_EXTRA_MATRIZ = ["exceso_abs_lag1", "ccovn_sistema_lag1"]
+
+# Variante de FRECUENCIA: en vez de la magnitud del extremo, en cuántos de los
+# últimos 12 meses la posición equivalente superó su umbral. Para modelar colas la
+# recurrencia puede ser mejor estadístico que la magnitud. Bonus: con k hasta 12 la
+# máscara h <= 21k cubre los 74 horizontes con al menos un rezago.
+LAGS_FRECUENCIA = list(range(1, 13))
+VENTANA_UMBRAL  = 250   # ruedas para el umbral móvil (point-in-time)
 REC_REFERENCIA    = "rec5_flujo"   # el que se usa como control en la parcial
 
 # Competidores: variables de escala que el modelo YA tiene. Se toman las que
@@ -238,7 +252,10 @@ def cargar_serie_diaria():
     else:
         print(f"[OK] competidores hallados en la matriz: {comp}")
 
-    cols = ["fecha_t", "R_t0", "D_t0"] + comp
+    extra = [c for c in SERIES_EXTRA_MATRIZ if c in disponibles]
+    if extra:
+        print(f"[OK] series extra halladas en la matriz: {extra}")
+    cols = ["fecha_t", "R_t0", "D_t0"] + comp + extra
     try:
         mat = pd.read_parquet(RUTA_MATRIZ, filters=[("banco", "==", BANCO)],
                               columns=cols)
@@ -260,6 +277,9 @@ def cargar_serie_diaria():
     for c in comp:
         serie[c] = d[c]
     serie.attrs["competidores"] = comp
+    for c in extra:
+        serie[c] = d[c]
+    serie.attrs["extra"] = extra
 
     # Recencia pura: mediana de |flujo| en las últimas N ruedas, incluyendo t.
     # Incluir t es correcto y consistente con la máscara de los rezagos: D_t0 y
@@ -282,6 +302,11 @@ def cargar_serie_diaria():
                             .rank(ascending=False, method="first").values - 1).astype(int)
     serie["ym"] = idx.to_period("M")
 
+    # Umbral móvil point-in-time para la variante de frecuencia
+    for c in ["flujo", "retiro", "deposito"] + extra:
+        serie[f"umbral_{c}"] = (serie[c].abs()
+                                .rolling(VENTANA_UMBRAL, min_periods=60).median())
+
     print(f"[OK] serie diaria: {len(serie):,} días | "
           f"{serie.index.min().date()} → {serie.index.max().date()}")
     return serie, comp
@@ -301,6 +326,39 @@ def construir_lags(serie, col_flujo, modo_dcm):
         idx_map.setdefault((ym, int(dcm)), f)     # primera ocurrencia
     valores = serie[col_flujo]
     return idx_map, valores
+
+
+def agregar_frecuencia(df, serie, col_serie, etiqueta):
+    """
+    Fracción de los últimos 12 rezagos de posición cuyo |valor| superó el umbral
+    móvil vigente en t. Mide RECURRENCIA, no magnitud: una posición cargada en 8
+    de 12 meses es distinta de una cargada en 1 con un valor enorme, y para
+    modelar colas la primera puede ser más informativa.
+
+    El umbral es la mediana móvil de 250 ruedas hasta t, así que es point-in-time:
+    nunca usa información posterior a la fecha de origen.
+    """
+    idx_map, valores = construir_lags(serie, col_serie, "hab")
+    dcm_th = df["fecha_th"].map(serie["dcm_hab"])
+    ym_th  = df["fecha_th"].dt.to_period("M")
+    umbral = df["fecha_t"].map(serie[f"umbral_{col_serie}"])
+
+    sup, disp = None, None
+    for k in LAGS_FRECUENCIA:
+        claves = list(zip(ym_th - k, dcm_th.fillna(-1).astype(int)))
+        fechas = pd.to_datetime(pd.Series([idx_map.get(c) for c in claves],
+                                          index=df.index))
+        vals = fechas.map(valores).abs()
+        vals = vals.where(fechas.notna() & (fechas <= df["fecha_t"]))
+        ok   = vals.notna() & umbral.notna()
+        s_k  = (ok & (vals > umbral)).astype(float).where(ok)
+        sup  = s_k if sup is None else sup.add(s_k, fill_value=0)
+        disp = ok.astype(float) if disp is None else disp.add(ok.astype(float),
+                                                              fill_value=0)
+    df[f"esc_{etiqueta}"] = (sup / disp.replace(0, np.nan))
+    print(f"     {etiqueta:>18}: frecuencia sobre {len(LAGS_FRECUENCIA)} rezagos | "
+          f"cobertura {df[f'esc_{etiqueta}'].notna().mean():.1%}")
+    return df, [etiqueta]
 
 
 # ── 2. Muestra: predicciones de TEST ──────────────────────────────────────────
@@ -455,6 +513,19 @@ def main() -> None:
         et = f"{col_flujo}_anclaT"
         df, ets = agregar_candidato(df, serie, col_flujo, "hab", et,
                                     stats=("med", "max"), ancla="t")
+        variantes.extend(ets); cal_vars.extend(ets)
+
+    # Series de la matriz (restricción de encaje y capacidad del sistema) con el
+    # mismo tratamiento de posición del mes. Solo med y max: el objetivo es saber
+    # si la FAMILIA aporta, no afinar el estadístico todavía.
+    for _c in serie.attrs.get("extra", []):
+        df, ets = agregar_candidato(df, serie, _c, "hab", _c,
+                                    stats=("med", "max"))
+        variantes.extend(ets); cal_vars.extend(ets)
+
+    # Variante de recurrencia sobre retiro y sobre el flujo neto
+    for _c in ("retiro", "flujo"):
+        df, ets = agregar_frecuencia(df, serie, _c, f"frec_{_c}")
         variantes.extend(ets); cal_vars.extend(ets)
 
     # Recencia pura: se mapea por fecha_t, así que está disponible siempre y para
