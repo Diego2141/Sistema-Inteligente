@@ -2546,10 +2546,19 @@ def build_feature_matrix(
             df["presion_deadline_th"] = (
                 df["deficit_encaje_lag1"] / np.maximum(_dias_rest_th, 1)
             ).where(_mismo_periodo)
+            # Desglose de los vacíos: son de dos orígenes independientes y
+            # conviene distinguirlos. Fuera del período es estructural —el
+            # cómputo del encaje se reinicia al cierre— y para h>=30 deja la
+            # columna ENTERAMENTE vacía, o sea muerta en 45 de los 74 modelos.
+            # Sin dato de encaje es de disponibilidad: el archivo arranca en
+            # 2016-07 y antes de eso no hay nada que proyectar.
+            _fuera = (~_mismo_periodo).mean()
+            _sin_dato = df["deficit_encaje_lag1"].isna().mean()
             logger.info(
                 f"  {banco}: presion_deadline_th — cobertura "
                 f"{df['presion_deadline_th'].notna().mean():.1%} "
-                f"(solo dentro del período de encaje)"
+                f"| fuera del período {_fuera:.1%} (estructural, h>=30 queda "
+                f"vacío) | sin dato de encaje {_sin_dato:.1%}"
             )
         # deficit_encaje_lag1 es insumo, no feature: se descarta tras usarlo.
         df = df.drop(columns=["deficit_encaje_lag1"], errors="ignore")
