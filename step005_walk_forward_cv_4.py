@@ -267,9 +267,9 @@ def build_folds(df: pd.DataFrame) -> list[dict]:
     Build walk-forward CV folds (expanding or rolling) with symmetric purge+embargo gaps.
 
     Window type is controlled by the EXPANDING flag:
-      EXPANDING=True  → train_start anchored to train_min (growing window)
-      EXPANDING=False → train_start = val_start - VENTANA_TRAIN_AÑOS (fixed-size rolling window)
-                        clamped to train_min so early folds never go below the data origin.
+      EXPANDING=True  → train_start anchored to train_min; train_end grows PASO_AÑOS por fold
+      EXPANDING=False → ventana fija: train_end = train_start + VENTANA_TRAIN_AÑOS,
+                        con train_start desplazándose PASO_AÑOS por fold.
 
     Gap structure (applied identically on both sides):
         TRAIN..train_end | GAP_DIAS_HAB | val_start..val_end | GAP_DIAS_HAB | test_start..test_end
@@ -280,6 +280,17 @@ def build_folds(df: pd.DataFrame) -> list[dict]:
     The gap prevents TARGET values from TRAIN/VAL from appearing as LAG FEATURES
     in VAL/TEST (direct leakage) and adds an embargo for serial correlation at
     period boundaries.
+
+    IMPORTANTE — dirección de la derivación
+    ---------------------------------------
+    Las ventanas se construyen HACIA ADELANTE desde train_start, y los gaps se
+    INSERTAN entre ellas. La versión anterior derivaba hacia atrás desde
+    test_start, lo que hacía que ambos gaps salieran del presupuesto de TRAIN:
+    con VENTANA_TRAIN_AÑOS=3 la ventana real era 3 - 119/252 = 2.54 años (folds
+    2+) y 2.0 años en el fold 1 (truncado además por TRAIN_INICIO_CUTOFF).
+    Derivando hacia adelante, cada ventana mide exactamente su parámetro y
+    train_start nunca queda por debajo de train_min, para cualquier combinación
+    de EXPANDING / TRAIN_INICIO_CUTOFF / VENTANA_* / PASO_AÑOS.
 
     Returns a list of dicts with keys:
         fold, train_start, train_end, val_start, val_end, test_start, test_end
@@ -296,59 +307,82 @@ def build_folds(df: pd.DataFrame) -> list[dict]:
         months = round(years * 12)
         return pd.DateOffset(months=months)
 
-    # First test window starts after train + val
-    test_start = train_min + _offset(VENTANA_TRAIN_AÑOS + VENTANA_VAL_AÑOS)
+    def _shift_bd(ts: pd.Timestamp, n: int) -> pd.Timestamp:
+        """Desplazar n días hábiles sobre el calendario real de fecha_t."""
+        idx = int(np.searchsorted(all_bdays, np.datetime64(ts, "ns")))
+        idx = int(np.clip(idx + n, 0, len(all_bdays) - 1))
+        return pd.Timestamp(all_bdays[idx])
+
+    fecha_max = pd.Timestamp(df["fecha_t"].max())
 
     folds = []
-    fold_num = 0
+    k = 0   # índice de fold (0-based); el paso temporal es k * PASO_AÑOS
 
     while True:
-        test_end = test_start + _offset(VENTANA_TEST_AÑOS) - pd.Timedelta(days=1)
-
-        if test_end > df["fecha_t"].max():
-            break
-
-        # --- GAP2: purge + embargo entre VAL y TEST ---
-        # val_end se calcula retrocediendo GAP_DIAS_HAB antes de test_start
-        idx_test = int(np.searchsorted(all_bdays, np.datetime64(test_start, "ns")))
-        val_end_idx = max(0, idx_test - GAP_DIAS_HAB)
-        val_end = pd.Timestamp(all_bdays[val_end_idx])
-
-        # VAL: ventana de VENTANA_VAL_AÑOS terminando en val_end
-        val_start = val_end - _offset(VENTANA_VAL_AÑOS)
-
+        # --- TRAIN: única ventana anclada. Todo lo demás se deriva hacia adelante,
+        #     así que los gaps se INSERTAN entre ventanas, nunca se restan de ellas.
         if EXPANDING:
             train_start = train_min
+            train_end   = (train_min
+                           + _offset(VENTANA_TRAIN_AÑOS + k * PASO_AÑOS)
+                           - pd.Timedelta(days=1))
         else:
-            train_start = max(train_min, val_start - _offset(VENTANA_TRAIN_AÑOS))
+            train_start = train_min + _offset(k * PASO_AÑOS)
+            train_end   = (train_start
+                           + _offset(VENTANA_TRAIN_AÑOS)
+                           - pd.Timedelta(days=1))
 
-        # --- GAP1: purge + embargo entre TRAIN y VAL (simétrico a GAP2) ---
-        idx_val = int(np.searchsorted(all_bdays, np.datetime64(val_start, "ns")))
-        train_end_idx = max(0, idx_val - GAP_DIAS_HAB)
-        train_end = pd.Timestamp(all_bdays[train_end_idx])
+        # --- GAP1: purge + embargo TRAIN → VAL ---
+        val_start = _shift_bd(train_end, GAP_DIAS_HAB)
+        val_end   = val_start + _offset(VENTANA_VAL_AÑOS) - pd.Timedelta(days=1)
 
-        fold_num += 1
+        # --- GAP2: purge + embargo VAL → TEST (simétrico a GAP1) ---
+        test_start = _shift_bd(val_end, GAP_DIAS_HAB)
+        test_end   = test_start + _offset(VENTANA_TEST_AÑOS) - pd.Timedelta(days=1)
+
+        if test_end > fecha_max:
+            break
+
+        fold_num = k + 1
         folds.append({
             "fold"       : fold_num,
             "train_start": pd.Timestamp(train_start),
-            "train_end"  : train_end,
+            "train_end"  : pd.Timestamp(train_end),
             "val_start"  : pd.Timestamp(val_start),
-            "val_end"    : val_end,
+            "val_end"    : pd.Timestamp(val_end),
             "test_start" : pd.Timestamp(test_start),
             "test_end"   : pd.Timestamp(test_end),
         })
 
+        # Auditoría: el span realizado debe coincidir con el parámetro configurado.
+        # Si esta advertencia aparece, el anclaje volvió a romperse.
+        años_train = (train_end - train_start).days / 365.25
+        años_esper = VENTANA_TRAIN_AÑOS + (k * PASO_AÑOS if EXPANDING else 0.0)
+        if abs(años_train - años_esper) > 0.05:
+            log.warning(
+                "Fold %d: ventana TRAIN realizada %.2f años vs %.2f configurados",
+                fold_num, años_train, años_esper,
+            )
+
         log.debug(
-            "Fold %d | train %s..%s | [gap %dd] | val %s..%s | [gap %dd] | test %s..%s",
+            "Fold %d | train %s..%s (%.2f a) | [gap %dd] | val %s..%s | [gap %dd] | test %s..%s",
             fold_num,
-            train_start.date(), train_end.date(),
+            train_start.date(), train_end.date(), años_train,
             GAP_DIAS_HAB,
             val_start.date(),   val_end.date(),
             GAP_DIAS_HAB,
             test_start.date(),  test_end.date(),
         )
 
-        test_start += _offset(PASO_AÑOS)
+        k += 1
+
+    if not folds:
+        raise ValueError(
+            f"No se pudo construir ningún fold: los datos llegan hasta {fecha_max.date()} "
+            f"y se requieren {VENTANA_TRAIN_AÑOS} + {VENTANA_VAL_AÑOS} + {VENTANA_TEST_AÑOS} "
+            f"años más 2×{GAP_DIAS_HAB} días hábiles de gap desde {train_min.date()}. "
+            f"Reduzca las ventanas o adelante TRAIN_INICIO_CUTOFF."
+        )
 
     return folds
 
