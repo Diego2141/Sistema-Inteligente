@@ -119,11 +119,88 @@ FEATURES_EXCLUIR = [
     "dia_semana",                                     # → dias_sem_sin/cos
     "mes",                                            # → mes_sin/cos
     "is_fin_anio",                                    # → dias_al_cierre_anio_sin/cos
-    "is_pre_eleccion", "is_post_eleccion"#,            # → elec_sin/cos
-    "es_post_feriado","is_pre_feriado"
-    #"encaje_lag1","exceso_lag1","faltante_lag1","techo_10h",
-    #"techo_restante_lag1","proporcion_usada","encaje_urgencia_lag1",
-    #"hmm_estado"
+    # OJO con la coma: si se comenta ANTES de ella, Python concatena este literal
+    # con el de la línea siguiente y produce una entrada basura
+    # ("is_post_elecciones_post_feriado") en vez de dos exclusiones. Ambas
+    # aparecen igual más abajo, así que no cambia el resultado, pero es una
+    # trampa si algún día se borran esas otras entradas.
+    "is_pre_eleccion", "is_post_eleccion",            # → elec_sin/cos
+    "es_post_feriado", "is_pre_feriado",
+
+
+# 1. Información endógena del flujo: modelo base
+    #"R_t0",
+    #"D_t0",
+    #"R_t-1",
+    #"D_t-1",
+    #"R_conf_t1",
+    #"R_conf_t2",
+    #"D_conf_t1",
+    #"ma_flujo_5d",
+    #"ma_flujo_20d",
+    "flujo_neto_acum_mes",
+    "flujo_neto_sum_5d",
+    "flujo_neto_sum_22d",
+    "flujo_neto_sum_66d",
+
+
+# 2. Estado de volatilidad
+    "sigma_22d",
+    "sigma_flujo_ratio",
+    "tc_vol_ratio",
+    "garch_vol_tc",
+
+# 3. Condiciones macrofinancieras externas y locales
+    "VIX",
+    "FED_FUNDS",
+    "T10Y",
+    "TASA_REF_BCRP",
+    "CDS_PERU_5Y_frac",
+    "COPPER_frac",
+
+
+# 4. Cumplimiento y posición dentro del período de encaje
+    "avance_mes_lag1",
+    "exceso_abs_lag1",
+    "exceso_dia_lag1",
+    "encaje_ovn_lag1",
+    "ratio_ovn_total_lag1",
+
+
+# 5. Stocks y comportamiento de liquidez del sistema y del BBVA
+    "ccovn_sistema_lag1",
+    "ccovn_bbva_lag1",
+    "var_ccovn_sistema_lag1",
+    "var_ccovn_bbva_lag1",
+    "bbva_share_lag1",
+    "var_ccovn_bbva_exceso_lag1",
+    "ccovn_vs_dia_mes_lag1",
+    "residuo_ccovn_lag1",
+
+
+# 6. Discontinuidades del calendario operativo
+    "dias_desde_ultimo_habil",
+    "es_post_feriado", "is_pre_feriado",
+
+# 7. Estacionalidad general
+    #"mes_sin", "mes_cos",
+    #"dias_sem_sin", "dias_sem_cos",
+
+# 8. Proximidad a cierres institucionales
+    #"dias_al_cierre_mes_sin", "dias_al_cierre_mes_cos",
+    #"dias_al_cierre_trim_sin", "dias_al_cierre_trim_cos",
+    #"dias_al_cierre_anio_sin", "dias_al_cierre_anio_cos",
+
+# 9. Episodios extraordinarios
+    "is_post_eleccion",
+    "elec_sin", "elec_cos",
+
+# 10. Features atados al horizonte
+    # presion_deadline_th queda fuera: es NaN para h>=30, o sea columna muerta en
+    # 45 de los 74 modelos, y su cobertura efectiva es ~7.6% (el archivo de
+    # encaje arranca en 2016-07). El cálculo se conserva en step001; para
+    # reactivarla basta comentar esta línea.
+    "presion_deadline_th",
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
