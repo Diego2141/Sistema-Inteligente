@@ -537,8 +537,10 @@ def main() -> None:
                                     stats=("med", "max"))
         variantes.extend(ets); cal_vars.extend(ets)
 
-    # Variante de recurrencia sobre retiro y sobre el flujo neto
-    for _c in ("retiro", "flujo"):
+    # Variante de recurrencia sobre las tres series. Depósitos incluido: la
+    # permutación del modelo puso esc_deposito_pos entre los primeros, así que
+    # omitirlo aquí no tendría justificación.
+    for _c in ("retiro", "deposito", "flujo"):
         df, ets = agregar_frecuencia(df, serie, _c, f"frec_{_c}")
         variantes.extend(ets); cal_vars.extend(ets)
 
