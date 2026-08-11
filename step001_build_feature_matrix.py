@@ -2238,10 +2238,16 @@ def build_feature_matrix(
     # que al promediar sobre las 22 ruedas mezcla posiciones y borra esta señal:
     # medido contra el error del modelo, sigma_22d aporta +0.002 y este rezago
     # +0.127 (parcial de Spearman, controlando por la anchura predicha y por h).
+    # Las tres series no son redundantes entre sí: el feature es un MÁXIMO de
+    # valores absolutos, y max|D-R| no se deduce de max|D| y max|R|. R dirige la
+    # cola baja (retiros, lo operativo) y D la cola alta, que es donde el
+    # diagnóstico del oráculo encontró la peor calibración (s_hi hasta 3.1x).
     if tiene_bancarios:
         _serie_flujo  = (df_bancarios[f"{banco}_D"] - df_bancarios[f"{banco}_R"])
         _serie_retiro = df_bancarios[f"{banco}_R"]
-        for _nom, _ser in (("flujo", _serie_flujo), ("retiro", _serie_retiro)):
+        _serie_dep    = df_bancarios[f"{banco}_D"]
+        for _nom, _ser in (("flujo", _serie_flujo), ("retiro", _serie_retiro),
+                           ("deposito", _serie_dep)):
             # Sin dropna: el índice completo de df_bancarios es parte del
             # calendario. Los días sin dato dan NaN al buscar el valor y quedan
             # fuera del máximo, pero siguen contando para la posición en el mes.
@@ -2262,8 +2268,9 @@ def build_feature_matrix(
         if GUARDAR_N_LAGS_POS:
             df["n_lags_pos"] = _n_lags
     else:
-        df["esc_flujo_pos"]  = np.nan
-        df["esc_retiro_pos"] = np.nan
+        df["esc_flujo_pos"]    = np.nan
+        df["esc_retiro_pos"]   = np.nan
+        df["esc_deposito_pos"] = np.nan
         if GUARDAR_N_LAGS_POS:
             df["n_lags_pos"] = 0
 
@@ -2814,8 +2821,14 @@ def build_data_dictionary(params):
         "Complementa a sigma_22d, que promedia sobre las 22 ruedas y borra la "
         "variación por posición.", None, "t+h")
     add("esc_retiro_pos", "Datos bancarios / Posición del mes",
-        "Ídem sobre R solo. Empata con esc_flujo_pos para predecir el error de la "
-        "cola baja, que es la relevante para el portafolio de liquidez.", None, "t+h")
+        "Ídem sobre R solo. Dirige la cola BAJA, la relevante para el portafolio "
+        "de liquidez. En la permutación del modelo aparece por encima de la "
+        "versión neta: descomponer el flujo en sus componentes aporta.", None, "t+h")
+    add("esc_deposito_pos", "Datos bancarios / Posición del mes",
+        "Ídem sobre D solo. Dirige la cola ALTA, donde el diagnóstico del oráculo "
+        "encontró la peor calibración (factor de ensanchamiento necesario hasta "
+        "3.1x). No es redundante con las otras dos: el estadístico es un máximo de "
+        "valores absolutos y max|D-R| no se deduce de max|D| y max|R|.", None, "t+h")
     if GUARDAR_N_LAGS_POS:
         add("n_lags_pos", "Datos bancarios / Posición del mes",
             "Cuántos rezagos de posición estaban disponibles (0-4). Diagnóstico: "

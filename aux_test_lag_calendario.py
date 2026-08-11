@@ -252,8 +252,11 @@ def cargar_serie_diaria():
             .set_index("fecha_t"))
 
     serie = pd.DataFrame(index=d.index)
-    serie["flujo"]  = d["D_t0"] - d["R_t0"]      # neto, consistente con el target
-    serie["retiro"] = d["R_t0"]                   # solo retiro (lo operativo)
+    serie["flujo"]    = d["D_t0"] - d["R_t0"]    # neto, consistente con el target
+    serie["retiro"]   = d["R_t0"]                 # solo R: dirige la cola BAJA
+    serie["deposito"] = d["D_t0"]                 # solo D: dirige la cola ALTA
+    # Los tres no son redundantes entre sí: el feature es un MÁXIMO de valores
+    # absolutos, y max|D-R| no se deduce de max|D| y max|R|.
     for c in comp:
         serie[c] = d[c]
     serie.attrs["competidores"] = comp
@@ -262,10 +265,9 @@ def cargar_serie_diaria():
     # Incluir t es correcto y consistente con la máscara de los rezagos: D_t0 y
     # R_t0 están anclados en t y son conocidos ese mismo día.
     for w in VENTANAS_RECENCIA:
-        serie[f"rec{w}_flujo"]  = serie["flujo"].abs().rolling(
-            w, min_periods=max(2, w // 3)).median()
-        serie[f"rec{w}_retiro"] = serie["retiro"].abs().rolling(
-            w, min_periods=max(2, w // 3)).median()
+        for _c in ("flujo", "retiro", "deposito"):
+            serie[f"rec{w}_{_c}"] = serie[_c].abs().rolling(
+                w, min_periods=max(2, w // 3)).median()
 
     # Distancia al cierre de mes, en las DOS métricas. Cuál corresponde es una
     # pregunta abierta: el período de encaje se computa sobre días calendario,
@@ -434,8 +436,10 @@ def main() -> None:
 
     _titulo("Construcción de candidatos (con máscara point-in-time)")
     variantes, cal_vars, rec_vars = [], [], []
-    for col_flujo in ("flujo", "retiro"):
-        for modo in ("hab", "cal"):
+    for col_flujo in ("flujo", "retiro", "deposito"):
+        # 'cal' ya perdió decisivamente contra 'hab'; se mantiene solo como
+        # referencia para las dos series originales, no se extiende a depósitos.
+        for modo in (("hab", "cal") if col_flujo != "deposito" else ("hab",)):
             et = f"{col_flujo}_{modo}"
             # Los tres estadísticos solo para la alineación hábil, que ya ganó
             # decisivamente; para 'cal' basta la mediana como referencia.
@@ -447,7 +451,7 @@ def main() -> None:
 
     # Misma construcción pero anclada en el ORIGEN, para verificar que anclar en
     # el día predicho es lo correcto y no una suposición.
-    for col_flujo in ("flujo", "retiro"):
+    for col_flujo in ("flujo", "retiro", "deposito"):
         et = f"{col_flujo}_anclaT"
         df, ets = agregar_candidato(df, serie, col_flujo, "hab", et,
                                     stats=("med", "max"), ancla="t")
@@ -457,7 +461,7 @@ def main() -> None:
     # todos los horizontes. Comparte el prefijo esc_ para pasar por las mismas
     # secciones sin código aparte.
     for w in VENTANAS_RECENCIA:
-        for serie_col in ("flujo", "retiro"):
+        for serie_col in ("flujo", "retiro", "deposito"):
             et = f"rec{w}_{serie_col}"
             df[f"esc_{et}"] = df["fecha_t"].map(serie[et])
             variantes.append(et); rec_vars.append(et)
@@ -580,7 +584,7 @@ def main() -> None:
           f"{'ancla t':>9} {'IC 90%':>18}")
     print("  " + "-" * 82)
     filas_a3 = []
-    for serie_col in ("flujo", "retiro"):
+    for serie_col in ("flujo", "retiro", "deposito"):
         for est in ("med", "max"):
             c_th, c_t = f"esc_{serie_col}_hab_{est}", f"esc_{serie_col}_anclaT_{est}"
             if c_th not in df.columns or c_t not in df.columns:
@@ -666,7 +670,7 @@ def main() -> None:
         print(f"  {'familia':>13} | {'med':>7} {'max':>7} {'mea':>7} | "
               f"{'med3':>7} {'max3':>7} {'mea3':>7} | {'gana(3)':>8}")
         print("  " + "-" * 76)
-        for fam in ("flujo_hab", "retiro_hab"):
+        for fam in ("flujo_hab", "retiro_hab", "deposito_hab"):
             v = {}
             for suf in ("med", "max", "mea", "med3", "max3", "mea3"):
                 f_ = tabla[tabla["candidato"] == f"{fam}_{suf}"]
