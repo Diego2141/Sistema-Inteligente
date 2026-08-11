@@ -1913,6 +1913,7 @@ ANCLA_POSICION_MES = {
     "flujo":    "cierre",
     "retiro":   "cierre",
     "deposito": "cierre",   # "inicio" para probar la hipótesis de inicio de mes
+    "acum":     "cierre",
 }
 
 
@@ -2394,8 +2395,17 @@ def build_feature_matrix(
         _serie_flujo  = (df_bancarios[f"{banco}_D"] - df_bancarios[f"{banco}_R"])
         _serie_retiro = df_bancarios[f"{banco}_R"]
         _serie_dep    = df_bancarios[f"{banco}_D"]
+        # Acumulado del flujo DENTRO de su mes, reiniciado en cada período. No es
+        # un extremo de un día sino una cantidad de TRAYECTORIA: cuánto flujo neto
+        # se había construido a esa altura del ciclo. Anclado en la fecha de
+        # origen esta información no resultó relevante —de ahí que
+        # flujo_neto_acum_mes esté excluido— pero leído en la posición del mes
+        # responde otra pregunta: cuánto se había acumulado en meses previos al
+        # llegar a la altura a la que apunta t+h.
+        _serie_acum = _serie_flujo.groupby(
+            pd.PeriodIndex(_serie_flujo.index, freq="M")).cumsum()
         for _nom, _ser in (("flujo", _serie_flujo), ("retiro", _serie_retiro),
-                           ("deposito", _serie_dep)):
+                           ("deposito", _serie_dep), ("acum", _serie_acum)):
             # Sin dropna: el índice completo de df_bancarios es parte del
             # calendario. Los días sin dato dan NaN al buscar el valor y quedan
             # fuera del máximo, pero siguen contando para la posición en el mes.
@@ -2408,6 +2418,12 @@ def build_feature_matrix(
                 df["esc_neto_min_pos"] = _mn_s.values   # peor retiro neto  -> q01
                 df["esc_neto_max_pos"] = _mx_s.values   # mayor depósito neto -> q99
                 _n_lags = _n.values
+            elif _nom == "acum":
+                # Con signo, igual que el flujo: un mes con acumulado muy negativo
+                # a esa altura describe un ciclo distinto de uno muy positivo, y
+                # un máximo absoluto los confundiría.
+                df["acum_neto_min_pos"] = _mn_s.values
+                df["acum_neto_max_pos"] = _mx_s.values
             else:
                 df[f"esc_{_nom}_pos"] = _mx.values
         _cob = df["esc_neto_min_pos"].notna().mean()
@@ -2438,6 +2454,8 @@ def build_feature_matrix(
         df["esc_retiro_pos"]   = np.nan
         df["esc_deposito_pos"] = np.nan
         df["frec_flujo_pos"]   = np.nan
+        df["acum_neto_min_pos"] = np.nan
+        df["acum_neto_max_pos"] = np.nan
         if GUARDAR_N_LAGS_POS:
             df["n_lags_pos"] = 0
 
@@ -3037,6 +3055,17 @@ def build_data_dictionary(params):
         "Ídem sobre R solo. Dirige la cola BAJA, la relevante para el portafolio "
         "de liquidez. En la permutación del modelo aparece por encima de la "
         "versión neta: descomponer el flujo en sus componentes aporta.", None, "t+h")
+    add("acum_neto_min_pos", "Datos bancarios / Posición del mes",
+        "Flujo neto ACUMULADO dentro del mes hasta el día con la misma posición "
+        "que t+h, tomado el más negativo de los 4 meses previos. A diferencia de "
+        "esc_neto_min_pos —un extremo de un solo día— es una cantidad de "
+        "trayectoria: cuánto se había construido a esa altura del ciclo de "
+        "encaje. Anclado en la fecha de origen esta señal no resultó relevante "
+        "(ver flujo_neto_acum_mes, excluido).", None, "t+h")
+    add("acum_neto_max_pos", "Datos bancarios / Posición del mes",
+        "Ídem, el acumulado más positivo. Se separa por signo por la misma razón "
+        "que el flujo diario: un máximo absoluto confundiría un ciclo de salida "
+        "con uno de entrada.", None, "t+h")
     add("frec_flujo_pos", "Datos bancarios / Posición del mes",
         "Fracción de los últimos 12 meses en que el día con la MISMA posición en "
         "el mes que t+h superó su umbral de |flujo neto| (mediana móvil de 250 "
