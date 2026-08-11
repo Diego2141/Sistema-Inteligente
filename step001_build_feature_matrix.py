@@ -1683,7 +1683,9 @@ def build_ccovn_features(df_ccovn, peru_bday, flujo_sistema=None):
     # Captura variación en el saldo del BCR no explicada por los flujos D-R
     # reportados (diferencias de timing, componentes no observados, etc.).
     # Para horizontes cortos actúa como señal de reversión; si residuo > 0,
-    # el saldo cayó más de lo que justifican los flujos → corrección esperada.
+    # el saldo SUBIÓ más de lo que justifican los flujos → corrección esperada.
+    # (El comentario anterior decía "cayó", que contradice la fórmula: residuo > 0
+    #  equivale a Δsaldo > flujo. El cálculo nunca estuvo mal, solo la nota.)
     if flujo_sistema is not None and not flujo_sistema.empty:
         flujo_bd = flujo_sistema.reindex(idx_bd).ffill()
         resultado["residuo_ccovn_lag1"] = (sis.diff() - flujo_bd).shift(1)

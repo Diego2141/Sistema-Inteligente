@@ -82,9 +82,23 @@ VENTANAS_RECENCIA = [3, 5, 22]
 # Series adicionales tomadas de la MATRIZ (no de R/D) para probarlas con el mismo
 # tratamiento de posición del mes. Se descubren del esquema: si una no está, se
 # omite en silencio.
-#   exceso_abs_lag1    la RESTRICCIÓN que limita cuánto se puede retirar (BBVA)
-#   ccovn_sistema_lag1 capacidad física del SISTEMA — coincide con el target
-SERIES_EXTRA_MATRIZ = ["exceso_abs_lag1", "ccovn_sistema_lag1"]
+#   exceso_abs_lag1        la RESTRICCIÓN que limita cuánto se puede retirar (BBVA)
+#   ccovn_sistema_lag1     capacidad física del SISTEMA — el NIVEL, como control
+#   var_ccovn_sistema_lag1 su variación diaria
+#   residuo_ccovn_lag1     Δsaldo − flujo_neto: la parte de la variación que NO
+#                          explica el flujo
+#
+# El nivel se incluye solo como control. Es un stock grande con tendencia, así que
+# compararlo contra el de hace 1-4 meses queda dominado por el crecimiento del
+# sistema y no por el ciclo mensual; la variación y el residuo son diferencias, y
+# por lo tanto estacionarias.
+#
+# El residuo es además el único componente de ccovn utilizable sin circularidad:
+# el stock cambia por el flujo que se está prediciendo (Δstock = flujo + residuo),
+# de modo que proyectar el nivel equivale a predecir el target. El residuo es, por
+# construcción, lo que queda una vez descontado el flujo.
+SERIES_EXTRA_MATRIZ = ["exceso_abs_lag1", "ccovn_sistema_lag1",
+                       "var_ccovn_sistema_lag1", "residuo_ccovn_lag1"]
 
 # Variante de FRECUENCIA: en vez de la magnitud del extremo, en cuántos de los
 # últimos 12 meses la posición equivalente superó su umbral. Para modelar colas la
