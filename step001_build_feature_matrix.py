@@ -1554,7 +1554,12 @@ def load_bbva_encaje_features(params):
     no coincide exactamente con los fecha_t del dataset real.
     """
     _COLS = ["avance_mes_lag1", "exceso_abs_lag1", "exceso_dia_lag1",
-             "encaje_ovn_lag1", "ratio_ovn_total_lag1"]
+             "encaje_ovn_lag1", "ratio_ovn_total_lag1",
+             # Necesarias para presion_deadline_th. Se toman SIN lag y se
+             # rezagan acá, porque aux_encaje_2 no exporta su versión lag1: el
+             # estado de t no se conoce hasta t+1, así que usarlas crudas sería
+             # fuga.
+             "ExigibleTotalMes_est", "EncajeAcumMes"]
 
     ruta = params.get("ruta_bbva_encaje_features", "")
     if not ruta or not Path(ruta).exists():
@@ -1572,6 +1577,19 @@ def load_bbva_encaje_features(params):
         df = df_raw[cols_ok].copy()
         df["fecha"] = pd.to_datetime(df["fecha"]).dt.normalize()
         df = df.sort_values("fecha").reset_index(drop=True)
+
+        # Déficit pendiente del período, rezagado un día. El shift es sobre el
+        # índice CALENDARIO del archivo, que es como está definido el período de
+        # encaje; el resto de la adaptación a días hábiles la hace el merge_asof.
+        if {"ExigibleTotalMes_est", "EncajeAcumMes"}.issubset(df.columns):
+            df["deficit_encaje_lag1"] = (
+                (df["ExigibleTotalMes_est"] - df["EncajeAcumMes"])
+                .clip(lower=0).shift(1)
+            )
+            df = df.drop(columns=["ExigibleTotalMes_est", "EncajeAcumMes"])
+            cols_ok = [c for c in cols_ok
+                       if c not in ("ExigibleTotalMes_est", "EncajeAcumMes")]
+            cols_ok.append("deficit_encaje_lag1")
 
         n_val = df["avance_mes_lag1"].notna().sum() if "avance_mes_lag1" in df.columns else 0
         logger.info(
@@ -1874,6 +1892,12 @@ LAGS_POSICION_MES = [1, 2, 3, 4]
 # FEATURES_EXCLUIR.
 GUARDAR_N_LAGS_POS = False
 
+# Rezagos y ventana del umbral para el feature de RECURRENCIA. Son 12 y no 4
+# porque el estadístico es una proporción y necesita denominador; además con
+# k hasta 12 la máscara h <= 21k cubre los 74 horizontes.
+LAGS_FRECUENCIA_MES = list(range(1, 13))
+VENTANA_UMBRAL_FREC = 250
+
 # Referencia de la posición dentro del mes, por serie:
 #   "cierre" -> ruedas hasta el ÚLTIMO día hábil  (0 = cierre de mes)
 #   "inicio" -> ruedas desde el PRIMER día hábil  (0 = primer hábil)
@@ -1890,6 +1914,86 @@ ANCLA_POSICION_MES = {
     "retiro":   "cierre",
     "deposito": "cierre",   # "inicio" para probar la hipótesis de inicio de mes
 }
+
+
+def _build_frec_posicion_mes(serie_valores, fechas_th, fechas_t, lags_meses,
+                             peru_bday, ventana_umbral, referencia="cierre"):
+    """
+    RECURRENCIA en la posición del mes: en qué fracción de los últimos meses la
+    posición equivalente a t+h superó su umbral.
+
+    Mide con qué frecuencia esa altura del mes viene cargada, en vez de cuánto
+    valió el extremo. Para modelar colas la recurrencia puede informar más que la
+    magnitud: una posición cargada en 8 de 12 meses es distinta de una cargada en
+    1 con un valor enorme.
+
+    El umbral es la mediana móvil de |serie| sobre `ventana_umbral` ruedas hasta t,
+    de modo que es point-in-time: nunca usa información posterior a la fecha de
+    origen, y se adapta al nivel de actividad de cada época.
+
+    Se usan más rezagos que en _build_lag_posicion_mes (12 contra 4) porque el
+    estadístico es una proporción y necesita denominador. Como el rezago k solo es
+    observable si h <= 21k, con k hasta 12 la cobertura alcanza h = 252 — o sea los
+    74 horizontes, a diferencia del máximo que se queda sin rezagos más allá de 84.
+
+    Retorna (frecuencia en [0,1], nº de rezagos disponibles).
+    """
+    _th = pd.DatetimeIndex(fechas_th).dropna()
+    idx = pd.DatetimeIndex(pd.bdate_range(
+        start=min(pd.DatetimeIndex(serie_valores.index).min(), _th.min()),
+        end=max(pd.DatetimeIndex(serie_valores.index).max(), _th.max()),
+        freq=peru_bday,
+    ))
+
+    _tmp = pd.DataFrame({"f": idx, "ym": idx.to_period("M")})
+    if referencia == "inicio":
+        dcm = _tmp.groupby("ym").cumcount().values.astype(int)
+    else:
+        dcm = (_tmp.groupby("ym")["f"].rank(ascending=False, method="first")
+                                      .values - 1).astype(int)
+
+    _K = 64
+    ym_ord = idx.to_period("M").astype("int64").values
+    clave_a_fecha = pd.Series(idx.values, index=ym_ord * _K + dcm)
+    dcm_max_mes   = pd.Series(dcm).groupby(ym_ord).max()
+
+    th = pd.DatetimeIndex(fechas_th)
+    dcm_th    = pd.Series(dcm, index=idx).reindex(th).to_numpy(dtype="float64")
+    ym_th_ord = th.to_period("M").astype("int64").values
+    ft        = pd.DatetimeIndex(fechas_t).values
+
+    # Umbral móvil evaluado en la FECHA DE ORIGEN (no en t+h): es lo único que se
+    # conoce al predecir.
+    umbral_serie = (serie_valores.abs()
+                    .rolling(ventana_umbral, min_periods=max(20, ventana_umbral // 4))
+                    .median())
+    umbral = (umbral_serie.reindex(pd.DatetimeIndex(fechas_t))
+                          .to_numpy(dtype="float64"))
+
+    n_lags = np.zeros(len(th), dtype="int64")
+    n_sup  = np.zeros(len(th), dtype="int64")
+
+    for k in lags_meses:
+        ym_lag = ym_th_ord - k
+        d_max  = dcm_max_mes.reindex(ym_lag).to_numpy(dtype="float64")
+        d_use  = np.minimum(dcm_th, d_max)
+        ok     = np.isfinite(d_use)
+
+        clave = np.where(ok, ym_lag * _K + np.nan_to_num(d_use), -1).astype("int64")
+        f_lag = clave_a_fecha.reindex(clave).to_numpy()
+        ok &= ~pd.isna(f_lag)
+        ok &= (f_lag <= ft)                      # máscara point-in-time
+
+        v = np.abs(serie_valores.reindex(
+            pd.DatetimeIndex(np.where(ok, f_lag, np.datetime64("NaT")))
+        ).to_numpy(dtype="float64"))
+        usable = ok & np.isfinite(v) & np.isfinite(umbral)
+        n_lags += usable
+        n_sup  += usable & (v > umbral)
+
+    with np.errstate(invalid="ignore", divide="ignore"):
+        frec = np.where(n_lags > 0, n_sup / np.maximum(n_lags, 1), np.nan)
+    return pd.Series(frec), pd.Series(n_lags)
 
 
 ###############################################################################
@@ -2315,6 +2419,17 @@ def build_feature_matrix(
         logger.info(f"    Rezagos por posición del mes: cobertura {_cob:.1%} "
                     f"(lags {LAGS_POSICION_MES}) | anclas {ANCLA_POSICION_MES} "
                     f"| n_lags -> {_rep}")
+        # ── frec_flujo_pos: recurrencia, no magnitud ──────────────────────
+        _fr, _ = _build_frec_posicion_mes(
+            _serie_flujo, df["fecha_th"], df["fecha_t"], LAGS_FRECUENCIA_MES,
+            peru_bday, VENTANA_UMBRAL_FREC,
+            referencia=ANCLA_POSICION_MES.get("flujo", "cierre"),
+        )
+        df["frec_flujo_pos"] = _fr.values
+        logger.info(f"    frec_flujo_pos: cobertura "
+                    f"{df['frec_flujo_pos'].notna().mean():.1%} "
+                    f"({len(LAGS_FRECUENCIA_MES)} rezagos)")
+
         if GUARDAR_N_LAGS_POS:
             df["n_lags_pos"] = _n_lags
     else:
@@ -2322,6 +2437,7 @@ def build_feature_matrix(
         df["esc_neto_max_pos"] = np.nan
         df["esc_retiro_pos"]   = np.nan
         df["esc_deposito_pos"] = np.nan
+        df["frec_flujo_pos"]   = np.nan
         if GUARDAR_N_LAGS_POS:
             df["n_lags_pos"] = 0
 
@@ -2358,7 +2474,8 @@ def build_feature_matrix(
     # bbva_encaje_feat está en días calendario con lag1 ya computado en aux_encaje_2.
     # merge_asof alinea al calendario hábil de cada entidad.
     _bbva_feat_cols = ["avance_mes_lag1", "exceso_abs_lag1", "exceso_dia_lag1",
-                       "encaje_ovn_lag1", "ratio_ovn_total_lag1"]
+                       "encaje_ovn_lag1", "ratio_ovn_total_lag1",
+                       "deficit_encaje_lag1"]
     if bbva_encaje_feat is not None and not bbva_encaje_feat.empty:
         # Construir lookup: fecha_t_única → valor del Excel más reciente ≤ fecha_t.
         # merge_asof sobre fechas únicas evita ambigüedades con múltiples h por fecha.
@@ -2385,6 +2502,45 @@ def build_feature_matrix(
         n_ok = df["avance_mes_lag1"].notna().sum()
         logger.info(f"  {banco}: bbva_encaje_feat incorporadas — "
                     f"{n_ok:,}/{len(df):,} filas con valores")
+
+        # ── 8c. presion_deadline_th ──────────────────────────────────────────
+        # Proyección de la presión de encaje A LA FECHA OBJETIVO:
+        #
+        #     presion = deficit_pendiente(t-1) / dias_restantes_del_periodo(t+h)
+        #
+        # Es el mínimo que el banco tendría que depositar por día a partir de t+h
+        # si dejara de acumular desde hoy. A diferencia de los rezagos de posición
+        # usa el estado ACTUAL, y solo proyecta el DENOMINADOR — que es calendario
+        # puro. Por eso no requiere ningún supuesto sobre cómo acumula el banco.
+        #
+        # El numerador ya viene rezagado un día desde load_bbva_encaje_features:
+        # el estado de t no se conoce hasta t+1.
+        #
+        # VALIDEZ: el encaje se REINICIA al cierre del período, así que la cuenta
+        # solo vale si t+h cae en el mismo mes calendario que t. Fuera de eso
+        # queda NaN. Eso deja ~12% de cobertura global pero ~90% en h=2 y ~50% en
+        # h=10 — concentrada donde el allocation la necesita, e invisible en
+        # cualquier métrica promediada sobre los 74 horizontes.
+        if "deficit_encaje_lag1" in df.columns:
+            _th_n  = pd.to_datetime(df["fecha_th"])
+            _dias_rest_th = ((_th_n + pd.offsets.MonthEnd(0)) - _th_n).dt.days
+            _mismo_periodo = (_th_n.dt.to_period("M") == _ft_norm.dt.to_period("M"))
+            df["presion_deadline_th"] = (
+                df["deficit_encaje_lag1"] / np.maximum(_dias_rest_th, 1)
+            ).where(_mismo_periodo)
+            logger.info(
+                f"  {banco}: presion_deadline_th — cobertura "
+                f"{df['presion_deadline_th'].notna().mean():.1%} "
+                f"(solo dentro del período de encaje)"
+            )
+        # deficit_encaje_lag1 es insumo, no feature: se descarta tras usarlo.
+        df = df.drop(columns=["deficit_encaje_lag1"], errors="ignore")
+
+    # Si no hubo archivo de encaje, o le faltaban las columnas del déficit, la
+    # columna no se creó. Se materializa en NaN para que el esquema de la matriz
+    # sea el mismo en todos los casos y coincida con el registro de features.
+    if "presion_deadline_th" not in df.columns:
+        df["presion_deadline_th"] = np.nan
 
     # ── 9. Features CC+OVN en BCR (Saldos_CCOVN.xlsx, todos los bancos) ──────
     # ccovn_features está indexado por fecha y contiene valores del día t-1.
@@ -2881,6 +3037,20 @@ def build_data_dictionary(params):
         "Ídem sobre R solo. Dirige la cola BAJA, la relevante para el portafolio "
         "de liquidez. En la permutación del modelo aparece por encima de la "
         "versión neta: descomponer el flujo en sus componentes aporta.", None, "t+h")
+    add("frec_flujo_pos", "Datos bancarios / Posición del mes",
+        "Fracción de los últimos 12 meses en que el día con la MISMA posición en "
+        "el mes que t+h superó su umbral de |flujo neto| (mediana móvil de 250 "
+        "ruedas hasta t, point-in-time). Mide RECURRENCIA en vez de magnitud: una "
+        "posición cargada en 8 de 12 meses es distinta de una cargada en 1 con un "
+        "valor enorme. Con 12 rezagos cubre los 74 horizontes.", None, "t+h")
+    add("presion_deadline_th", "aux_encaje_2 / Calendario",
+        "deficit_pendiente(t-1) / dias_restantes_del_periodo(t+h): mínimo diario "
+        "que el banco debería depositar a partir de t+h si dejara de acumular hoy. "
+        "Usa el estado ACTUAL y solo proyecta el denominador, que es calendario "
+        "puro, de modo que no supone nada sobre el ritmo de acumulación. NaN si "
+        "t+h cae en otro período de encaje, porque el cómputo se reinicia al "
+        "cierre: ~12% de cobertura global pero ~90% en h=2 y ~50% en h=10.",
+        None, "t+h")
     add("esc_deposito_pos", "Datos bancarios / Posición del mes",
         "Ídem sobre D solo. Dirige la cola ALTA, donde el diagnóstico del oráculo "
         "encontró la peor calibración (factor de ensanchamiento necesario hasta "

@@ -111,6 +111,15 @@ SERIES_EXTRA_MATRIZ = ["exceso_abs_lag1", "ccovn_sistema_lag1",
 # máscara h <= 21k cubre los 74 horizontes con al menos un rezago.
 LAGS_FRECUENCIA = list(range(1, 13))
 VENTANA_UMBRAL  = 250   # ruedas para el umbral móvil (point-in-time)
+
+# Controles de CALENDARIO. La parcial contra `ancho` y `h` no basta: varios
+# candidatos están estructuralmente ligados a la posición de t+h en el mes.
+# presion_deadline es el caso extremo — su denominador, dias_restantes(t+h), es
+# calendario puro, así que sin este control podría estar midiendo lo que el modelo
+# ya sabe por dias_al_cierre_mes_sin/cos, que es su feature más importante.
+# Se leen de la matriz por (fecha_t, h), no como serie diaria: están anclados en
+# t+h y por lo tanto varían dentro de una misma fecha de origen.
+CONTROLES_CALENDARIO = ["dias_al_cierre_mes_sin", "dias_al_cierre_mes_cos"]
 REC_REFERENCIA    = "rec5_flujo"   # el que se usa como control en la parcial
 
 # Competidores: variables de escala que el modelo YA tiene. Se toman las que
@@ -472,6 +481,22 @@ def cargar_preds(serie, comp):
 
     df = df.dropna(subset=["fecha_th"]).copy()
 
+    # Controles de calendario, por (fecha_t, h) — anclados en t+h
+    global CAL_OK
+    CAL_OK = []
+    try:
+        _cal = pd.read_parquet(RUTA_MATRIZ,
+                               columns=["fecha_t", "h"] + CONTROLES_CALENDARIO)
+        _cal["fecha_t"] = pd.to_datetime(_cal["fecha_t"])
+        _cal = _cal.drop_duplicates(subset=["fecha_t", "h"])
+        df = df.merge(_cal, on=["fecha_t", "h"], how="left")
+        CAL_OK = [c for c in CONTROLES_CALENDARIO
+                  if c in df.columns and df[c].notna().any()]
+        print(f"[OK] controles de calendario: {CAL_OK}")
+    except Exception as e:
+        print(f"[AVISO] sin controles de calendario ({e}) — la parcial no podrá "
+              f"distinguir señal propia de posición del mes")
+
     # Variables a explicar y control
     df["r"]     = (df["target"] - df["q50"]).abs()          # escala NO capturada
     df["r_lo"]  = (df["q50"] - df["target"]).clip(lower=0)  # solo sorpresas abajo
@@ -635,7 +660,8 @@ def main() -> None:
     _et_comp = NOMBRE_COMPETIDOR or "sin competidor"
     _col_rec = f"esc_{REC_REFERENCIA}"
     print(f"  {'candidato':>18} {'simple':>9} {'| ancho':>10} "
-          f"{'IC 90%':>18} {'| +'+_et_comp[:9]:>13} {'| +recencia':>12}")
+          f"{'IC 90%':>18} {'| +'+_et_comp[:9]:>13} {'| +recen':>9} "
+          f"{'| +CALEND':>10}")
     print("  " + "-" * 76)
 
     filas = []
@@ -661,6 +687,19 @@ def main() -> None:
             c_rec = (np.nan if len(sub3) < 100 else
                      corr_parcial(sub3[col], sub3["r"],
                                   [sub3["ancho"], sub3["h"], sub3[_col_rec]]))
+        # ¿Sobrevive a controlar por la POSICIÓN EN EL MES? Es lo que separa
+        # "aporta señal propia" de "está midiendo el calendario que el modelo ya
+        # tiene". Decisivo para presion_deadline, cuyo denominador es calendario
+        # puro, y relevante para todo lo que se ancla en la posición de t+h.
+        if CAL_OK:
+            sub4 = sub.dropna(subset=CAL_OK)
+            c_cal = (np.nan if len(sub4) < 100 else
+                     corr_parcial(sub4[col], sub4["r"],
+                                  [sub4["ancho"], sub4["h"]]
+                                  + [sub4[c] for c in CAL_OK]))
+        else:
+            c_cal = np.nan
+
         if et == "sigma_22d":
             marca = f"  <- competidor ({NOMBRE_COMPETIDOR})"
         elif et in rec_vars:
@@ -670,12 +709,14 @@ def main() -> None:
         print(f"  {et:>18} {c_simple:>+9.3f} {c_anch:>+10.3f} "
               f"[{lo:>+6.3f},{hi:>+6.3f}] "
               f"{'—' if not np.isfinite(c_both) else f'{c_both:+.3f}':>13} "
-              f"{'—' if not np.isfinite(c_rec) else f'{c_rec:+.3f}':>12}{marca}")
+              f"{'—' if not np.isfinite(c_rec) else f'{c_rec:+.3f}':>9} "
+              f"{'—' if not np.isfinite(c_cal) else f'{c_cal:+.3f}':>10}{marca}")
         filas.append({"candidato": et, "n": len(sub),
                       "cobertura": len(sub) / len(df),
                       "corr_simple": c_simple,
                       "parcial_ancho": c_anch, "ic_lo": lo, "ic_hi": hi,
                       "parcial_ancho_sigma": c_both, "parcial_ancho_recencia": c_rec,
+                      "parcial_ancho_calendario": c_cal,
                       "tipo": ("competidor" if et == "sigma_22d"
                                else "recencia" if et in rec_vars else "calendario")})
     tab = pd.DataFrame(filas)
@@ -684,7 +725,10 @@ def main() -> None:
     print("  correlaciona con todo lo que mide magnitud. El número que decide es")
     print("  '| ancho': lo que aporta POR ENCIMA de la escala que el modelo ya predice.")
     print(f"  '| +{_et_comp}' responde si le gana a promediar sobre el mes.")
-    print(f"  '| +recencia' responde si le gana a mirar solo lo reciente ({REC_REFERENCIA}).")
+    print(f"  '| +recen' responde si le gana a mirar solo lo reciente ({REC_REFERENCIA}).")
+    print("  '| +CALEND' es el más exigente: controla además por la posición de t+h")
+    print("  en el mes. Si un candidato se derrumba ahí, no aportaba señal propia —")
+    print("  estaba midiendo el calendario, que el modelo ya tiene en sin/cos.")
 
     # ── A2. Cara a cara en SUBMUESTREO COMÚN ──────────────────────────────────
     _titulo("A2 · Calendario vs recencia pura, sobre las MISMAS filas")
@@ -929,6 +973,9 @@ def main() -> None:
     # de controlar por h; el margen protege de lo que quede sin controlar.
     UMBRAL_SIGNIF = 0.05
     signif = np.isfinite(fila_m["ic_lo"]) and (fila_m["ic_lo"] > UMBRAL_SIGNIF)
+    _cal_m = fila_m.get("parcial_ancho_calendario", np.nan)
+    if np.isfinite(_cal_m) and abs(_cal_m) < UMBRAL_SIGNIF:
+        signif = False
 
     print(f"  Mejor candidato          : {mejor}")
     print(f"  Parcial | ancho          : {fila_m['parcial_ancho']:+.3f} "
