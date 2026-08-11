@@ -2042,7 +2042,15 @@ def _build_frec_posicion_mes(serie_valores, fechas_th, fechas_t, lags_meses,
 
     # Umbral móvil evaluado en la FECHA DE ORIGEN (no en t+h): es lo único que se
     # conoce al predecir.
-    umbral_serie = (serie_valores.abs()
+    # El umbral se calcula sobre el MISMO calendario del que salen los rezagos.
+    # No es intercambiable con la serie cruda: df_bancarios se reindexa a Lun-Vie
+    # incluyendo feriados, con R = D = 0 en ellos, de modo que su |flujo| arrastra
+    # ~3.5% de ceros que jamás pueden aparecer entre los valores a clasificar.
+    # Medido, esos ceros bajan la mediana móvil un 4% en promedio — y hasta 16% —
+    # con una variación en el tiempo que depende de cuántos feriados caen en cada
+    # ventana. Eso metería variación temporal espuria en un feature cuyo propósito
+    # es justamente medir recurrencia.
+    umbral_serie = (serie_valores.reindex(idx).abs()
                     .rolling(ventana_umbral, min_periods=max(20, ventana_umbral // 4))
                     .median())
     umbral = (umbral_serie.reindex(pd.DatetimeIndex(fechas_t))
