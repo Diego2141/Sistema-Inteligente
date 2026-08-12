@@ -176,15 +176,20 @@ def _k_boot(sub: pd.DataFrame, col: str, rng) -> tuple[float, float, float]:
     Remuestrear FECHAS y no filas es lo que respeta la correlación: las ~74
     filas de una misma fecha comparten el mismo y y fallan juntas.
     """
-    k = _k_conformal(sub[col].values)
-    fechas = sub["fecha_th"].unique()
-    if len(fechas) < 3:
+    vals = sub[col].to_numpy(dtype=float)
+    k = _k_conformal(vals)
+    # factorize en vez de agrupar por la fecha: groupby devuelve claves
+    # Timestamp y .unique() devuelve datetime64 según la versión de pandas,
+    # y emparejarlas por clave rompe. Con códigos enteros no hay ambigüedad.
+    codes, uniq = pd.factorize(sub["fecha_th"])
+    n_g = len(uniq)
+    if n_g < 3:
         return k, np.nan, np.nan
-    por_fecha = {f: g[col].values for f, g in sub.groupby("fecha_th")}
-    reps = []
-    for _ in range(N_BOOT):
-        pick = rng.choice(fechas, size=len(fechas), replace=True)
-        reps.append(_k_conformal(np.concatenate([por_fecha[f] for f in pick])))
+    por_grupo = [vals[codes == g] for g in range(n_g)]
+    reps = np.empty(N_BOOT, dtype=float)
+    for b in range(N_BOOT):
+        pick = rng.integers(0, n_g, size=n_g)
+        reps[b] = _k_conformal(np.concatenate([por_grupo[g] for g in pick]))
     lo, hi = np.percentile(reps, [5, 95])
     return k, float(lo), float(hi)
 
