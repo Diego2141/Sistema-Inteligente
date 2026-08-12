@@ -122,8 +122,10 @@ DEBUG_SINGLE_FOLD   = False
 #          Ventaja: hessiana no-nula → pasos Newton reales; gradiente tiene magnitud
 # False → reg:quantileerror estándar (gradiente binario {-τ, 1-τ}, hess≈1 surrogate)
 AJUSTE_ARCTAN       = True
-# Cuando AJUSTE_ARCTAN=True, Optuna siempre estima s_factor en [0.01, 1.0] (log)
-# s = s_factor × std_y(y_train del h) — rango cubre desde muy suavizado a muy agudo
+# Cuando AJUSTE_ARCTAN=True, Optuna estima s_factor en [0.85, 1.0] uniforme
+# s = s_factor × std_y(y_train del h). El rango se acotó por arriba porque
+# s_factor bajo desiguala la hessiana y bloquea los splits de cola; ver la nota
+# extensa en optuna_tune_h() → objective().
 OPTUNA_N_TRIALS_ARCTAN = 50  # trials cuando AJUSTE_ARCTAN=True (vs 30 base)
                                # 50 (antes 40): con OPTUNA_N_ESTIMATORS=True el
                                # espacio tiene 9 HP (7 base + s_factor + n_estimators)
@@ -645,8 +647,12 @@ def entrenar_modelos_h(
 
     if AJUSTE_ARCTAN:
         # ── Rama arctan: xgb.train() + _PinballEarlyStopping ────────────────
-        # s_factor estimado por Optuna; viaja en hp como cualquier otro HP
-        s      = hp.get("s_factor", 0.05) * std_y
+        # s_factor estimado por Optuna; viaja en hp como cualquier otro HP.
+        # El default solo aplica con USE_OPTUNA=False. Es 0.95 y no 0.05 porque
+        # los valores bajos colapsan la hessiana en las colas: con 0.05 el
+        # cociente hess(0)/hess(3) supera 3 millones y los modelos de τ=0.05 y
+        # τ=0.95 no pueden abrir ningún split fuera del centro.
+        s      = hp.get("s_factor", 0.95) * std_y
         params = _hp_para_xgb_train(hp)   # _XGB_TRAIN_SKIP excluye s_factor
         dtrain = xgb.DMatrix(X_train, label=y_train)
         dval   = xgb.DMatrix(X_val,   label=y_val) if use_es else None
@@ -1363,7 +1369,9 @@ def guardar_hp_report(
         ax.set_xlabel("Fold", fontsize=8)
         ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
         if hp == "s_factor":
-            ax.set_yscale("log")
+            # Escala lineal: el rango de búsqueda es [0.85, 1.0]. Con el rango
+            # log-uniforme anterior la escala log era necesaria; ahora aplasta
+            # toda la variación en un tramo ilegible.
             ax.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.3f"))
         ax.grid(True, alpha=0.22)
         ax.legend(fontsize=7, loc="best")
@@ -1729,14 +1737,28 @@ def optuna_tune_h(
         hp_trial = {
             # ── HP buscados ────────────────────────────────────────────────
             "max_depth"       : trial.suggest_int(  "max_depth",         2,    5),
-            # Rango desde 0: el paper 2406.02293 (§Modeling choices, punto 2)
-            # recomienda min_child_weight=0 con la pérdida arctan, porque el
-            # umbral actúa sobre la SUMA DE HESSIANOS y aquí el hessiano no es
-            # constante. Con hess=1 en u=σ y 0.03 en u=3σ, un valor de 20 exige
-            # ~20 observaciones centrales pero ~700 de cola: los splits que
-            # aislarían las colas quedan bloqueados. Se amplía el rango en vez
-            # de fijarlo en 0 para que Optuna decida con la opción disponible.
-            "min_child_weight": trial.suggest_int(  "min_child_weight",   3,   20),
+            # Piso 3, techo 12.
+            #
+            # El umbral actúa sobre la SUMA DE HESSIANOS, no sobre el conteo de
+            # filas, y con la pérdida arctan el hessiano depende del residuo:
+            # hess(v) = ((sf²+1)/(sf²+v²))². Con s_factor=0.405 un umbral de 10
+            # se satisface con 0.2 observaciones centrales pero exige 620 en la
+            # cola: el mismo número no regulariza el centro y prohíbe la cola.
+            #
+            # PISO en 3, no en 0: el paper 2406.02293 (§Modeling choices, punto
+            # 2) recomienda 0, pero ampliar el rango a [0,20] degradó la
+            # cobertura 90% de 86.1% a 82.3% y el ECE de 0.0213 a 0.0301. Sin
+            # piso, una hoja puede construirse sobre una sola observación
+            # central (que ya aporta 4-52 unidades de cover).
+            #
+            # TECHO en 12, no en 20: los días de cierre de mes son 2/21 de las
+            # filas y caen en v≈1.86, así que el hijo que los aísla acumula
+            # cover 13.2 en el fold más chico (729 filas, s_factor=0.95). Con
+            # techo 20 Optuna puede elegir un valor que bloquea ese split —y
+            # eligió 18-20 en la mitad de las celdas—, dejando al modelo sin
+            # forma de ensanchar el intervalo en los días que concentran el
+            # 116% del déficit de cobertura.
+            "min_child_weight": trial.suggest_int(  "min_child_weight",   3,   12),
             "reg_alpha"       : trial.suggest_float("reg_alpha",         0.0,  2.0),
             "reg_lambda"      : trial.suggest_float("reg_lambda",        0.5,  5.0),
             "learning_rate"   : trial.suggest_float("learning_rate",    0.03, 0.15, log=True),
@@ -1752,8 +1774,14 @@ def optuna_tune_h(
         total_loss = 0.0
 
         if AJUSTE_ARCTAN:
-            # s_factor siempre buscado por Optuna en [0.01, 1.0] log
-            _sf     = trial.suggest_float("s_factor", 0.01, 1.0, log=True)
+            # s_factor buscado en [0.85, 1.0] uniforme. El rango anterior,
+            # [0.01, 1.0] log-uniforme, ponía la mitad de los trials debajo de
+            # 0.1: la región donde la hessiana se vuelve extremadamente
+            # desigual (hess(0)/hess(3) = 811,801 en sf=0.1 contra 120 en 0.95)
+            # y los modelos de cola no pueden abrir ningún split. Medido sobre
+            # 44 celdas de tres corridas, la correlación entre s_factor y
+            # cobertura es +0.63, y es monótona dentro de cada fold.
+            _sf     = trial.suggest_float("s_factor", 0.85, 1.0)
             _s      = _sf * _std_y_opt
             if OPTUNA_N_ESTIMATORS:
                 _n_est = trial.suggest_int("n_estimators", *N_ESTIMATORS_RANGE, log=True)

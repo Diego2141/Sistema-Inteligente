@@ -99,8 +99,11 @@ FEATURES_EXCLUIR = [
     "EMBI_PERU", "delta_EMBI", "garch_vol_embi",
     "diferencial_tasas",
     "EMBI_PERU_frac", "T10Y_frac", "VIX_frac",
-    "dias_desde_cierre_mes", "pos_en_mes", "total_bdays_mes",
-    "is_quincena", "is_cierre_encaje",
+    # dias_desde_cierre_mes e is_cierre_encaje se ACTIVAN: ver la nota en la
+    # sección "reemplazadas por transformación sin/cos" más abajo.
+    "pos_en_mes",          # colineal: pos_en_mes = dias_desde_cierre_mes + 1
+    "total_bdays_mes",
+    "is_quincena",         # mezcla el día 15 con el cierre en una sola bandera
     # Duplicado de es_post_feriado (int32, calendario PE+USA completo)
     "is_post_feriado",
     # ── SADF: sin señal en episodios de stress (hit rate P95 < 5%) ───────────
@@ -113,7 +116,16 @@ FEATURES_EXCLUIR = [
     # ── Azul: reemplazadas por transformación sin/cos o ratio ────────────────
     "sigma_flujo_5d", "sigma_flujo_20d",              # → sigma_flujo_ratio
     "tc_vol_5d", "tc_vol_22d",                        # → tc_vol_ratio
-    "dias_al_cierre_mes",                             # → dias_al_cierre_mes_sin/cos
+    # dias_al_cierre_mes y dias_desde_cierre_mes NO se excluyen: conviven en
+    # crudo con su forma sin/cos. El diagnóstico de posición en el mes
+    # (aux_diagnostico_ventana_mala.py, sección F) mostró que los 5 días de
+    # borde concentran el 116% del déficit de cobertura, mientras el resto del
+    # mes cubre 91.9%. El fold 1 sobre-cubre en los días -3 y -2 (99.8%) y
+    # colapsa en el último (28.5%): sin/cos es suave y desparrama el
+    # ensanchamiento sobre una ventana en vez de concentrarlo en el día. El
+    # entero permite un solo split en dcm<=1. is_cierre_encaje es la binaria
+    # equivalente: agrupa los dos últimos días hábiles, que es el bloque más
+    # chico que los modelos de cola pueden aislar sin violar min_child_weight.
     "is_penult_bday_trim", "is_ultimo_bday_trim",     # → dias_al_cierre_trim_sin/cos
     "is_1er_bday_trim", "is_2do_bday_trim", "is_3er_bday_trim",
     "dia_semana",                                     # → dias_sem_sin/cos
