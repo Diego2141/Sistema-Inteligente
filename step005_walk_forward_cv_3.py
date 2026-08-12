@@ -96,7 +96,7 @@ DIR_OUTPUT   = BASE_SISTEMA / "2. Output" / "step005_wfcv_v3"
 # -- Tipo de ventana -----------------------------------------------------------
 # True  -> EXPANDING: train_start fijo, train_end crece cada fold
 # False -> ROLLING  : ventana fija que desliza (idéntico a v2)
-EXPANDING = True
+EXPANDING = False
 
 # -- Recorte de inicio del train -----------------------------------------------
 # True  -> el train nunca empieza antes de TRAIN_INICIO_CUTOFF (nueva estrategia 2020)
@@ -108,9 +108,9 @@ TRAIN_INICIO_CUTOFF   = "2019-07-01"
 # EXPANDING=True : VENTANA_TRAIN_AÑOS es el mínimo inicial; crece PASO_AÑOS/fold
 # EXPANDING=False: VENTANA_TRAIN_AÑOS es el tamaño fijo (igual a v2)
 VENTANA_TRAIN_AÑOS  = 3      # años de TRAIN iniciales / fijos (mínimo desde 2020)
-VENTANA_VAL_AÑOS    = 1    # años de VAL (solo Optuna) -- 6 meses, igual que step004
-VENTANA_TEST_AÑOS   = 1      # años de TEST (solo métricas OOS)
-PASO_AÑOS           = 1      # desplazamiento / crecimiento entre folds
+VENTANA_VAL_AÑOS    = 0.5    # años de VAL (solo Optuna) -- 6 meses, igual que step004
+VENTANA_TEST_AÑOS   = 0.5     # años de TEST (solo métricas OOS)
+PASO_AÑOS           = 0.5     # desplazamiento / crecimiento entre folds
 
 # -- Anti-leakage: purga + burn-in --------------------------------------------
 # H_MAX_DIAS_HAB   : horizonte máximo de predicción (h_max en step001)

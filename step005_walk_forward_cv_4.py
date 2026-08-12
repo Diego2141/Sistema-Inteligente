@@ -66,12 +66,12 @@ H_MIN   = 2
 H_MAX   = 75
 TAUS    = [0.01, 0.05, 0.40, 0.50, 0.60, 0.95, 0.99]
 
-EXPANDING             = True
+EXPANDING             = False
 RECORTAR_INICIO_TRAIN = True
 # 2019-01-01: con la geometría corregida de build_folds() los gaps de
 # purge+embargo se insertan entre ventanas en vez de restarse del TRAIN, así
 # que cada fold consume TRAIN + VAL + TEST + 2×119 días hábiles de calendario.
-TRAIN_INICIO_CUTOFF   = "2019-01-01"
+TRAIN_INICIO_CUTOFF   = "2019-07-01"
 
 VENTANA_TRAIN_AÑOS  = 3
 # 0.5 (antes 1): VENTANA_VAL_AÑOS controla la distancia entre el último dato de
@@ -2475,30 +2475,6 @@ def _run_interno(banco: str = BANCO) -> None:
             print(_reg(_tablas, "pinball_q50_por_grupo",
                        df_res.groupby("h_grupo", observed=True)["pinball_q50"]
                        .mean().round(4)))
-
-            # Tabla por fold × grupo, en MM USD para que sea legible.
-            # OJO: el pinball es una pérdida en unidades del target, así que
-            # crece con la escala de la serie. Entre folds separados 6 meses la
-            # escala sube ~25%, de modo que comparar folds en columna absoluta
-            # mezcla "el modelo empeoró" con "los flujos son más grandes". La
-            # tabla normalizada de abajo separa ambos efectos.
-            print("\nPinball q50 TEST por fold y grupo de horizonte (MM USD):")
-            _pb50 = (
-                df_res.groupby(["fold", "h_grupo"], observed=True)["pinball_q50"]
-                .mean()
-                .unstack("h_grupo")
-            )
-            _pb50.index = ["Fold {}".format(f) for f in _pb50.index]
-            _reg(_tablas, "pinball_q50_fold_grupo", _pb50)
-            print((_pb50 / 1e6).round(1).to_string())
-
-            # Normalizado: cada fold dividido por su propio promedio sobre todos
-            # los h. Aísla la FORMA del perfil por horizonte de la escala del
-            # fold, y hace comparables las filas entre sí.
-            print("\nPinball q50 TEST normalizado (cada fold / su media sobre h):")
-            _pb50n = _pb50.div(_pb50.mean(axis=1), axis=0)
-            _reg(_tablas, "pinball_q50_fold_grupo_norm", _pb50n)
-            print(_pb50n.round(3).to_string())
 
         if "coverage_90" in df_res.columns:
             print("\nCobertura empírica 90% [Q05-Q95] TEST media por grupo de horizonte:")

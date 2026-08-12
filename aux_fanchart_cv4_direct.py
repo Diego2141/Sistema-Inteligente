@@ -91,7 +91,7 @@ def _build_bday() -> CustomBusinessDay:
 BASE_SISTEMA = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente")
 
 # "exp" → fold_exp / fan_exp  |  "roll" → fold_roll / fan_roll  (debe coincidir con EXPANDING de step005)
-_MODO_SUFIJO = "roll_arctan"
+_MODO_SUFIJO = "exp_arctan"
 
 DIR_PREDS    = BASE_SISTEMA / "2. Output" / "step005_wfcv_v4_direct" / f"fold_{_MODO_SUFIJO}"
 DIR_OUTPUT   = BASE_SISTEMA / "2. Output" / "aux_fanchart_cv4_direct" / f"fan_{_MODO_SUFIJO}"

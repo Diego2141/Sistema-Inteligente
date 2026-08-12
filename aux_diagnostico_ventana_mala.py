@@ -49,7 +49,7 @@ import pandas as pd
 BASE_SISTEMA = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente")
 DIR_OUTPUT   = BASE_SISTEMA / "2. Output" / "step005_wfcv_v4_direct"
 
-EXPANDING     = True    # debe coincidir con la corrida que se quiere leer
+EXPANDING     = False   # debe coincidir con la corrida que se quiere leer
 AJUSTE_ARCTAN = True
 BANCO         = "SISTEMA"
 
@@ -58,7 +58,7 @@ BANCO         = "SISTEMA"
 #   "20260811" → rolling con VENTANA_VAL_AÑOS = 1
 #   "20260812" → rolling con VENTANA_VAL_AÑOS = 0.5
 # Sin esto se lee siempre la del 12 y la del 11 queda inaccesible.
-FECHA_TAG     = ""
+FECHA_TAG     = "20260812"
 
 TOP_FECHAS  = [3, 5, 10, 20]   # cuántas fechas_th excluir en la prueba de shock
 GRAFICO     = True

@@ -42,7 +42,7 @@ BASE_SISTEMA = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente"
 DIR_WFCV     = BASE_SISTEMA / "2. Output" / "step005_wfcv_v4_direct"
 DIR_CQR      = BASE_SISTEMA / "2. Output" / "step006_cqr"
 
-_MODO_SUFIJO = "exp_arctan"   # "exp_0.5" | "exp_1" | "roll_0.5" | "roll_1"
+_MODO_SUFIJO = "roll_arctan"   # "exp_0.5" | "exp_1" | "roll_0.5" | "roll_1"
                              # Agregar "_arctan" al sufijo para leer resultados de AJUSTE_ARCTAN=True
                              # Ejemplo: "roll_0.5_arctan"
 BANCO        = "SISTEMA"

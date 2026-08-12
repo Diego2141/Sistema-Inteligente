@@ -23,7 +23,7 @@ import pandas as pd
 BASE_SISTEMA = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente")
 DIR_OUTPUT   = BASE_SISTEMA / "2. Output" / "step005_wfcv_v4_direct"
 
-EXPANDING     = True    # debe coincidir con la corrida que se quiere leer
+EXPANDING     = False    # debe coincidir con la corrida que se quiere leer
 AJUSTE_ARCTAN = True
 
 BANCO = "SISTEMA"

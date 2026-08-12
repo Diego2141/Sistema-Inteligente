@@ -129,10 +129,10 @@ FEATURES_EXCLUIR = [
 
 
 # 1. Información endógena del flujo: modelo base
-    #"R_t0",
+    #,"R_t0",
     #"D_t0",
-    "R_t-1",
-    "D_t-1",
+    #"R_t-1",
+    #"D_t-1",
     #"R_conf_t1",
     #"R_conf_t2",
     #"D_conf_t1",
@@ -146,7 +146,7 @@ FEATURES_EXCLUIR = [
 
 # 2. Estado de volatilidad
     "sigma_22d",
-    "sigma_flujo_ratio",
+    #"sigma_flujo_ratio",
     "tc_vol_ratio",
     "garch_vol_tc",
 
@@ -154,24 +154,24 @@ FEATURES_EXCLUIR = [
     "VIX",
     "FED_FUNDS",
     "T10Y",
-    "TASA_REF_BCRP",
-    "CDS_PERU_5Y_frac",
+    #"TASA_REF_BCRP",
+    #"CDS_PERU_5Y_frac",
     "COPPER_frac",
-
+    
 
 # 4. Cumplimiento y posición dentro del período de encaje
-    "avance_mes_lag1",
-    "exceso_abs_lag1",
+    #"avance_mes_lag1",
+    #"exceso_abs_lag1",
     "exceso_dia_lag1",
     "encaje_ovn_lag1",
     "ratio_ovn_total_lag1",
-
+    
 
 # 5. Stocks y comportamiento de liquidez del sistema y del BBVA
-    "ccovn_sistema_lag1",
-    "ccovn_bbva_lag1",
-    "var_ccovn_sistema_lag1",
-    "var_ccovn_bbva_lag1",
+    #"ccovn_sistema_lag1",
+    #"ccovn_bbva_lag1",
+    #"var_ccovn_sistema_lag1",
+    #"var_ccovn_bbva_lag1",
     "bbva_share_lag1",
     "var_ccovn_bbva_exceso_lag1",
     "ccovn_vs_dia_mes_lag1",
@@ -180,7 +180,7 @@ FEATURES_EXCLUIR = [
 
 # 6. Discontinuidades del calendario operativo
     "dias_desde_ultimo_habil",
-    "es_post_feriado", "is_pre_feriado",
+    "es_post_feriado","is_pre_feriado",
 
 # 7. Estacionalidad general
     #"mes_sin", "mes_cos",
@@ -193,14 +193,9 @@ FEATURES_EXCLUIR = [
 
 # 9. Episodios extraordinarios
     "is_post_eleccion",
-    "elec_sin", "elec_cos",
-
+    "elec_sin", "elec_cos"
 # 10. Features atados al horizonte
-    # presion_deadline_th queda fuera: es NaN para h>=30, o sea columna muerta en
-    # 45 de los 74 modelos, y su cobertura efectiva es ~7.6% (el archivo de
-    # encaje arranca en 2016-07). El cálculo se conserva en step001; para
-    # reactivarla basta comentar esta línea.
-    "presion_deadline_th",
+    #"presion_deadline_th"
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
