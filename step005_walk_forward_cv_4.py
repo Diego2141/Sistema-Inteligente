@@ -973,12 +973,20 @@ def _consolidar_sincos_pivot(
     y elimina las filas individuales.
     Para perm: las filas ya llevan el Δ conjunto (sin=joint, cos=0) → la suma = joint.
     Para gain/shap: la suma aproxima la importancia total del feature circular.
+
+    Colisión de nombres: desde que 'dias_al_cierre_mes' se usa también en crudo,
+    la base derivada de 'dias_al_cierre_mes_sin/_cos' coincide con un feature
+    que YA está en el pivot. Concatenar sin más producía un índice duplicado y
+    el graficado fallaba con ValueError. Cuando hay colisión se etiqueta la
+    fila consolidada como '<base>_sincos', que además deja ver por separado
+    cuánto aporta cada codificación del mismo calendario.
     """
     rows_new: dict[str, pd.Series] = {}
     rows_drop: list[str] = []
     for base, (sin_c, cos_c) in pairs.items():
         if sin_c in pivot.index and cos_c in pivot.index:
-            rows_new[base] = pivot.loc[sin_c] + pivot.loc[cos_c]
+            nombre = f"{base}_sincos" if base in pivot.index else base
+            rows_new[nombre] = pivot.loc[sin_c] + pivot.loc[cos_c]
             rows_drop += [sin_c, cos_c]
     if rows_new:
         pivot = pd.concat(
