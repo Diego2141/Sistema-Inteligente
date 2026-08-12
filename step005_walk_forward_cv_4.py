@@ -68,16 +68,22 @@ TAUS    = [0.01, 0.05, 0.40, 0.50, 0.60, 0.95, 0.99]
 
 EXPANDING             = True
 RECORTAR_INICIO_TRAIN = True
-# 2019-01-01 (antes 2019-07-01): con la geometría corregida de build_folds()
-# los gaps de purge+embargo se insertan entre ventanas en vez de restarse del
-# TRAIN, así que cada fold consume ~5.4 años de calendario
-# (TRAIN 3 + VAL 1 + TEST 0.5 + 2×119 días hábiles). Con cutoff en 2019-07
-# caben 4 folds; adelantarlo a 2019-01 recupera 5. El TRAIN del fold 1 vuelve
-# a incluir el primer semestre de 2019.
+# 2019-01-01: con la geometría corregida de build_folds() los gaps de
+# purge+embargo se insertan entre ventanas en vez de restarse del TRAIN, así
+# que cada fold consume TRAIN + VAL + TEST + 2×119 días hábiles de calendario.
 TRAIN_INICIO_CUTOFF   = "2019-01-01"
 
 VENTANA_TRAIN_AÑOS  = 3
-VENTANA_VAL_AÑOS    = 1
+# 0.5 (antes 1): VENTANA_VAL_AÑOS controla la distancia entre el último dato de
+# entrenamiento y el primero de test, porque TEST empieza
+# train_end + GAP + VAL + GAP. Con VAL=1 esa distancia era 1.99 años; con 0.5
+# baja a ~1.5. Importa porque la escala del target crece ~55% anual (visible en
+# el best_pinball_val de Optuna entre folds), así que un modelo entrenado lejos
+# del período de test produce intervalos demasiado angostos: la corrida con
+# VAL=1 dio hit-rate 0.410 en τ=0.50 y 0.908 en τ=0.95, ambos desplazados hacia
+# abajo, con la cola inferior intacta. Además devuelve 5 folds y restaura la
+# comparabilidad con el baseline de 85.5%.
+VENTANA_VAL_AÑOS    = 0.5
 VENTANA_TEST_AÑOS   = 0.5
 PASO_AÑOS           = 0.5
 
