@@ -2373,12 +2373,19 @@ def _run_interno(banco: str = BANCO) -> None:
                     df_h["target"].notna()
                 )
                 fechas_t_val = _strip_tz(df_h.loc[mv_mask, "fecha_t"])
+                # fecha_th viaja también en VAL: cualquier calibración
+                # condicionada a la fecha de RESULTADO (posición en el mes,
+                # feriados) la necesita, y reconstruirla después obliga a
+                # replicar el calendario peru_bday fuera de step001 — con el
+                # riesgo de usar uno distinto y etiquetar mal las posiciones.
+                fechas_th_val = _strip_tz(df_h.loc[mv_mask, "fecha_th"])
                 _val_scaffold = pd.DataFrame({
-                    "banco"  : banco,
-                    "fold"   : fold["fold"],
-                    "fecha_t": pd.DatetimeIndex(fechas_t_val),
-                    "h"      : h_val,
-                    "target" : y_val.values,
+                    "banco"   : banco,
+                    "fold"    : fold["fold"],
+                    "fecha_t" : pd.DatetimeIndex(fechas_t_val),
+                    "fecha_th": pd.DatetimeIndex(fechas_th_val),
+                    "h"       : h_val,
+                    "target"  : y_val.values,
                 })
                 for tau, _p in _preds_val.items():
                     col = "mean" if tau == "mean" else f"q{int(tau * 100):02d}"

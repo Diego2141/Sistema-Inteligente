@@ -53,6 +53,12 @@ import pandas as pd
 # ---------------------------------------------------------------------------
 BASE_SISTEMA = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente")
 DIR_OUTPUT   = BASE_SISTEMA / "2. Output" / "step005_wfcv_v4_direct"
+# Fuente de fecha_th cuando los parquets de VAL no la traen. Hasta esta
+# revisión el scaffold de VAL guardaba solo fecha_t/h, así que para las
+# corridas ya hechas hay que recuperar el mapeo (fecha_t, h) -> fecha_th de la
+# matriz. Reconstruirlo con un calendario propio seria arriesgado: peru_bday
+# excluye feriados y un calendario distinto etiquetaria mal las posiciones.
+RUTA_MATRIZ  = BASE_SISTEMA / "1. Data" / "Clean" / "matriz_features.parquet"
 
 EXPANDING     = False   # debe coincidir con la corrida que se quiere leer
 AJUSTE_ARCTAN = True
@@ -94,8 +100,33 @@ def _cargar_val(dir_modo: Path) -> pd.DataFrame:
 
 # ---------------------------------------------------------------------------
 
+def _adjuntar_fecha_th(d: pd.DataFrame) -> pd.DataFrame:
+    """Recupera fecha_th desde la matriz si el parquet de VAL no la trae."""
+    if "fecha_th" in d.columns:
+        return d
+    if not RUTA_MATRIZ.exists():
+        raise FileNotFoundError(
+            f"Los parquets de VAL no traen fecha_th y no se encuentra "
+            f"{RUTA_MATRIZ}. Vuelva a correr step005 (ya guarda fecha_th en VAL) "
+            f"o corrija RUTA_MATRIZ."
+        )
+    print(f"[info] VAL sin fecha_th — se recupera de {RUTA_MATRIZ.name}")
+    mp = (pd.read_parquet(RUTA_MATRIZ, columns=["fecha_t", "h", "fecha_th"])
+          .drop_duplicates(subset=["fecha_t", "h"]))
+    mp["fecha_t"] = pd.to_datetime(mp["fecha_t"])
+    d = d.copy()
+    d["fecha_t"] = pd.to_datetime(d["fecha_t"])
+    n0 = len(d)
+    d = d.merge(mp, on=["fecha_t", "h"], how="left")
+    n_sin = int(d["fecha_th"].isna().sum())
+    if n_sin:
+        print(f"[aviso] {n_sin:,} de {n0:,} filas sin fecha_th en la matriz — se descartan")
+        d = d[d["fecha_th"].notna()]
+    return d
+
+
 def _preparar(df: pd.DataFrame) -> pd.DataFrame:
-    d = df.copy()
+    d = _adjuntar_fecha_th(df)
     for c in ("fecha_t", "fecha_th"):
         d[c] = pd.to_datetime(d[c])
     d["w_lo"] = (d["q50"] - d["q05"]).clip(lower=1.0)
