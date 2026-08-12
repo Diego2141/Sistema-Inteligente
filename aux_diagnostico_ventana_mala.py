@@ -248,6 +248,75 @@ def seccion_e(d: pd.DataFrame) -> None:
         print(por_th.to_string())
 
 
+def _posicion_en_mes(d: pd.DataFrame) -> pd.DataFrame:
+    """
+    Posición de cada fecha_th dentro de su mes, contada sobre los días hábiles
+    efectivamente presentes en los datos.
+
+    pos_ini = 1 en el primer día hábil del mes; pos_fin = 1 en el último.
+    Los meses con menos de 15 fechas distintas se descartan: son los bordes de
+    cada ventana de test, donde el conteo estaría truncado y etiquetaría mal.
+    """
+    fechas = pd.DataFrame({"fecha_th": sorted(d["fecha_th"].unique())})
+    fechas["mes"] = fechas["fecha_th"].dt.to_period("M")
+    cnt = fechas.groupby("mes")["fecha_th"].transform("size")
+    fechas["pos_ini"] = fechas.groupby("mes").cumcount() + 1
+    fechas["pos_fin"] = cnt - fechas["pos_ini"] + 1
+    fechas.loc[cnt < 15, ["pos_ini", "pos_fin"]] = np.nan
+    return fechas[["fecha_th", "pos_ini", "pos_fin"]]
+
+
+def seccion_f(d: pd.DataFrame) -> None:
+    print("\n" + "=" * 78)
+    print("F — Cobertura según la posición de fecha_th dentro de su mes")
+    print("=" * 78)
+    print("  La sección E muestra que las fechas que más fallan son cierres y")
+    print("  aperturas de mes, y que fallan en ~100% de sus filas con un único")
+    print("  signo. Esta sección lo cuantifica sobre todas las fechas.\n")
+
+    m = d.merge(_posicion_en_mes(d), on="fecha_th", how="left")
+    m = m[m["pos_fin"].notna()]
+    if len(m) == 0:
+        print("  (sin meses completos para clasificar)")
+        return
+
+    def _bucket(r):
+        if r["pos_ini"] <= 3:
+            return f"inicio +{int(r['pos_ini'])}"
+        if r["pos_fin"] <= 3:
+            return f"cierre -{int(r['pos_fin'])}"
+        return "resto del mes"
+
+    m["pos"] = m.apply(_bucket, axis=1)
+    orden = ["inicio +1", "inicio +2", "inicio +3", "resto del mes",
+             "cierre -3", "cierre -2", "cierre -1"]
+
+    g = m.groupby("pos")
+    t = pd.DataFrame({
+        "n"         : g.size(),
+        "cob90"     : 1 - g["fuera"].mean(),
+        "%fuera_lo" : g["fuera_lo"].mean(),
+        "%fuera_hi" : g["fuera_hi"].mean(),
+        "disp_MM"   : g["err_abs"].mean() / 1e6,
+        "ancho_MM"  : g["ancho"].mean() / 1e6,
+    }).reindex(orden)
+    t["ancho/disp"] = (t["ancho_MM"] / t["disp_MM"]).round(2)
+    for c in ("cob90", "%fuera_lo", "%fuera_hi"):
+        t[c] = t[c].map("{:.1%}".format)
+    for c in ("disp_MM", "ancho_MM"):
+        t[c] = t[c].round(0)
+    print(t.to_string())
+
+    print("\n  Lo mismo por fold, solo cobertura:")
+    tf = (1 - m.groupby(["fold", "pos"])["fuera"].mean()).unstack("pos").reindex(
+        columns=orden)
+    print(tf.apply(lambda _c: _c.map("{:.1%}".format)).to_string())
+
+    print("\n  Si la cobertura cae en los extremos del mes y disp_MM sube")
+    print("  mientras ancho_MM se queda quieto, el modelo conoce la posición")
+    print("  (tiene dias_al_cierre_mes_sin/cos) pero no ensancha el intervalo.")
+
+
 def grafico(d: pd.DataFrame, dir_modo: Path, fecha_tag: str) -> None:
     import matplotlib
     matplotlib.use("Agg")
@@ -297,6 +366,7 @@ def main() -> None:
     seccion_c(d)
     seccion_d(d)
     seccion_e(d)
+    seccion_f(d)
 
     if GRAFICO:
         grafico(d, dir_modo, ruta.stem.split("_")[-1])

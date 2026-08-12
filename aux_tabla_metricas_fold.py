@@ -108,7 +108,7 @@ def main() -> None:
         if m not in df.columns:
             continue
         print(f"\n{'=' * 68}\n{m} por fold y grupo de horizonte")
-        print(_tabla(df, m).applymap("{:.1%}".format).to_string())
+        print(_tabla(df, m).apply(lambda _c: _c.map("{:.1%}".format)).to_string())
 
 
 if __name__ == "__main__":
