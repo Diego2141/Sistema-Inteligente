@@ -28,6 +28,10 @@ AJUSTE_ARCTAN = True
 
 BANCO = "SISTEMA"
 
+# Selector de corrida dentro de la carpeta del modo. "" → la más reciente.
+# fold_roll_arctan/ tiene dos corridas: "20260811" (VAL=1) y "20260812" (VAL=0.5).
+FECHA_TAG = ""
+
 # Métricas a desglosar. Las de escala se imprimen en MM USD; las de proporción,
 # en porcentaje.
 METRICAS_ESCALA     = ["pinball_q50", "rmse", "winkler_90", "crps"]
@@ -47,11 +51,17 @@ def _dir_modo() -> Path:
 def _ultimo_parquet(dir_modo: Path) -> Path:
     """El parquet de métricas más reciente por fecha en el nombre."""
     cands = sorted(dir_modo.glob(f"metricas_{BANCO}_*.parquet"))
+    if FECHA_TAG:
+        cands = [c for c in cands if FECHA_TAG in c.name]
     if not cands:
         raise FileNotFoundError(
-            f"No hay metricas_{BANCO}_*.parquet en {dir_modo}. "
-            f"Revise EXPANDING/AJUSTE_ARCTAN: deben coincidir con la corrida."
+            f"No hay metricas_{BANCO}_*.parquet con FECHA_TAG={FECHA_TAG!r} "
+            f"en {dir_modo}. Revise EXPANDING/AJUSTE_ARCTAN."
         )
+    if len(cands) > 1 and not FECHA_TAG:
+        print(f"[aviso] {len(cands)} corridas en {dir_modo.name}: "
+              f"{', '.join(c.stem.split('_')[-1] for c in cands)}. "
+              f"Se usa la última; fije FECHA_TAG para elegir otra.")
     return cands[-1]
 
 

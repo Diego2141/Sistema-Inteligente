@@ -53,6 +53,13 @@ EXPANDING     = True    # debe coincidir con la corrida que se quiere leer
 AJUSTE_ARCTAN = True
 BANCO         = "SISTEMA"
 
+# Selector de corrida dentro de la carpeta del modo. "" → la más reciente.
+# Necesario porque fold_roll_arctan/ tiene dos corridas distintas:
+#   "20260811" → rolling con VENTANA_VAL_AÑOS = 1
+#   "20260812" → rolling con VENTANA_VAL_AÑOS = 0.5
+# Sin esto se lee siempre la del 12 y la del 11 queda inaccesible.
+FECHA_TAG     = ""
+
 TOP_FECHAS  = [3, 5, 10, 20]   # cuántas fechas_th excluir en la prueba de shock
 GRAFICO     = True
 
@@ -65,11 +72,17 @@ def _dir_modo() -> Path:
 
 def _ultimo(dir_modo: Path, patron: str) -> Path:
     cands = sorted(dir_modo.glob(patron))
+    if FECHA_TAG:
+        cands = [c for c in cands if FECHA_TAG in c.name]
     if not cands:
         raise FileNotFoundError(
-            f"No hay {patron} en {dir_modo}. "
+            f"No hay {patron} con FECHA_TAG={FECHA_TAG!r} en {dir_modo}. "
             f"Revise EXPANDING/AJUSTE_ARCTAN: deben coincidir con la corrida."
         )
+    if len(cands) > 1 and not FECHA_TAG:
+        print(f"[aviso] {len(cands)} corridas en {dir_modo.name}: "
+              f"{', '.join(c.stem.split('_')[-1] for c in cands)}. "
+              f"Se usa la última; fije FECHA_TAG para elegir otra.")
     return cands[-1]
 
 
