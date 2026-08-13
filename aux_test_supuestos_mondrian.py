@@ -235,6 +235,126 @@ def _print_r(t: pd.DataFrame, titulo: str) -> None:
         print(linea)
 
 
+TAUS_LO = [0.01, 0.05, 0.40]     # cuantiles por debajo de la mediana
+TAUS_HI = [0.60, 0.95, 0.99]     # por encima
+N_BOOT_TAU = 150                 # menos réplicas: son 6 τ × 7 posiciones
+
+
+def _score_tau(d: pd.DataFrame, tau: float) -> tuple[pd.Series, float]:
+    """
+    Score y nivel del percentil a estimar para el cuantil tau.
+
+    Para tau < 0.5:  q_tau^cal = q50 - k*(q50 - q_tau), y se quiere que la cola
+    quede en tau, así que k es el percentil (1-tau) de (q50-y)/(q50-q_tau).
+    Para tau > 0.5 es simétrico con el percentil tau.
+
+    El nivel es lo que fija cuántos datos hacen falta: tau=0.05 pide el
+    percentil 95 (n>=19) y tau=0.01 pide el 99 (n>=99).
+    """
+    col = f"q{int(tau * 100):02d}"
+    if tau < 0.5:
+        w = (d["q50"] - d[col]).clip(lower=1.0)
+        return (d["q50"] - d["target"]) / w, 1.0 - tau
+    w = (d[col] - d["q50"]).clip(lower=1.0)
+    return (d["target"] - d["q50"]) / w, tau
+
+
+def seccion_4(d: pd.DataFrame, rng) -> None:
+    print("\n" + "=" * 78)
+    print("4 — ¿La FORMA del factor es invariante en τ?")
+    print("=" * 78)
+    print("  q01 y q99 exigen el percentil 99 del score: 99 fechas por categoría,")
+    print("  y hay 27. No se pueden calibrar por categoría con datos propios.")
+    print("  La salida es prestarles la forma de q05/q95, lo cual solo vale si el")
+    print("  perfil por día del mes NO cambia con el nivel de τ. Se contrasta")
+    print("  comparando τ=0.40 con τ=0.05, que están mucho más separados que")
+    print("  0.05 y 0.01: si ahí la forma coincide, extrapolar es defendible.\n")
+
+    for grupo, nombre in ((TAUS_LO, "cola inferior"), (TAUS_HI, "cola superior")):
+        print(f"\n  r(pos) por τ — {nombre}   [pool de folds]")
+        print(f"{'':<8}" + "".join(f"{p:>17}" for p in ORDEN))
+        formas = {}
+        for tau in grupo:
+            s, nivel = _score_tau(d, tau)
+            dd = d.assign(_s=s)
+            k_marg = _k_conformal(dd["_s"].values, alpha=1 - nivel)
+            fila, vec = f"q{int(tau*100):02d}    ", []
+            for pos in ORDEN:
+                sub = dd[dd["pos"] == pos]
+                if len(sub) == 0 or not np.isfinite(k_marg) or k_marg <= 0:
+                    fila += f"{'—':>17}"; vec.append(np.nan); continue
+                _bk = N_BOOT_TAU
+                k = _k_conformal(sub["_s"].values, alpha=1 - nivel) / k_marg
+                vec.append(k)
+                nf = sub["fecha_th"].nunique()
+                marca = "*" if nf < int(np.ceil(1 / (1 - nivel))) - 1 else " "
+                fila += f"{k:>16.2f}{marca}"
+            print(fila)
+            formas[tau] = np.array(vec, dtype=float)
+
+        ref = grupo[1]      # q05 / q95: el nivel donde sí hay datos
+        print(f"\n    similitud de forma contra q{int(ref*100):02d}:")
+        for tau in grupo:
+            if tau == ref:
+                continue
+            a, b = formas[tau], formas[ref]
+            m = np.isfinite(a) & np.isfinite(b)
+            if m.sum() < 3:
+                print(f"      q{int(tau*100):02d}: insuficiente")
+                continue
+            corr = float(np.corrcoef(a[m], b[m])[0, 1])
+            dif  = float(np.max(np.abs(a[m] / b[m] - 1)))
+            print(f"      q{int(tau*100):02d}: correlación {corr:+.3f} | "
+                  f"máxima discrepancia relativa {dif:.0%}")
+    print("\n  * = menos fechas que el mínimo para ese nivel; el valor es el máximo")
+    print("      observado, no un percentil. Informativo, no utilizable.")
+
+
+def seccion_5(d: pd.DataFrame, rng) -> None:
+    print("\n" + "=" * 78)
+    print("5 — ¿Conviene además desplazar la mediana por categoría?")
+    print("=" * 78)
+    print("  El hit-rate de τ=0.50 está clavado en 0.40 en todas las corridas: la")
+    print("  mediana queda por debajo de lo realizado. Si ese sesgo depende del día")
+    print("  del mes, parte de la asimetría que encontramos en el ancho es sesgo de")
+    print("  ubicación disfrazado de asimetría de escala, y conviene corregirlo")
+    print("  antes de estimar los factores de ancho.")
+    print("  delta se expresa como fracción de la semi-amplitud para que sea")
+    print("  comparable entre horizontes; 0.10 significa un décimo del intervalo.\n")
+
+    d = d.assign(_sh=(d["target"] - d["q50"]) / ((d["q95"] - d["q05"]) / 2).clip(lower=1.0))
+    filas = {}
+    for pos in ORDEN:
+        sub = d[d["pos"] == pos]
+        fila = {"n_fechas": sub["fecha_th"].nunique()}
+        med = float(np.median(sub["_sh"])) if len(sub) else np.nan
+        fila["POOL"] = med
+        # bootstrap de bloques sobre la mediana: converge mucho mejor que un
+        # percentil de cola, así que 27 fechas alcanzan de sobra
+        codes, uniq = pd.factorize(sub["fecha_th"])
+        vals = sub["_sh"].to_numpy(dtype=float)
+        if len(uniq) >= 3:
+            por = [vals[codes == g] for g in range(len(uniq))]
+            reps = [np.median(np.concatenate([por[g] for g in
+                    rng.integers(0, len(uniq), size=len(uniq))]))
+                    for _ in range(N_BOOT_TAU)]
+            lo, hi = np.percentile(reps, [5, 95])
+            fila["IC90"] = f"[{lo:+.2f},{hi:+.2f}]"
+            fila["≠0"] = "sí" if lo * hi > 0 else "no"
+        for f, g in sub.groupby("fold"):
+            fila[f"fold{f}"] = float(np.median(g["_sh"]))
+        filas[pos] = fila
+    t = pd.DataFrame(filas).T
+    for c in t.columns:
+        if c not in ("n_fechas", "IC90", "≠0"):
+            t[c] = pd.to_numeric(t[c]).round(3)
+    print(t.to_string())
+    print("\n  delta > 0 → lo realizado supera a la mediana predicha (sub-pronóstico)")
+    print("  '≠0' = sí → el desplazamiento es distinguible de cero al 90%")
+    print("  Si el signo cambia entre folds en una categoría, ese desplazamiento")
+    print("  es ruido y corregirlo empeoraría el pronóstico puntual.")
+
+
 def main() -> None:
     rng = np.random.default_rng(SEED)
     d = _preparar(_cargar_val(_dir_modo()))
@@ -290,6 +410,9 @@ def main() -> None:
         filas.append(fila)
     print(pd.DataFrame(filas).set_index("fold").round(3).to_string())
 
+    seccion_4(d, rng)
+    seccion_5(d, rng)
+
     print("\n" + "=" * 78)
     print("Cómo decidir")
     print("=" * 78)
@@ -299,6 +422,11 @@ def main() -> None:
     print("  Prueba 1 con r dependiente de h    → agregar h_grupo a la taxonomía")
     print("  Prueba 3 con k dispares entre folds → calibrar dentro de cada fold")
     print("  Fila 0 con celdas bajo el mínimo   → fusionar categorías (J=2 o J=1)")
+    print("  Prueba 4 con forma estable entre τ → q01/q99 heredan la de q05/q95")
+    print("  Prueba 4 con forma dependiente de τ → dejar la banda del 98% sin")
+    print("     condicionar por calendario, y decirlo")
+    print("  Prueba 5 con '≠0'=sí y mismo signo en los 4 folds → corregir también")
+    print("     la ubicación; si el signo cambia entre folds, dejar q50 intacto")
 
 
 if __name__ == "__main__":
