@@ -2161,6 +2161,22 @@ def _build_seasonal_table(fechas_unicas, peru_holidays, fechas_elecciones, peru_
 
         dias_al_cierre_mes    = total_bdays_mes - pos_en_mes
         dias_desde_cierre_mes = pos_en_mes - 1
+        dias_al_cierre_trim   = total_bdays_trim - pos_en_trim
+
+        # Días CALENDARIO (no hábiles) hasta fin de mes. El período de encaje
+        # cierra en día calendario, no hábil: cuando el mes termina en fin de
+        # semana el último día hábil es viernes pero el deadline regulatorio
+        # es domingo, y la presión de ese viernes no es la de un cierre entre
+        # semana. dias_al_cierre_mes mide el reloj operativo (hábil); este mide
+        # el reloj regulatorio (calendario). Se complementan, no se solapan.
+        dias_cal_al_cierre_mes = int((ts + pd.offsets.MonthEnd(0) - ts).days)
+
+        # Cierre de trimestre calendario: Mar/Jun/Sep/Dic. BBVA concentra ahí
+        # su retiro (heatmap de intensidad, sesión 2026-08-13): la activación
+        # aparece casi solo en esos cuatro meses, con años recientes saturando
+        # cerca de 100% del exceso disponible. dias_al_cierre_mes por sí solo
+        # no distingue un cierre de marzo de uno de mayo; esta bandera sí.
+        es_mes_cierre_trim = int(ts.month in (3, 6, 9, 12))
 
         is_penult_bday_trim = int(pos_en_trim == total_bdays_trim - 1)
         is_ultimo_bday_trim = int(pos_en_trim == total_bdays_trim)
@@ -2230,6 +2246,9 @@ def _build_seasonal_table(fechas_unicas, peru_holidays, fechas_elecciones, peru_
             "fecha_th"             : ts,
             "dias_al_cierre_mes"   : dias_al_cierre_mes,
             "dias_desde_cierre_mes": dias_desde_cierre_mes,
+            "dias_al_cierre_trim"  : dias_al_cierre_trim,
+            "dias_cal_al_cierre_mes": dias_cal_al_cierre_mes,
+            "es_mes_cierre_trim"   : es_mes_cierre_trim,
             "pos_en_mes"           : pos_en_mes,
             "total_bdays_mes"      : total_bdays_mes,
             "is_penult_bday_trim"  : is_penult_bday_trim,
@@ -2627,39 +2646,49 @@ def build_feature_matrix(
         # el estado de t no se conoce hasta t+1.
         #
         # VALIDEZ: el encaje se REINICIA al cierre del período, así que la cuenta
-        # solo vale si t+h cae en el mismo mes calendario que t. Fuera de eso
-        # queda NaN. Eso deja ~12% de cobertura global pero ~90% en h=2 y ~50% en
-        # h=10 — concentrada donde el allocation la necesita, e invisible en
-        # cualquier métrica promediada sobre los 74 horizontes.
+        # solo vale si t+h cae en el mismo mes calendario que t. Fuera de eso se
+        # pone 0 — el deadline de ESE período ya pasó, así que su presión es
+        # cero, no desconocida — y no NaN como antes. Con NaN, dentro de un
+        # modelo (h fijo) la ausencia codificaba exactamente "t está avanzado en
+        # el mes": XGBoost aprendía de esa rama un proxy de calendario que ahora
+        # compite en silencio con dias_al_cierre_mes/dias_desde_cierre_mes, ya
+        # activados en crudo. El NaN se reserva para cuando falta el dato de
+        # origen (archivo desde 2016-07).
         if "deficit_encaje_lag1" in df.columns:
             _th_n  = pd.to_datetime(df["fecha_th"])
             _dias_rest_th = ((_th_n + pd.offsets.MonthEnd(0)) - _th_n).dt.days
             _mismo_periodo = (_th_n.dt.to_period("M") == _ft_norm.dt.to_period("M"))
-            df["presion_deadline_th"] = (
-                df["deficit_encaje_lag1"] / np.maximum(_dias_rest_th, 1)
-            ).where(_mismo_periodo)
-            # Desglose de los vacíos: son de dos orígenes independientes y
-            # conviene distinguirlos. Fuera del período es estructural —el
-            # cómputo del encaje se reinicia al cierre— y para h>=30 deja la
-            # columna ENTERAMENTE vacía, o sea muerta en 45 de los 74 modelos.
-            # Sin dato de encaje es de disponibilidad: el archivo arranca en
-            # 2016-07 y antes de eso no hay nada que proyectar.
+            _presion_periodo = df["deficit_encaje_lag1"] / np.maximum(_dias_rest_th, 1)
+            df["presion_deadline_th"] = np.where(
+                _mismo_periodo, _presion_periodo,
+                np.where(df["deficit_encaje_lag1"].isna(), np.nan, 0.0)
+            )
+            # presion_deadline_t: la misma presión pero anclada en t, siempre
+            # definida (no depende de h). Da estado a los ~45 modelos de h>=30
+            # que con la versión t+h quedaban con la columna enteramente vacía.
+            df["presion_deadline_t"] = (
+                df["deficit_encaje_lag1"]
+                / np.maximum((_ft_norm + pd.offsets.MonthEnd(0) - _ft_norm).dt.days, 1)
+            )
             _fuera = (~_mismo_periodo).mean()
             _sin_dato = df["deficit_encaje_lag1"].isna().mean()
             logger.info(
                 f"  {banco}: presion_deadline_th — cobertura "
                 f"{df['presion_deadline_th'].notna().mean():.1%} "
-                f"| fuera del período {_fuera:.1%} (estructural, h>=30 queda "
-                f"vacío) | sin dato de encaje {_sin_dato:.1%}"
+                f"| puesta en 0 fuera del período {_fuera:.1%} | "
+                f"sin dato de encaje {_sin_dato:.1%} | "
+                f"presion_deadline_t cobertura {df['presion_deadline_t'].notna().mean():.1%}"
             )
         # deficit_encaje_lag1 es insumo, no feature: se descarta tras usarlo.
         df = df.drop(columns=["deficit_encaje_lag1"], errors="ignore")
 
-    # Si no hubo archivo de encaje, o le faltaban las columnas del déficit, la
-    # columna no se creó. Se materializa en NaN para que el esquema de la matriz
-    # sea el mismo en todos los casos y coincida con el registro de features.
+    # Si no hubo archivo de encaje, o le faltaban las columnas del déficit, las
+    # columnas no se crearon. Se materializan en NaN para que el esquema de la
+    # matriz sea el mismo en todos los casos y coincida con el registro.
     if "presion_deadline_th" not in df.columns:
         df["presion_deadline_th"] = np.nan
+    if "presion_deadline_t" not in df.columns:
+        df["presion_deadline_t"] = np.nan
 
     # ── 9. Features CC+OVN en BCR (Saldos_CCOVN.xlsx, todos los bancos) ──────
     # ccovn_features está indexado por fecha y contiene valores del día t-1.
@@ -3177,10 +3206,16 @@ def build_data_dictionary(params):
         "deficit_pendiente(t-1) / dias_restantes_del_periodo(t+h): mínimo diario "
         "que el banco debería depositar a partir de t+h si dejara de acumular hoy. "
         "Usa el estado ACTUAL y solo proyecta el denominador, que es calendario "
-        "puro, de modo que no supone nada sobre el ritmo de acumulación. NaN si "
+        "puro, de modo que no supone nada sobre el ritmo de acumulación. 0 si "
         "t+h cae en otro período de encaje, porque el cómputo se reinicia al "
-        "cierre: ~12% de cobertura global pero ~90% en h=2 y ~50% en h=10.",
+        "cierre y ese deadline ya pasó. NaN solo si falta el dato de origen "
+        "(archivo desde 2016-07).",
         None, "t+h")
+    add("presion_deadline_t", "aux_encaje_2 / Calendario",
+        "Misma fórmula que presion_deadline_th pero con denominador anclado en "
+        "t: siempre definida (no depende de h). Da estado a los modelos de "
+        "h>=30, donde la versión t+h queda enteramente vacía.",
+        None, "t")
     add("esc_deposito_pos", "Datos bancarios / Posición del mes",
         "Ídem sobre D solo. Dirige la cola ALTA, donde el diagnóstico del oráculo "
         "encontró la peor calibración (factor de ensanchamiento necesario hasta "
@@ -3228,6 +3263,11 @@ def build_data_dictionary(params):
     # ── Features estacionales (en t+h — fecha futura, siempre conocidas) ─────
     add("dias_al_cierre_mes",    "Calendario", "Días hábiles restantes hasta fin de mes en t+h",          None, "t+h")
     add("dias_desde_cierre_mes", "Calendario", "Días hábiles transcurridos desde inicio de mes en t+h",   None, "t+h")
+    add("dias_al_cierre_trim",   "Calendario", "Días hábiles restantes hasta fin de trimestre en t+h",     None, "t+h")
+    add("dias_cal_al_cierre_mes","Calendario", "Días CALENDARIO (no hábiles) restantes hasta fin de mes en "
+        "t+h — reloj regulatorio del encaje, distinto de dias_al_cierre_mes",  None, "t+h")
+    add("es_mes_cierre_trim",    "Calendario", "1 si el mes de t+h es Mar/Jun/Sep/Dic — cierre de trimestre, "
+        "donde se concentra el retiro de sobreencaje observado",              None, "t+h")
     add("pos_en_mes",            "Calendario", "Posición del día hábil dentro del mes (1=primero)",        None, "t+h")
     add("total_bdays_mes",       "Calendario", "Total de días hábiles del mes de t+h",                     None, "t+h")
     add("is_penult_bday_trim",   "Calendario", "1 si t+h es penúltimo día hábil del trimestre",            None, "t+h")
