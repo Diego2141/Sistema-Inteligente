@@ -96,6 +96,16 @@ TAUS_FORMA  = [0.05, 0.95]              # calendario + nivel
 TAUS_NIVEL  = [0.01, 0.99]              # solo nivel
 GUARDAR     = True
 
+# El nivel k_f^marg se estima sobre el VAL del propio fold, pero ahi el modelo
+# SOBRE-cubre: la prueba 3 lo midio en 0.89 / 0.70 / 0.60 / 0.43 por fold, todos
+# por debajo de 1. Aplicarlo estrecha entre 10% y 57% y arrastra tambien a las
+# categorias que necesitaban ensancharse, importando la brecha VAL-TEST en vez
+# de absorberla. Con APLICAR_NIVEL=False se usa nivel 1 y solo se aplica la
+# FORMA: se conserva la calibracion global que produce step005 y unicamente se
+# redistribuye el ancho entre posiciones del mes. Correr ambas separa el fallo
+# del nivel del fallo de transferencia de la forma.
+MODOS_NIVEL = [True, False]
+
 ORDEN = ["inicio +1", "inicio +2", "inicio +3", "resto del mes",
          "cierre -3", "cierre -2", "cierre -1"]
 
@@ -200,7 +210,8 @@ def _k_conformal(s: np.ndarray, nivel: float) -> float:
 
 def estimar_factores(val_forma: pd.DataFrame,
                      val_nivel: pd.DataFrame,
-                     log: list) -> dict:
+                     log: list,
+                     aplicar_nivel: bool = True) -> dict:
     """
     Devuelve {tau: {pos: k}} más {tau: "__marg__": k} para los que no llevan
     forma. val_forma alimenta la forma (agrupada) y val_nivel el nivel (del
@@ -209,6 +220,9 @@ def estimar_factores(val_forma: pd.DataFrame,
     fac: dict = {}
 
     for tau in TAUS_NIVEL:                       # q01 / q99: solo nivel
+        if not aplicar_nivel:
+            fac[tau] = {"__marg__": 1.0}         # sin nivel no hay nada que ajustar
+            continue
         s_n, _, niv = _score(val_nivel, tau)
         fac[tau] = {"__marg__": float(np.clip(_k_conformal(s_n, niv), K_MIN, K_MAX))}
 
@@ -216,7 +230,7 @@ def estimar_factores(val_forma: pd.DataFrame,
         s_f, _, niv = _score(val_forma, tau)
         s_n, _, _   = _score(val_nivel, tau)
         k_marg_f = _k_conformal(s_f, niv)
-        k_marg_n = _k_conformal(s_n, niv)
+        k_marg_n = _k_conformal(s_n, niv) if aplicar_nivel else 1.0
         tabla: dict = {}
         for pos in ORDEN:
             m  = (val_forma["pos"] == pos).to_numpy()
@@ -297,11 +311,14 @@ def _tabla_pos(antes: pd.DataFrame, despues: pd.DataFrame) -> pd.DataFrame:
 
 # ---------------------------------------------------------------------------
 
-def _corrida(val: pd.DataFrame, test: pd.DataFrame, modo: str) -> pd.DataFrame:
+def _corrida(val: pd.DataFrame, test: pd.DataFrame, modo: str,
+             aplicar_nivel: bool = True) -> pd.DataFrame:
     """Calibra cada fold con el conjunto que permita `modo` y devuelve TEST calibrado."""
+    etiq_niv = "forma+nivel" if aplicar_nivel else "SOLO FORMA"
     print("\n" + "=" * 78)
-    print(f"MODO '{modo}'  —  " + ("solo folds anteriores (desplegable)" if modo == "causal"
-                                   else "todos menos el propio (USA DATOS POSTERIORES)"))
+    print(f"MODO '{modo}' · {etiq_niv}  —  "
+          + ("solo folds anteriores (desplegable)" if modo == "causal"
+             else "todos menos el propio (USA DATOS POSTERIORES)"))
     print("=" * 78)
     folds = sorted(test["fold"].unique())
     salida, tablas = [], {}
@@ -317,7 +334,7 @@ def _corrida(val: pd.DataFrame, test: pd.DataFrame, modo: str) -> pd.DataFrame:
             salida.append(sub)
             continue
         log: list = []
-        fac = estimar_factores(cal, propio, log)
+        fac = estimar_factores(cal, propio, log, aplicar_nivel)
         tablas[int(f)] = {str(k): v for k, v in fac.items()}
         n_forma = cal["fecha_th"].nunique()
         print(f"\n  Fold {f}: forma con {cal['fold'].nunique()} fold(s), "
@@ -364,17 +381,19 @@ def main() -> None:
           "alcanza el TEST que calibra")
 
     resumen, todas_tablas = [_resumen(test, "SIN CALIBRAR")], {}
-    for modo in ("causal", "lofo"):
-        cal, tablas = _corrida(val, test, modo)
-        todas_tablas[modo] = tablas
-        resumen.append(_resumen(cal, modo))
+    for aplicar_nivel in MODOS_NIVEL:
+      _niv = "forma+nivel" if aplicar_nivel else "solo forma"
+      for modo in ("causal", "lofo"):
+        cal, tablas = _corrida(val, test, modo, aplicar_nivel)
+        todas_tablas[f"{modo}_{_niv}"] = tablas
+        resumen.append(_resumen(cal, f"{modo} · {_niv}"))
 
-        print(f"\n  Cobertura 90% por posición del mes  [{modo}]")
+        print(f"\n  Cobertura 90% por posición del mes  [{modo} · {_niv}]")
         t = _tabla_pos(test, cal)
         print(t.assign(**{c: (t[c] * 100).round(1) for c in ("cob_antes", "cob_despues")})
               .round(1).to_string())
 
-        print(f"\n  Cobertura 90% por fold  [{modo}]")
+        print(f"\n  Cobertura 90% por fold  [{modo} · {_niv}]")
         for f in sorted(test["fold"].unique()):
             a = _cobertura(test[test["fold"] == f])
             b = _cobertura(cal[cal["fold"] == f])
@@ -387,8 +406,10 @@ def main() -> None:
 
         if GUARDAR:
             DIR_CALIB.mkdir(parents=True, exist_ok=True)
-            cal.to_parquet(DIR_CALIB / f"preds_mondrian_{modo}_{BANCO}.parquet",
-                           index=False)
+            _sfx = "nivel" if aplicar_nivel else "soloforma"
+            cal.to_parquet(
+                DIR_CALIB / f"preds_mondrian_{modo}_{_sfx}_{BANCO}.parquet",
+                index=False)
 
     print("\n" + "=" * 78)
     print("Resumen global")
