@@ -207,7 +207,11 @@ FEATURES_EXCLUIR = [
     "is_post_eleccion",
     "elec_sin", "elec_cos"
 # 10. Features atados al horizonte
-    #"presion_deadline_th"
+    # presion_deadline_th/_t se eliminaron esta sesión (reemplazadas por
+    # capacidad_retiro_th, sección 8c de build_feature_matrix): medían la
+    # obligación de depositar, no la capacidad de retirar, y su nivel era
+    # casi constante dentro del mes por construcción algebraica — ver el
+    # diccionario de features para el análisis completo.
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1629,8 +1633,10 @@ def build_encaje_features(df_encaje, peru_bday):
 def load_bbva_encaje_features(params):
     """
     Lee bbva_encaje_features_modelo.xlsx (generado por aux_encaje_2.py).
-    Retorna un DataFrame indexado en días CALENDARIO con las 4 features
-    lag1 ya calculadas correctamente sobre ese índice.
+    Retorna un DataFrame indexado en días CALENDARIO con las features lag1
+    ya calculadas correctamente sobre ese índice — incluyendo
+    ExigibleTotalMes_est_lag1 y EncajeAcumMes_lag1, los insumos que
+    build_feature_matrix usa para proyectar capacidad_retiro_th a fecha_th.
 
     La adaptación al calendario hábil de step001 se hace con merge_asof
     en build_feature_matrix (busca la fecha calendario más reciente ≤ fecha_t).
@@ -1639,10 +1645,23 @@ def load_bbva_encaje_features(params):
     """
     _COLS = ["avance_mes_lag1", "exceso_abs_lag1", "exceso_dia_lag1",
              "encaje_ovn_lag1", "ratio_ovn_total_lag1",
-             # Necesarias para presion_deadline_th. Se toman SIN lag y se
-             # rezagan acá, porque aux_encaje_2 no exporta su versión lag1: el
-             # estado de t no se conoce hasta t+1, así que usarlas crudas sería
-             # fuga.
+             # encaje_diario_lag1 requiere que aux_encaje_2.py haya sido
+             # re-corrido con la línea
+             # df["encaje_diario_lag1"] = df["encaje"].shift(1) agregada al
+             # bloque de versiones lag1 (mismo patrón que encaje_ovn_lag1).
+             # Nombre distinto de "encaje_lag1" (ya usado por la fuente EncajeD
+             # en la sección 8, línea ~1540) para no colisionar: son series
+             # DISTINTAS —Caja+CtaCte allá, encaje diario de aux_encaje_2 acá—
+             # y compartir nombre haría que una sobrescribiera a la otra en
+             # silencio al mergear. Si el Excel es de una corrida anterior sin
+             # esta columna, capacidad_retiro_th queda en NaN — el resto no se
+             # ve afectado (ver cols_missing más abajo).
+             "encaje_diario_lag1",
+             # ExigibleTotalMes_est y EncajeAcumMes: necesarias para proyectar
+             # capacidad_retiro_th a fecha_th. Se toman SIN lag y se rezagan acá
+             # (renombrando a *_lag1), porque aux_encaje_2 no exporta su versión
+             # lag1: el estado de t no se conoce hasta t+1, así que usarlas
+             # crudas sería fuga.
              "ExigibleTotalMes_est", "EncajeAcumMes"]
 
     ruta = params.get("ruta_bbva_encaje_features", "")
@@ -1662,18 +1681,19 @@ def load_bbva_encaje_features(params):
         df["fecha"] = pd.to_datetime(df["fecha"]).dt.normalize()
         df = df.sort_values("fecha").reset_index(drop=True)
 
-        # Déficit pendiente del período, rezagado un día. El shift es sobre el
-        # índice CALENDARIO del archivo, que es como está definido el período de
-        # encaje; el resto de la adaptación a días hábiles la hace el merge_asof.
+        # ExigibleTotalMes_est y EncajeAcumMes llegan SIN lag (valor del día
+        # mismo). Se rezagan acá, sobre el índice CALENDARIO del archivo —que
+        # es como está definido el período de encaje—, y se renombran con el
+        # sufijo _lag1 para que build_feature_matrix las trate igual que al
+        # resto de columnas de esta función: todo lo que sale de acá ya es
+        # seguro de usar en fecha_t sin rezagarlo de nuevo.
         if {"ExigibleTotalMes_est", "EncajeAcumMes"}.issubset(df.columns):
-            df["deficit_encaje_lag1"] = (
-                (df["ExigibleTotalMes_est"] - df["EncajeAcumMes"])
-                .clip(lower=0).shift(1)
-            )
+            df["ExigibleTotalMes_est_lag1"] = df["ExigibleTotalMes_est"].shift(1)
+            df["EncajeAcumMes_lag1"]        = df["EncajeAcumMes"].shift(1)
             df = df.drop(columns=["ExigibleTotalMes_est", "EncajeAcumMes"])
             cols_ok = [c for c in cols_ok
                        if c not in ("ExigibleTotalMes_est", "EncajeAcumMes")]
-            cols_ok.append("deficit_encaje_lag1")
+            cols_ok += ["ExigibleTotalMes_est_lag1", "EncajeAcumMes_lag1"]
 
         n_val = df["avance_mes_lag1"].notna().sum() if "avance_mes_lag1" in df.columns else 0
         logger.info(
@@ -2604,7 +2624,8 @@ def build_feature_matrix(
     # merge_asof alinea al calendario hábil de cada entidad.
     _bbva_feat_cols = ["avance_mes_lag1", "exceso_abs_lag1", "exceso_dia_lag1",
                        "encaje_ovn_lag1", "ratio_ovn_total_lag1",
-                       "deficit_encaje_lag1"]
+                       "encaje_diario_lag1", "ExigibleTotalMes_est_lag1",
+                       "EncajeAcumMes_lag1"]
     if bbva_encaje_feat is not None and not bbva_encaje_feat.empty:
         # Construir lookup: fecha_t_única → valor del Excel más reciente ≤ fecha_t.
         # merge_asof sobre fechas únicas evita ambigüedades con múltiples h por fecha.
@@ -2632,63 +2653,91 @@ def build_feature_matrix(
         logger.info(f"  {banco}: bbva_encaje_feat incorporadas — "
                     f"{n_ok:,}/{len(df):,} filas con valores")
 
-        # ── 8c. presion_deadline_th ──────────────────────────────────────────
-        # Proyección de la presión de encaje A LA FECHA OBJETIVO:
+        # ── 8c. capacidad_retiro_th ────────────────────────────────────────
+        # Reemplaza a presion_deadline_th/_t (eliminadas esta sesión). Aquellas
+        # medían la OBLIGACIÓN de depositar; esta mide la CAPACIDAD de retirar,
+        # que es la magnitud directamente relevante para la cola de retiro del
+        # target. Además, al proyectar min_por_dia hacia adelante en vez de
+        # usar el valor de hoy, no pierde magnitud por el MAX(0,·): cuando el
+        # banco va adelantado el requerimiento se satura en 0 y la capacidad
+        # reportada es el saldo completo, en vez de aplanarse a un valor fijo
+        # como hacía presion_deadline_th con su propio clip.
         #
-        #     presion = deficit_pendiente(t-1) / dias_restantes_del_periodo(t+h)
+        # SUPUESTO ÚNICO Y EXPLÍCITO: el banco mantiene desde t-1 hasta t+h el
+        # mismo ritmo de depósito diario (encaje_diario_lag1) y el mismo saldo
+        # overnight. Es la misma disciplina que ya usaba presion_deadline_th
+        # —proyectar solo lo proyectable sin calendario— llevada a la variable
+        # de capacidad en vez de a la de obligación:
         #
-        # Es el mínimo que el banco tendría que depositar por día a partir de t+h
-        # si dejara de acumular desde hoy. A diferencia de los rezagos de posición
-        # usa el estado ACTUAL, y solo proyecta el DENOMINADOR — que es calendario
-        # puro. Por eso no requiere ningún supuesto sobre cómo acumula el banco.
+        #   dias_h = (fecha_th − fecha_t).días + 1   [EncajeAcumMes_lag1 cubre
+        #             hasta fecha_t−1, así que el +1 cierra ese día también]
+        #   EncajeAcum_proy(t+h) = EncajeAcumMes_lag1 + encaje_diario_lag1 · dias_h
+        #   min_por_dia(t+h)     = MAX(0, (ExigibleTotalMes_est_lag1
+        #                                   − EncajeAcum_proy(t+h))
+        #                                  / dias_restantes_calendario(t+h))
+        #   capacidad_retiro_th  = MAX(0, encaje_diario_lag1 − min_por_dia(t+h))
+        #                          + overnight_lag1
         #
-        # El numerador ya viene rezagado un día desde load_bbva_encaje_features:
-        # el estado de t no se conoce hasta t+1.
+        # overnight_lag1 se obtiene por diferencia: encaje_ovn_lag1 −
+        # encaje_diario_lag1 (aux_encaje_2 no exporta overnight_lag1 directo;
+        # encaje_ovn_lag1 sí existía antes de esta sesión).
         #
-        # VALIDEZ: el encaje se REINICIA al cierre del período, así que la cuenta
-        # solo vale si t+h cae en el mismo mes calendario que t. Fuera de eso se
-        # pone 0 — el deadline de ESE período ya pasó, así que su presión es
-        # cero, no desconocida — y no NaN como antes. Con NaN, dentro de un
-        # modelo (h fijo) la ausencia codificaba exactamente "t está avanzado en
-        # el mes": XGBoost aprendía de esa rama un proxy de calendario que ahora
-        # compite en silencio con dias_al_cierre_mes/dias_desde_cierre_mes, ya
-        # activados en crudo. El NaN se reserva para cuando falta el dato de
-        # origen (archivo desde 2016-07).
-        if "deficit_encaje_lag1" in df.columns:
-            _th_n  = pd.to_datetime(df["fecha_th"])
-            _dias_rest_th = ((_th_n + pd.offsets.MonthEnd(0)) - _th_n).dt.days
+        # VALIDEZ: igual que antes, el período se reinicia al cierre, así que
+        # ExigibleTotalMes_est_lag1 deja de aplicar si fecha_th cae en un mes
+        # calendario distinto al de fecha_t. A diferencia de presion_deadline_th
+        # —donde "fuera del período" se resolvía a 0 porque ese deadline ya
+        # había pasado—, acá NO corresponde poner 0: desconocer la capacidad
+        # futura no es lo mismo que no tener capacidad. Queda en NaN.
+        _cols_cap = {"encaje_diario_lag1", "encaje_ovn_lag1",
+                    "ExigibleTotalMes_est_lag1", "EncajeAcumMes_lag1"}
+        if _cols_cap.issubset(df.columns):
+            _th_n = pd.to_datetime(df["fecha_th"])
+            # EncajeAcumMes_lag1 cubre hasta fecha_t − 1 (el .shift(1) del
+            # archivo calendario), no hasta fecha_t: por eso son
+            # (fecha_th − fecha_t) + 1 días de crecimiento a proyectar, no
+            # (fecha_th − fecha_t). Verificado con un mes sintético: sin el
+            # +1 la capacidad proyectada quedaba sistemáticamente un día de
+            # ritmo por debajo de la esperada en todo el mes.
+            _dias_h = (_th_n - _ft_norm).dt.days + 1
+            _dias_rest_th  = ((_th_n + pd.offsets.MonthEnd(0)) - _th_n).dt.days
             _mismo_periodo = (_th_n.dt.to_period("M") == _ft_norm.dt.to_period("M"))
-            _presion_periodo = df["deficit_encaje_lag1"] / np.maximum(_dias_rest_th, 1)
-            df["presion_deadline_th"] = np.where(
-                _mismo_periodo, _presion_periodo,
-                np.where(df["deficit_encaje_lag1"].isna(), np.nan, 0.0)
-            )
-            # presion_deadline_t: la misma presión pero anclada en t, siempre
-            # definida (no depende de h). Da estado a los ~45 modelos de h>=30
-            # que con la versión t+h quedaban con la columna enteramente vacía.
-            df["presion_deadline_t"] = (
-                df["deficit_encaje_lag1"]
-                / np.maximum((_ft_norm + pd.offsets.MonthEnd(0) - _ft_norm).dt.days, 1)
-            )
-            _fuera = (~_mismo_periodo).mean()
-            _sin_dato = df["deficit_encaje_lag1"].isna().mean()
-            logger.info(
-                f"  {banco}: presion_deadline_th — cobertura "
-                f"{df['presion_deadline_th'].notna().mean():.1%} "
-                f"| puesta en 0 fuera del período {_fuera:.1%} | "
-                f"sin dato de encaje {_sin_dato:.1%} | "
-                f"presion_deadline_t cobertura {df['presion_deadline_t'].notna().mean():.1%}"
-            )
-        # deficit_encaje_lag1 es insumo, no feature: se descarta tras usarlo.
-        df = df.drop(columns=["deficit_encaje_lag1"], errors="ignore")
 
-    # Si no hubo archivo de encaje, o le faltaban las columnas del déficit, las
-    # columnas no se crearon. Se materializan en NaN para que el esquema de la
+            _overnight_lag1 = df["encaje_ovn_lag1"] - df["encaje_diario_lag1"]
+            _encaje_acum_proy = (
+                df["EncajeAcumMes_lag1"] + df["encaje_diario_lag1"] * _dias_h
+            )
+            _min_por_dia_th = np.maximum(
+                0.0,
+                (df["ExigibleTotalMes_est_lag1"] - _encaje_acum_proy)
+                / np.maximum(_dias_rest_th, 1),
+            )
+            _capacidad = (
+                np.maximum(0.0, df["encaje_diario_lag1"] - _min_por_dia_th)
+                + _overnight_lag1
+            )
+            df["capacidad_retiro_th"] = _capacidad.where(_mismo_periodo)
+
+            _cob = df["capacidad_retiro_th"].notna().mean()
+            _sin_dato = df["encaje_diario_lag1"].isna().mean()
+            logger.info(
+                f"  {banco}: capacidad_retiro_th — cobertura {_cob:.1%} "
+                f"| fuera del período {(~_mismo_periodo).mean():.1%} (NaN, "
+                f"no proyectable sin datos del mes siguiente) "
+                f"| sin dato de encaje {_sin_dato:.1%}"
+            )
+        # Insumos de proyección, no features: se descartan tras usarlos.
+        # encaje_diario_lag1 y encaje_ovn_lag1 quedan también fuera —el
+        # segundo ya estaba excluido antes de esta sesión— porque lo que
+        # aportan a la matriz es capacidad_retiro_th, ya calculada.
+        df = df.drop(columns=["ExigibleTotalMes_est_lag1", "EncajeAcumMes_lag1",
+                              "encaje_diario_lag1"],
+                     errors="ignore")
+
+    # Si no hubo archivo de encaje, o le faltaban las columnas necesarias, la
+    # columna no se creó. Se materializa en NaN para que el esquema de la
     # matriz sea el mismo en todos los casos y coincida con el registro.
-    if "presion_deadline_th" not in df.columns:
-        df["presion_deadline_th"] = np.nan
-    if "presion_deadline_t" not in df.columns:
-        df["presion_deadline_t"] = np.nan
+    if "capacidad_retiro_th" not in df.columns:
+        df["capacidad_retiro_th"] = np.nan
 
     # ── 9. Features CC+OVN en BCR (Saldos_CCOVN.xlsx, todos los bancos) ──────
     # ccovn_features está indexado por fecha y contiene valores del día t-1.
@@ -3202,20 +3251,22 @@ def build_data_dictionary(params):
         "ruedas hasta t, point-in-time). Mide RECURRENCIA en vez de magnitud: una "
         "posición cargada en 8 de 12 meses es distinta de una cargada en 1 con un "
         "valor enorme. Con 12 rezagos cubre los 74 horizontes.", None, "t+h")
-    add("presion_deadline_th", "aux_encaje_2 / Calendario",
-        "deficit_pendiente(t-1) / dias_restantes_del_periodo(t+h): mínimo diario "
-        "que el banco debería depositar a partir de t+h si dejara de acumular hoy. "
-        "Usa el estado ACTUAL y solo proyecta el denominador, que es calendario "
-        "puro, de modo que no supone nada sobre el ritmo de acumulación. 0 si "
-        "t+h cae en otro período de encaje, porque el cómputo se reinicia al "
-        "cierre y ese deadline ya pasó. NaN solo si falta el dato de origen "
+    add("capacidad_retiro_th", "aux_encaje_2 / Calendario",
+        "MAX(0, encaje_diario_lag1 − min_por_dia_proyectado(t+h)) + overnight_lag1: "
+        "cuánto puede retirar el banco en t+h sin incumplir el 100% del exigible "
+        "al cierre del período. Reemplaza a presion_deadline_th/_t (eliminadas "
+        "esta sesión), que medían la obligación de depositar en vez de la "
+        "capacidad de retirar y cuyo nivel era casi constante dentro del mes "
+        "por construcción algebraica. Proyecta EncajeAcumMes hacia t+h asumiendo "
+        "que el banco mantiene el ritmo diario de encaje_diario_lag1 desde t-1 "
+        "— único supuesto, explícito y acotado (el déficit proyectado nunca es "
+        "negativo). Sin clip artificial de magnitud: cuando el banco va "
+        "adelantado min_por_dia se satura en 0 y la capacidad reportada es el "
+        "saldo completo. NaN si t+h cae en otro período de encaje —el cómputo "
+        "se reinicia al cierre y no hay forma de proyectar el requerimiento del "
+        "mes siguiente sin sus propios datos— o si falta el dato de origen "
         "(archivo desde 2016-07).",
         None, "t+h")
-    add("presion_deadline_t", "aux_encaje_2 / Calendario",
-        "Misma fórmula que presion_deadline_th pero con denominador anclado en "
-        "t: siempre definida (no depende de h). Da estado a los modelos de "
-        "h>=30, donde la versión t+h queda enteramente vacía.",
-        None, "t")
     add("esc_deposito_pos", "Datos bancarios / Posición del mes",
         "Ídem sobre D solo. Dirige la cola ALTA, donde el diagnóstico del oráculo "
         "encontró la peor calibración (factor de ensanchamiento necesario hasta "

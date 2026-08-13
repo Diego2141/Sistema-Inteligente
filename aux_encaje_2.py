@@ -1310,6 +1310,11 @@ df["exceso_abs_lag1"]      = df["exceso_abs"].shift(1)
 df["exceso_dia_lag1"]      = df["exceso_dia"].shift(1)
 df["encaje_ovn_lag1"]      = df["encaje_ovn"].shift(1)
 df["ratio_ovn_total_lag1"] = df["ratio_ovn_total"].shift(1)
+# encaje_diario_lag1: insumo de capacidad_retiro_th en step001 (proyecta el
+# encaje acumulado hacia t+h asumiendo que este ritmo diario se mantiene).
+# Nombre distinto de "encaje" a secas para que step001 lo pida por su nombre
+# lag1 explícito, igual que el resto de esta sección.
+df["encaje_diario_lag1"]   = df["encaje"].shift(1)
 
 # ── Construcción del DataFrame de export ──────────────────────────────────────
 _COLS_EXPORT = [
@@ -1323,7 +1328,7 @@ _COLS_EXPORT = [
     "avance_mes", "exceso_abs", "exceso_dia", "ratio_ovn_total",
     # Features con lag1 (para modelo — valor conocido en t-1)
     "avance_mes_lag1", "exceso_abs_lag1", "exceso_dia_lag1",
-    "encaje_ovn_lag1", "ratio_ovn_total_lag1",
+    "encaje_ovn_lag1", "ratio_ovn_total_lag1", "encaje_diario_lag1",
 ]
 df_fe = df[[c for c in _COLS_EXPORT if c in df.columns]].copy()
 
