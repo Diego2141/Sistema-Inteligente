@@ -69,17 +69,17 @@ efecto de calendario no. Medido, el factor de 'inicio +2' dio 2.36/2.35/2.34/
 2.35/2.37 en los cinco grupos de horizonte. Eso permite agrupar los 74
 horizontes y multiplicar por ~74 los datos disponibles.
 
-Los dos modos de calibración
-----------------------------
-  causal  el fold f se calibra con los VAL de los folds j < f únicamente.
-          Es lo desplegable y no usa ningún dato posterior al TEST evaluado.
-  lofo    el fold f se calibra con todos los folds menos el suyo. USA DATOS
-          POSTERIORES, así que no es desplegable: sirve como cota superior de
-          lo que lograría la forma bien estimada, para separar "el método no
-          sirve" de "no hay suficientes datos todavía".
-
-Se reportan los dos. La diferencia entre ambos mide cuánto cuesta la
-restricción causal.
+Fuentes de la FORMA — ver _conjunto_forma()
+-------------------------------------------
+  causal_todo  VAL y TEST con resultado ya conocido. Es la propuesta: mismo
+               corte temporal que causal_val pero con la mitad de los datos
+               viniendo de un régimen realista, y con ~43 fechas por categoría
+               de borde en vez de ~27.
+  causal_val   solo VAL previo. Hereda el mismo sesgo que tenía el nivel —VAL
+               es más benigno que TEST— y por eso 'inicio +2' y 'cierre -3' no
+               se movieron pese a recibir ensanchamiento.
+  lofo         todos los VAL menos el propio. USA DATOS POSTERIORES: no es
+               desplegable, sirve de cota superior.
 
 Uso: ejecutar directamente.
 """
@@ -116,13 +116,15 @@ TAUS_FORMA  = [0.05, 0.95]              # calendario + nivel
 TAUS_NIVEL  = [0.01, 0.99]              # solo nivel
 GUARDAR     = True
 
-# Variantes de NIVEL. Ver _fuentes_nivel() para el detalle de cada una.
-#   (True,  "test_previos")  el arreglo: mide el nivel donde importa
-#   (True,  "val_propio")    la version original, sesgada hacia estrechar
-#   (False, "-")             sin nivel: solo redistribuye ancho entre posiciones
-# Correr las tres separa el fallo del nivel del fallo de transferencia de la
-# forma, que son las dos causas que el primer resultado dejo confundidas.
-VARIANTES_NIVEL = [(True, "test_previos"), (True, "val_propio"), (False, "-")]
+# Combinaciones a reportar: (fuente de FORMA, aplicar nivel, fuente de NIVEL).
+# No es el producto cartesiano: la fuente del nivel ya quedó decidida
+# —test_previos gana por 6.9 pp— así que se varía sobre todo la de la forma.
+COMBINACIONES = [
+    ("causal_todo", True, "test_previos"),   # la propuesta: forma de todo lo conocido
+    ("causal_val",  True, "test_previos"),   # lo que ya se corrió, para comparar
+    ("lofo",        True, "test_previos"),   # cota superior
+    ("causal_val",  True, "val_propio"),     # referencia del sesgo del nivel
+]
 
 ORDEN = ["inicio +1", "inicio +2", "inicio +3", "resto del mes",
          "cierre -3", "cierre -2", "cierre -1"]
@@ -386,25 +388,56 @@ def _fuentes_nivel(val: pd.DataFrame, test: pd.DataFrame, f: int,
                     f"{len(grupos)} fold[s])")
 
 
+def _conjunto_forma(val: pd.DataFrame, test: pd.DataFrame, f: int,
+                    modo: str) -> tuple[pd.DataFrame, str]:
+    """
+    Conjunto sobre el que se estima la FORMA r(pos) para el fold f.
+
+    'causal_val'   VAL con resultado conocido antes de empezar el período.
+                   Es el primer diseño, y hereda el mismo sesgo que tenía el
+                   nivel: VAL es un período sistemáticamente más benigno que
+                   TEST, así que la forma sale corta. Se vio en que 'inicio +2'
+                   y 'cierre -3' no se movieron pese a recibir ensanchamiento.
+    'causal_todo'  VAL Y TEST con resultado ya conocido. Mismo corte temporal,
+                   pero la mitad de los datos viene de un régimen realista. Y
+                   resuelve el tamaño muestral: solo TEST previo daría ~17
+                   fechas por categoría de borde, por debajo del mínimo de 19;
+                   la unión llega a ~43.
+    'lofo'         todos los VAL menos el propio. USA DATOS POSTERIORES: no es
+                   desplegable, sirve de cota superior.
+
+    Que el nivel y la forma compartan filas no genera doble conteo: r es un
+    cociente contra el marginal del mismo conjunto, así que el nivel se cancela
+    dentro de la forma.
+    """
+    if modo == "lofo":
+        sub = val[val["fold"] != f]
+        return sub, f"VAL de {sub['fold'].nunique()} fold(s), {sub['fecha_th'].nunique()} fechas"
+    corte = test.loc[test["fold"] == f, "fecha_th"].min()
+    v = val[val["fecha_th"] < corte]
+    if modo == "causal_val":
+        return v, f"VAL previo a {corte:%Y-%m-%d}, {v['fecha_th'].nunique()} fechas"
+    t = test[test["fecha_th"] < corte]
+    u = pd.concat([v, t], ignore_index=True)
+    return u, (f"VAL+TEST previos a {corte:%Y-%m-%d}, "
+               f"{u['fecha_th'].nunique()} fechas "
+               f"({v['fecha_th'].nunique()} de VAL + {t['fecha_th'].nunique()} de TEST)")
+
+
 def _corrida(val: pd.DataFrame, test: pd.DataFrame, modo: str,
              aplicar_nivel: bool = True,
              fuente_nivel: str = "val_propio") -> pd.DataFrame:
     """Calibra cada fold con el conjunto que permita `modo` y devuelve TEST calibrado."""
     etiq_niv = f"nivel={fuente_nivel}" if aplicar_nivel else "SIN NIVEL"
     print("\n" + "=" * 78)
-    print(f"MODO '{modo}' · {etiq_niv}  —  "
-          + ("solo folds anteriores (desplegable)" if modo == "causal"
-             else "todos menos el propio (USA DATOS POSTERIORES)"))
+    print(f"FORMA '{modo}' · {etiq_niv}  —  "
+          + ("USA DATOS POSTERIORES, no desplegable" if modo == "lofo"
+             else "solo resultados ya conocidos (desplegable)"))
     print("=" * 78)
     folds = sorted(test["fold"].unique())
     salida, tablas = [], {}
     for f in folds:
-        if modo == "causal":
-            # mismo criterio que el nivel: resultado conocido antes de empezar
-            corte_f = test.loc[test["fold"] == f, "fecha_th"].min()
-            cal = val[val["fecha_th"] < corte_f]
-        else:
-            cal = val[val["fold"] != f]
+        cal, etiq_forma = _conjunto_forma(val, test, f, modo)
         fuentes, etiq = _fuentes_nivel(val, test, f, fuente_nivel)
         sub = test[test["fold"] == f]
         if len(cal) == 0 or (aplicar_nivel and not fuentes):
@@ -415,8 +448,8 @@ def _corrida(val: pd.DataFrame, test: pd.DataFrame, modo: str,
         fac = estimar_factores(cal, fuentes, log, aplicar_nivel)
         tablas[int(f)] = {str(k): v for k, v in fac.items()}
         _k = fac[0.05].get("__marg__") or list(fac[0.05].values())[3]
-        print(f"\n  Fold {f}: forma con {cal['fold'].nunique()} fold(s), "
-              f"{cal['fecha_th'].nunique()} fechas | nivel de {etiq}")
+        print(f"\n  Fold {f}: forma de {etiq_forma}")
+        print(f"           nivel de {etiq}")
         for l in log[:3]:
             print(l)
         if len(log) > 3:
@@ -467,9 +500,8 @@ def main() -> None:
           "alcanza el TEST que calibra")
 
     resumen, todas_tablas = [_resumen(test, "SIN CALIBRAR")], {}
-    for aplicar_nivel, fuente in VARIANTES_NIVEL:
-      _niv = f"nivel {fuente}" if aplicar_nivel else "solo forma"
-      for modo in ("causal", "lofo"):
+    for modo, aplicar_nivel, fuente in COMBINACIONES:
+        _niv = f"nivel {fuente}" if aplicar_nivel else "solo forma"
         cal, tablas = _corrida(val, test, modo, aplicar_nivel, fuente)
         todas_tablas[f"{modo}_{_niv}"] = tablas
         resumen.append(_resumen(cal, f"{modo} · {_niv}"))
