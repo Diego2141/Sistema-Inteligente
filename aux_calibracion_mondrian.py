@@ -28,9 +28,29 @@ El factor se descompone en nivel x forma:
 
     k_f(kappa) = k_f^marg  x  [ k_pool(kappa) / k_pool^marg ]
 
-El NIVEL sale del VAL del propio fold (~194 fechas, bien estimado, absorbe la
-deriva temporal). La FORMA se agrupa entre folds, porque con ~10 fechas por
-categoría y fold no alcanza para un percentil 95.
+La FORMA se agrupa entre folds, porque con ~10 fechas por categoría y fold no
+alcanza para un percentil 95.
+
+El NIVEL admite tres fuentes, y la elección resultó ser decisiva:
+
+  test_previos  el TEST cuyo resultado ya se conoce al empezar a proyectar este
+                período. Mide directamente lo que interesa: cuánto ancho faltó
+                fuera de muestra.
+  val_propio    el VAL del propio fold. Fue el primer diseño y está sesgado: en
+                VAL el modelo SOBRE-cubre (k de 0.89, 0.70, 0.60 y 0.43 por
+                fold) mientras en TEST sub-cubre (1.43, 0.98, 1.12, 1.34). Se
+                aplicó 0.43 donde hacía falta 1.34, de modo que el nivel
+                estrechaba incluso las categorías que pedían ensancharse:
+                importaba la brecha VAL-TEST en vez de absorberla.
+  sin nivel     nivel 1. Conserva la calibración global de step005 y solo
+                redistribuye el ancho entre posiciones del mes.
+
+El corte que separa "ya conocido" de "todavía no" es por FECHA DE RESULTADO,
+no por número de fold. Las ventanas de TEST se solapan en fecha_th —cada una
+se extiende hasta 75 días hábiles más allá de su último origen, invadiendo el
+período del fold siguiente—, así que "el TEST del fold anterior" incluiría
+resultados que aún no habrían ocurrido. El guardia de leakage lo verifica
+sobre las dos fuentes y aborta si se viola.
 
 Qué se calibra y qué no — decidido con aux_test_supuestos_mondrian.py
 ---------------------------------------------------------------------
@@ -96,15 +116,13 @@ TAUS_FORMA  = [0.05, 0.95]              # calendario + nivel
 TAUS_NIVEL  = [0.01, 0.99]              # solo nivel
 GUARDAR     = True
 
-# El nivel k_f^marg se estima sobre el VAL del propio fold, pero ahi el modelo
-# SOBRE-cubre: la prueba 3 lo midio en 0.89 / 0.70 / 0.60 / 0.43 por fold, todos
-# por debajo de 1. Aplicarlo estrecha entre 10% y 57% y arrastra tambien a las
-# categorias que necesitaban ensancharse, importando la brecha VAL-TEST en vez
-# de absorberla. Con APLICAR_NIVEL=False se usa nivel 1 y solo se aplica la
-# FORMA: se conserva la calibracion global que produce step005 y unicamente se
-# redistribuye el ancho entre posiciones del mes. Correr ambas separa el fallo
-# del nivel del fallo de transferencia de la forma.
-MODOS_NIVEL = [True, False]
+# Variantes de NIVEL. Ver _fuentes_nivel() para el detalle de cada una.
+#   (True,  "test_previos")  el arreglo: mide el nivel donde importa
+#   (True,  "val_propio")    la version original, sesgada hacia estrechar
+#   (False, "-")             sin nivel: solo redistribuye ancho entre posiciones
+# Correr las tres separa el fallo del nivel del fallo de transferencia de la
+# forma, que son las dos causas que el primer resultado dejo confundidas.
+VARIANTES_NIVEL = [(True, "test_previos"), (True, "val_propio"), (False, "-")]
 
 ORDEN = ["inicio +1", "inicio +2", "inicio +3", "resto del mes",
          "cierre -3", "cierre -2", "cierre -1"]
@@ -208,14 +226,33 @@ def _k_conformal(s: np.ndarray, nivel: float) -> float:
     return float(s[min(int(np.ceil((n + 1) * nivel)) - 1, n - 1)])
 
 
+def _nivel_marginal(fuentes: list[pd.DataFrame], tau: float) -> float:
+    """
+    Nivel marginal para el cuantil tau: la MEDIANA del k marginal de cada
+    fuente. Con una sola fuente (el VAL del propio fold) es simplemente su k.
+    Con varias —los TEST de los folds anteriores— la mediana amortigua que un
+    semestre atípico fije el nivel de todo el siguiente.
+    """
+    ks = []
+    for src in fuentes:
+        if len(src) == 0:
+            continue
+        s, _, niv = _score(src, tau)
+        k = _k_conformal(s, niv)
+        if np.isfinite(k) and k > 0:
+            ks.append(k)
+    return float(np.median(ks)) if ks else 1.0
+
+
 def estimar_factores(val_forma: pd.DataFrame,
-                     val_nivel: pd.DataFrame,
+                     fuentes_nivel: list[pd.DataFrame],
                      log: list,
                      aplicar_nivel: bool = True) -> dict:
     """
     Devuelve {tau: {pos: k}} más {tau: "__marg__": k} para los que no llevan
-    forma. val_forma alimenta la forma (agrupada) y val_nivel el nivel (del
-    propio fold).
+    forma. val_forma alimenta la FORMA (agrupada entre folds) y fuentes_nivel
+    el NIVEL: una lista de conjuntos sobre los que se mide el k marginal y se
+    toma la mediana.
     """
     fac: dict = {}
 
@@ -223,14 +260,13 @@ def estimar_factores(val_forma: pd.DataFrame,
         if not aplicar_nivel:
             fac[tau] = {"__marg__": 1.0}         # sin nivel no hay nada que ajustar
             continue
-        s_n, _, niv = _score(val_nivel, tau)
-        fac[tau] = {"__marg__": float(np.clip(_k_conformal(s_n, niv), K_MIN, K_MAX))}
+        fac[tau] = {"__marg__": float(np.clip(_nivel_marginal(fuentes_nivel, tau),
+                                              K_MIN, K_MAX))}
 
     for tau in TAUS_FORMA:                       # q05 / q95: nivel x forma
         s_f, _, niv = _score(val_forma, tau)
-        s_n, _, _   = _score(val_nivel, tau)
         k_marg_f = _k_conformal(s_f, niv)
-        k_marg_n = _k_conformal(s_n, niv) if aplicar_nivel else 1.0
+        k_marg_n = _nivel_marginal(fuentes_nivel, tau) if aplicar_nivel else 1.0
         tabla: dict = {}
         for pos in ORDEN:
             m  = (val_forma["pos"] == pos).to_numpy()
@@ -311,10 +347,50 @@ def _tabla_pos(antes: pd.DataFrame, despues: pd.DataFrame) -> pd.DataFrame:
 
 # ---------------------------------------------------------------------------
 
+def _fuentes_nivel(val: pd.DataFrame, test: pd.DataFrame, f: int,
+                   fuente: str) -> tuple[list[pd.DataFrame], str]:
+    """
+    Conjuntos sobre los que se mide el nivel marginal del fold f.
+
+    'val_propio'   el VAL del propio fold. Es lo que se hizo primero, y ahí
+                   está el sesgo: en VAL el modelo SOBRE-cubre (k de 0.89,
+                   0.70, 0.60 y 0.43 por fold) mientras en TEST sub-cubre
+                   (1.43, 0.98, 1.12, 1.34). Se aplicó 0.43 donde hacía falta
+                   1.34, así que ninguna forma podía salvar el resultado.
+    'test_previos' el TEST de los folds anteriores, uno por fuente, y se toma
+                   la mediana. Mide directamente lo que interesa —cuánto ancho
+                   faltó fuera de muestra— en vez de inferirlo de VAL. Es
+                   causal: el TEST del fold j termina antes de que empiece el
+                   del fold f, y en producción esos resultados ya se conocen.
+                   Para el fold 4 daría mediana(1.43, 0.98, 1.12) = 1.12
+                   contra el 1.34 real: sub-corrige, pero es 2.6 veces mejor
+                   que 0.43. Sub-corrige porque la razón TEST/VAL deriva
+                   (1.60, 1.41, 1.88, 3.15) y la mediana de los previos no
+                   alcanza a la tendencia.
+    """
+    if fuente == "val_propio":
+        sub = val[val["fold"] == f]
+        return ([sub] if len(sub) else []), f"VAL propio ({sub['fecha_th'].nunique()} fechas)"
+
+    # Corte por FECHA DE RESULTADO, no por número de fold. Las ventanas de TEST
+    # se solapan en fecha_th —cada una se extiende hasta 75 días hábiles más
+    # allá de su último origen, invadiendo el período del fold siguiente—, así
+    # que "el TEST del fold anterior" incluye resultados que todavía no habrían
+    # ocurrido. Lo que corresponde es todo lo cuyo resultado ya se conoce antes
+    # de empezar a proyectar este período.
+    corte = test.loc[test["fold"] == f, "fecha_th"].min()
+    prev  = test[test["fecha_th"] < corte]
+    grupos = [g for _, g in prev.groupby("fold") if len(g)]
+    return grupos, (f"TEST con resultado previo a {corte:%Y-%m-%d} "
+                    f"({prev['fecha_th'].nunique()} fechas, "
+                    f"{len(grupos)} fold[s])")
+
+
 def _corrida(val: pd.DataFrame, test: pd.DataFrame, modo: str,
-             aplicar_nivel: bool = True) -> pd.DataFrame:
+             aplicar_nivel: bool = True,
+             fuente_nivel: str = "val_propio") -> pd.DataFrame:
     """Calibra cada fold con el conjunto que permita `modo` y devuelve TEST calibrado."""
-    etiq_niv = "forma+nivel" if aplicar_nivel else "SOLO FORMA"
+    etiq_niv = f"nivel={fuente_nivel}" if aplicar_nivel else "SIN NIVEL"
     print("\n" + "=" * 78)
     print(f"MODO '{modo}' · {etiq_niv}  —  "
           + ("solo folds anteriores (desplegable)" if modo == "causal"
@@ -324,25 +400,27 @@ def _corrida(val: pd.DataFrame, test: pd.DataFrame, modo: str,
     salida, tablas = [], {}
     for f in folds:
         if modo == "causal":
-            cal = val[val["fold"] < f]
+            # mismo criterio que el nivel: resultado conocido antes de empezar
+            corte_f = test.loc[test["fold"] == f, "fecha_th"].min()
+            cal = val[val["fecha_th"] < corte_f]
         else:
             cal = val[val["fold"] != f]
-        propio = val[val["fold"] == f]
-        sub    = test[test["fold"] == f]
-        if len(cal) == 0 or len(propio) == 0:
+        fuentes, etiq = _fuentes_nivel(val, test, f, fuente_nivel)
+        sub = test[test["fold"] == f]
+        if len(cal) == 0 or (aplicar_nivel and not fuentes):
             print(f"\n  Fold {f}: sin conjunto de calibración — se deja sin calibrar")
             salida.append(sub)
             continue
         log: list = []
-        fac = estimar_factores(cal, propio, log, aplicar_nivel)
+        fac = estimar_factores(cal, fuentes, log, aplicar_nivel)
         tablas[int(f)] = {str(k): v for k, v in fac.items()}
-        n_forma = cal["fecha_th"].nunique()
+        _k = fac[0.05].get("__marg__") or list(fac[0.05].values())[3]
         print(f"\n  Fold {f}: forma con {cal['fold'].nunique()} fold(s), "
-              f"{n_forma} fechas | nivel con {propio['fecha_th'].nunique()} fechas")
-        for l in log[:4]:
+              f"{cal['fecha_th'].nunique()} fechas | nivel de {etiq}")
+        for l in log[:3]:
             print(l)
-        if len(log) > 4:
-            print(f"    (+{len(log)-4} categorías más sin forma)")
+        if len(log) > 3:
+            print(f"    (+{len(log)-3} categorías más sin forma)")
         salida.append(aplicar(sub, fac))
     return pd.concat(salida, ignore_index=True), tablas
 
@@ -366,25 +444,33 @@ def main() -> None:
     print(f"      {int(test['pos'].isna().sum()):,} filas de TEST sin categoría "
           f"(meses truncados) — se dejan sin calibrar")
 
-    # Guardia dura de leakage: en modo causal ninguna fecha de calibración
-    # puede caer dentro o después del TEST que se calibra.
+    # Guardia dura de leakage: en modo causal ninguna fecha usada para calibrar
+    # puede caer dentro o después del TEST que se calibra. Se verifican las DOS
+    # fuentes: el VAL que alimenta la forma y el TEST previo que alimenta el
+    # nivel. La segunda es la delicada — usar TEST de otros folds es correcto
+    # solo mientras sean anteriores.
     for f in sorted(test["fold"].unique()):
-        cal = val[val["fold"] < f]
         sub = test[test["fold"] == f]
-        if len(cal) and cal["fecha_th"].max() >= sub["fecha_th"].min():
-            raise AssertionError(
-                f"LEAKAGE fold {f}: calibración llega a "
-                f"{cal['fecha_th'].max():%Y-%m-%d} y TEST empieza en "
-                f"{sub['fecha_th'].min():%Y-%m-%d}"
-            )
+        corte = sub["fecha_th"].min()
+        fuentes = {
+            "forma (VAL con resultado previo)" : val[val["fecha_th"] < corte],
+            "nivel (TEST con resultado previo)": test[test["fecha_th"] < corte],
+        }
+        for nombre, cal in fuentes.items():
+            if len(cal) and cal["fecha_th"].max() >= sub["fecha_th"].min():
+                raise AssertionError(
+                    f"LEAKAGE fold {f} en {nombre}: la calibración llega a "
+                    f"{cal['fecha_th'].max():%Y-%m-%d} y TEST empieza en "
+                    f"{sub['fecha_th'].min():%Y-%m-%d}"
+                )
     print("      [ok] guardia de leakage: ninguna fecha de calibración causal "
           "alcanza el TEST que calibra")
 
     resumen, todas_tablas = [_resumen(test, "SIN CALIBRAR")], {}
-    for aplicar_nivel in MODOS_NIVEL:
-      _niv = "forma+nivel" if aplicar_nivel else "solo forma"
+    for aplicar_nivel, fuente in VARIANTES_NIVEL:
+      _niv = f"nivel {fuente}" if aplicar_nivel else "solo forma"
       for modo in ("causal", "lofo"):
-        cal, tablas = _corrida(val, test, modo, aplicar_nivel)
+        cal, tablas = _corrida(val, test, modo, aplicar_nivel, fuente)
         todas_tablas[f"{modo}_{_niv}"] = tablas
         resumen.append(_resumen(cal, f"{modo} · {_niv}"))
 
@@ -406,7 +492,7 @@ def main() -> None:
 
         if GUARDAR:
             DIR_CALIB.mkdir(parents=True, exist_ok=True)
-            _sfx = "nivel" if aplicar_nivel else "soloforma"
+            _sfx = fuente if aplicar_nivel else "soloforma"
             cal.to_parquet(
                 DIR_CALIB / f"preds_mondrian_{modo}_{_sfx}_{BANCO}.parquet",
                 index=False)
