@@ -43,12 +43,21 @@ if RUTA_FFMPEG and os.path.isdir(RUTA_FFMPEG):
 
 from datetime import datetime
 from pathlib import Path
+import gc
 import logging
 import shutil
 import subprocess
 import tempfile
 import numpy as np
 import pandas as pd
+import matplotlib
+# Agg ANTES de importar pyplot: corre desde Spyder/runfile, cuyo backend por
+# defecto (Qt/Tk) registra cada figura en el panel de Plots aunque el script
+# la cierre con plt.close(fig) — esa copia extra es lo que va acumulando
+# memoria a lo largo de cientos de PNG hasta que RendererAgg no consigue el
+# buffer contiguo que necesita ("Out of memory"). Agg es puramente headless:
+# no hay panel que capture nada, savefig() es la única salida.
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 from pandas.tseries.holiday import (
@@ -346,62 +355,71 @@ def graficar(res: pd.DataFrame, fecha_origen: pd.Timestamp, banco: str,
 
     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(16, 16), sharex=True,
                                          gridspec_kw={"hspace": 0.08})
+    # try/finally: si algo revienta a mitad de dibujo (o savefig() se queda
+    # sin memoria para el buffer de RendererAgg), fig NO debe quedar sin
+    # cerrar. Antes, la excepción se escapaba directo al try/except del
+    # bucle principal y saltaba el plt.close(fig) de más abajo — esa fig
+    # quedaba viva en el registro interno de pyplot para siempre, y cada
+    # fallo dejaba más memoria retenida que hacía más probable el próximo
+    # fallo (el patrón de rachas de "omitida" que se ve en el log).
+    try:
+        # Panel 1: bandas + realizado
+        _dibujar_bandas(ax1, hs, res)
+        if mask_real.any():
+            ax1.plot(hs[mask_real], realizado[mask_real],
+                     color="black", lw=2, label="Realizado (D−R)", zorder=6)
+            ax1.scatter(hs[mask_real], realizado[mask_real], color="black", s=18, zorder=7)
+        if h_max_real > 0:
+            ax1.axvline(h_max_real, color="red", lw=1.2, ls="--", alpha=0.7,
+                        label=f"Último dato realizado (h={h_max_real})")
+        ax1.set_ylabel("Flujo neto D−R (MM USD)", fontsize=11)
+        ax1.set_title(titulo, fontweight="bold", fontsize=11)
+        ax1.legend(loc="upper right", fontsize=9, framealpha=0.9)
 
-    # Panel 1: bandas + realizado
-    _dibujar_bandas(ax1, hs, res)
-    if mask_real.any():
-        ax1.plot(hs[mask_real], realizado[mask_real],
-                 color="black", lw=2, label="Realizado (D−R)", zorder=6)
-        ax1.scatter(hs[mask_real], realizado[mask_real], color="black", s=18, zorder=7)
-    if h_max_real > 0:
-        ax1.axvline(h_max_real, color="red", lw=1.2, ls="--", alpha=0.7,
-                    label=f"Último dato realizado (h={h_max_real})")
-    ax1.set_ylabel("Flujo neto D−R (MM USD)", fontsize=11)
-    ax1.set_title(titulo, fontweight="bold", fontsize=11)
-    ax1.legend(loc="upper right", fontsize=9, framealpha=0.9)
+        # Panel 2: solo modelo
+        _dibujar_bandas(ax2, hs, res)
+        if h_max_real > 0:
+            ax2.axvline(h_max_real, color="red", lw=1.2, ls="--", alpha=0.7,
+                        label=f"Último dato realizado (h={h_max_real})")
+        ax2.set_ylabel("Flujo neto D−R (MM USD)", fontsize=11)
+        ax2.set_title("Solo proyección del modelo — mediana visible", fontsize=10, style="italic")
+        ax2.legend(loc="upper right", fontsize=9, framealpha=0.9)
 
-    # Panel 2: solo modelo
-    _dibujar_bandas(ax2, hs, res)
-    if h_max_real > 0:
-        ax2.axvline(h_max_real, color="red", lw=1.2, ls="--", alpha=0.7,
-                    label=f"Último dato realizado (h={h_max_real})")
-    ax2.set_ylabel("Flujo neto D−R (MM USD)", fontsize=11)
-    ax2.set_title("Solo proyección del modelo — mediana visible", fontsize=10, style="italic")
-    ax2.legend(loc="upper right", fontsize=9, framealpha=0.9)
+        # Panel 3: acumulado — solo Q40-Q60 + mediana
+        if cum_q40 is not None and cum_q60 is not None:
+            ax3.fill_between(hs, cum_q40, cum_q60, alpha=0.45, color=COLOR_BANDA,
+                             label="Q40–Q60 acum. (20%)")
+        ax3.plot(hs, cum_q50, color="steelblue", lw=2.0,
+                 label="Mediana acumulada (Q50)", zorder=5)
+        if mask_real.any():
+            ax3.plot(hs[mask_real], cum_real[mask_real],
+                     color="black", lw=2, label="Realizado acumulado", zorder=6)
+            ax3.scatter(hs[mask_real], cum_real[mask_real], color="black", s=18, zorder=7)
+        if h_max_real > 0:
+            ax3.axvline(h_max_real, color="red", lw=1.2, ls="--", alpha=0.7,
+                        label=f"Último dato realizado (h={h_max_real})")
+        ax3.axhline(0, color="black", lw=0.7, ls="--", alpha=0.35)
+        ax3.set_xlabel("Horizonte h (días hábiles desde t)", fontsize=11)
+        ax3.set_ylabel("Flujo neto acumulado (MM USD)", fontsize=11)
+        ax3.set_title("Flujo neto acumulado D−R desde la fecha de origen",
+                      fontsize=10, style="italic")
+        ax3.legend(loc="upper left", fontsize=9, framealpha=0.9)
+        ax3.grid(True, alpha=0.25)
+        ax3.xaxis.set_major_locator(mticker.MultipleLocator(10))
+        ax3.set_xlim(hs.min() - 1, hs.max() + 1)
 
-    # Panel 3: acumulado — solo Q40-Q60 + mediana
-    if cum_q40 is not None and cum_q60 is not None:
-        ax3.fill_between(hs, cum_q40, cum_q60, alpha=0.45, color=COLOR_BANDA,
-                         label="Q40–Q60 acum. (20%)")
-    ax3.plot(hs, cum_q50, color="steelblue", lw=2.0,
-             label="Mediana acumulada (Q50)", zorder=5)
-    if mask_real.any():
-        ax3.plot(hs[mask_real], cum_real[mask_real],
-                 color="black", lw=2, label="Realizado acumulado", zorder=6)
-        ax3.scatter(hs[mask_real], cum_real[mask_real], color="black", s=18, zorder=7)
-    if h_max_real > 0:
-        ax3.axvline(h_max_real, color="red", lw=1.2, ls="--", alpha=0.7,
-                    label=f"Último dato realizado (h={h_max_real})")
-    ax3.axhline(0, color="black", lw=0.7, ls="--", alpha=0.35)
-    ax3.set_xlabel("Horizonte h (días hábiles desde t)", fontsize=11)
-    ax3.set_ylabel("Flujo neto acumulado (MM USD)", fontsize=11)
-    ax3.set_title("Flujo neto acumulado D−R desde la fecha de origen",
-                  fontsize=10, style="italic")
-    ax3.legend(loc="upper left", fontsize=9, framealpha=0.9)
-    ax3.grid(True, alpha=0.25)
-    ax3.xaxis.set_major_locator(mticker.MultipleLocator(10))
-    ax3.set_xlim(hs.min() - 1, hs.max() + 1)
+        # Ejes Y fijos: imprescindible para el video, útil para comparar PNGs entre sí
+        if ylims:
+            for ax, yl in zip((ax1, ax2, ax3), ylims):
+                if yl:
+                    ax.set_ylim(*yl)
 
-    # Ejes Y fijos: imprescindible para el video, útil para comparar PNGs entre sí
-    if ylims:
-        for ax, yl in zip((ax1, ax2, ax3), ylims):
-            if yl:
-                ax.set_ylim(*yl)
+        nombre = f"fanchart_cv4_{banco}_f{fold_num}_{fecha_origen.strftime('%Y%m%d')}.png"
+        ruta_png = Path(dir_out or DIR_OUTPUT) / nombre
+        plt.savefig(ruta_png, dpi=150, bbox_inches="tight")
+    finally:
+        plt.close(fig)
 
-    nombre = f"fanchart_cv4_{banco}_f{fold_num}_{fecha_origen.strftime('%Y%m%d')}.png"
-    ruta_png = Path(dir_out or DIR_OUTPUT) / nombre
-    plt.savefig(ruta_png, dpi=150, bbox_inches="tight")
-    plt.close(fig)
     print(f"  [{idx}/{total}] {nombre}")
     return ruta_png
 
@@ -672,6 +690,16 @@ if __name__ == "__main__":
                 pngs_por_fold.setdefault(fold_num, []).append(ruta_png)
             except Exception as e:
                 print(f"  [{i}/{total}] {fecha.date()} omitida: {e}")
+
+            # gc.collect() cada 25 figuras: el objeto Figure ya se cierra en
+            # graficar() (try/finally), pero el recolector de Python no
+            # necesariamente libera el buffer C de Agg de inmediato — en una
+            # corrida de cientos de figuras esa demora es lo que fragmenta
+            # el heap del proceso hasta que un buffer contiguo grande ya no
+            # entra. Forzarlo cada cierto número de iteraciones es más barato
+            # que dejar que se acumule.
+            if i % 25 == 0:
+                gc.collect()
 
         if FOTOS_DIARIAS:
             print(f"\n[OK] {len(pngs)} gráficos guardados en: {DIR_OUTPUT}")
