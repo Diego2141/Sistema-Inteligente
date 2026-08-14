@@ -151,9 +151,19 @@ FEATURES_EXCLUIR = [
     # el bucle "for l in todos_lags" (línea 1389), vía f"R_t-{l}"— y por eso
     # aparecían en el heatmap de SHAP aunque una búsqueda por el texto literal
     # "R_t-1" no los encontrara en el código.
-    #"R_conf_t1",
+    "R_conf_t1",
+    # R_conf_t2 NO se excluye — a propósito, aunque su SHAP en el heatmap sea
+    # bajo. Es insumo ESTRUCTURAL de DESCOMPONER_H2 en step005 (línea ~2306):
+    # el target de h=2 se redefine a D(t+2) y R_conf_t2 se resta después de
+    # predecir para reconstruir el target real. step005 lo lee de
+    # X_train["R_conf_t2"] — si esta columna faltara en la matriz, la
+    # descomposición se desactivaría en silencio (log.warning, no error) y
+    # h=2 perdería la ventaja de usar el retiro confirmado por la banca 2
+    # días antes. Su baja SHAP es la firma de que el mecanismo funciona bien
+    # -no necesita que el árbol la use como split, la resta es exacta y
+    # ocurre fuera del modelo-, no evidencia de que sobre.
     #"R_conf_t2",
-    #"D_conf_t1",
+    "D_conf_t1",
     #"ma_flujo_5d",
     #"ma_flujo_20d",
     "flujo_neto_acum_mes",
