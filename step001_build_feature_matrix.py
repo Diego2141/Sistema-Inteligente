@@ -2586,6 +2586,54 @@ def build_feature_matrix(
                     f"{df['frec_flujo_pos'].notna().mean():.1%} "
                     f"({len(LAGS_FRECUENCIA_MES)} rezagos)")
 
+        # ── Rezagos anclados a la APERTURA del mes (referencia="inicio") ────
+        # Todo lo de arriba está anclado al CIERRE: encuentra, en los meses
+        # previos, el día a la misma distancia del ÚLTIMO día hábil. Bueno
+        # para la cola baja —ahí es donde ata la restricción de encaje— pero
+        # ciego a la reversión que se observó al abrir el mes (depósito fuerte
+        # seguido de retiro fuerte unos días después): esa señal vive a la
+        # misma distancia del PRIMER día hábil, no del último, y con meses de
+        # 19-23 días esas dos distancias no son la misma posición calendario.
+        #
+        # Ya hay evidencia de que el desdoblamiento importa: en
+        # aux_importancia_calendario.py, dias_al_cierre_mes (crudo) domina
+        # q01/q05 mientras dias_desde_cierre_mes (crudo) domina q95/q99 —
+        # mismo mecanismo, medido a nivel de los features de calendario. Esto
+        # lo extiende a la familia *_pos, que hasta ahora solo usa el ancla de
+        # cierre para las 7 columnas activas.
+        #
+        # Solo 2 columnas, no las 7: la reversión es sobre DEPÓSITOS —D y
+        # D-R—, no sobre retiros (que se concentran al cierre por diseño del
+        # encaje, no al abrir) ni sobre el acumulado (que al abrir el mes es
+        # chico casi por definición, con poca varianza que aprovechar). Se
+        # mantiene acotado por el mismo motivo que la corrida de
+        # capacidad_retiro_th se sintió lenta: cada columna nueva es más
+        # trabajo de importancia por permutación en step005.
+        #
+        # referencia="inicio" nunca se había ejercido en producción (todas las
+        # anclas en ANCLA_POSICION_MES son "cierre"); el recorte por longitud
+        # de mes (dcm_max_mes) es agnóstico al ancla, así que la cobertura por
+        # h debería ser idéntica a la de esc_deposito_pos/esc_neto_max_pos —
+        # se audita en el log de abajo para confirmarlo, no se asume.
+        for _nom, _ser in (("flujo", _serie_flujo), ("deposito", _serie_dep)):
+            _mx_ap, _, _mx_s_ap, _n_ap = _build_lag_posicion_mes(
+                _ser, df["fecha_th"], df["fecha_t"], LAGS_POSICION_MES, peru_bday,
+                referencia="inicio",
+            )
+            if _nom == "flujo":
+                # Solo el extremo POSITIVO: el ancla de apertura apunta a la
+                # cola alta a propósito. El extremo negativo cerca de la
+                # apertura ya lo cubre esc_neto_min_pos (cierre) razonablemente
+                # — agregar la contraparte sin evidencia sería el mismo exceso
+                # de columnas que se quiere evitar.
+                df["esc_neto_max_pos_ap"] = _mx_s_ap.values
+                _n_lags_ap = _n_ap.values
+            else:
+                df["esc_deposito_pos_ap"] = _mx_ap.values
+        _cob_ap = df["esc_deposito_pos_ap"].notna().mean()
+        logger.info(f"    Rezagos ancla apertura: cobertura {_cob_ap:.1%} "
+                    f"(esperado ≈ cobertura de esc_deposito_pos arriba)")
+
         if GUARDAR_N_LAGS_POS:
             df["n_lags_pos"] = _n_lags
     else:
@@ -2596,6 +2644,8 @@ def build_feature_matrix(
         df["frec_flujo_pos"]   = np.nan
         df["acum_neto_min_pos"] = np.nan
         df["acum_neto_max_pos"] = np.nan
+        df["esc_neto_max_pos_ap"]  = np.nan
+        df["esc_deposito_pos_ap"]  = np.nan
         if GUARDAR_N_LAGS_POS:
             df["n_lags_pos"] = 0
 
@@ -3308,6 +3358,22 @@ def build_data_dictionary(params):
         "encontró la peor calibración (factor de ensanchamiento necesario hasta "
         "3.1x). No es redundante con las otras dos: el estadístico es un máximo de "
         "valores absolutos y max|D-R| no se deduce de max|D| y max|R|.", None, "t+h")
+    add("esc_neto_max_pos_ap", "Datos bancarios / Posición del mes",
+        "Igual que esc_neto_max_pos pero con referencia='inicio': busca el día "
+        "en meses previos a la MISMA distancia del PRIMER día hábil del mes, no "
+        "del último. Apunta a la reversión observada al abrir el mes (depósito "
+        "fuerte seguido de retiro fuerte días después) — el ancla de cierre es "
+        "ciega a esto porque con meses de 19-23 días hábiles, 'días desde el "
+        "inicio' y 'días hasta el cierre' no son la misma posición calendario. "
+        "Solo el extremo positivo: el negativo cerca de la apertura ya lo cubre "
+        "esc_neto_min_pos razonablemente.", None, "t+h")
+    add("esc_deposito_pos_ap", "Datos bancarios / Posición del mes",
+        "Igual que esc_deposito_pos pero con referencia='inicio'. Motivado por "
+        "aux_importancia_calendario.py: dias_desde_cierre_mes (crudo, mismo "
+        "principio de anclar a la apertura) domina la importancia de q95/q99, "
+        "mientras dias_al_cierre_mes domina q01/q05 — la familia *_pos hasta "
+        "ahora solo usaba el ancla de cierre para las 7 columnas activas.",
+        None, "t+h")
     if GUARDAR_N_LAGS_POS:
         add("n_lags_pos", "Datos bancarios / Posición del mes",
             "Cuántos rezagos de posición estaban disponibles (0-4). Diagnóstico: "
