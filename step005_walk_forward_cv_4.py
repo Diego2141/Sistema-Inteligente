@@ -1700,7 +1700,14 @@ def guardar_diag_y_plots(
             ax.set_yticklabels(orden_feat, fontsize=8)
             ax.invert_yaxis()
             ax.axvline(0, color="black", lw=0.6)
-            ax.set_xlabel("Importancia normalizada (cada señal / su propio máximo en este τ)")
+            # symlog en vez de lineal: en q01/q99 un solo feature (típicamente
+            # dias_al_cierre_mes) satura su señal casi todo el heatmap de
+            # arriba, así que normalizado a su propio máximo deja al resto de
+            # los 25 como líneas casi invisibles pegadas a 0 en escala lineal.
+            # symlog comprime esa cola dominante y mantiene el signo de perm
+            # (puede ser negativo) sin romperse en 0, a diferencia de log.
+            ax.set_xscale("symlog", linthresh=0.02)
+            ax.set_xlabel("Importancia normalizada (cada señal / su propio máximo en este τ) — escala symlog")
             ax.set_title(
                 f"gain / perm / SHAP — {banco} · τ={ta}  "
                 f"(agregado sobre folds y horizontes h)\n"
@@ -1708,7 +1715,7 @@ def guardar_diag_y_plots(
                 fontsize=11, fontweight="bold",
             )
             ax.legend(loc="lower right", fontsize=9)
-            ax.grid(True, axis="x", alpha=0.25)
+            ax.grid(True, axis="x", which="both", alpha=0.25)
             plt.tight_layout()
             ruta = dir_diag / f"convergencia_{ta}.png"
             fig.savefig(ruta, dpi=DIAG_PLOT_DPI)
