@@ -121,16 +121,18 @@ FEATURES_EXCLUIR = [
     # ── Azul: reemplazadas por transformación sin/cos o ratio ────────────────
     "sigma_flujo_5d", "sigma_flujo_20d",              # → sigma_flujo_ratio
     "tc_vol_5d", "tc_vol_22d",                        # → tc_vol_ratio
-    # dias_al_cierre_mes y dias_desde_cierre_mes NO se excluyen: conviven en
-    # crudo con su forma sin/cos. El diagnóstico de posición en el mes
-    # (aux_diagnostico_ventana_mala.py, sección F) mostró que los 5 días de
-    # borde concentran el 116% del déficit de cobertura, mientras el resto del
-    # mes cubre 91.9%. El fold 1 sobre-cubre en los días -3 y -2 (99.8%) y
-    # colapsa en el último (28.5%): sin/cos es suave y desparrama el
-    # ensanchamiento sobre una ventana en vez de concentrarlo en el día. El
-    # entero permite un solo split en dcm<=1. is_cierre_encaje es la binaria
-    # equivalente: agrupa los dos últimos días hábiles, que es el bloque más
-    # chico que los modelos de cola pueden aislar sin violar min_child_weight.
+    # dias_al_cierre_mes y dias_desde_cierre_mes NO se excluyen: son el reloj
+    # hábil crudo, con el split entero (dcm<=1) que el diagnóstico de
+    # posición en el mes (aux_diagnostico_ventana_mala.py, sección F) mostró
+    # necesario — los 5 días de borde concentraban el 116% del déficit de
+    # cobertura. is_cierre_encaje es la binaria equivalente: agrupa los dos
+    # últimos días hábiles, el bloque más chico que los modelos de cola
+    # pueden aislar sin violar min_child_weight.
+    # Su forma sin/cos (dias_al_cierre_mes_sin/cos) y dias_cal_al_cierre_mes
+    # SÍ se excluyen (sección 8 abajo): la convivencia con la forma cruda se
+    # dio por deliberada en su momento, pero gain/perm/SHAP de las corridas
+    # recientes muestran que le quitan aporte al crudo en vez de sumar señal
+    # propia — ver el detalle en la sección 8.
     "is_penult_bday_trim", "is_ultimo_bday_trim",     # → dias_al_cierre_trim_sin/cos
     "is_1er_bday_trim", "is_2do_bday_trim", "is_3er_bday_trim",
     "dia_semana",                                     # → dias_sem_sin/cos
@@ -211,20 +213,31 @@ FEATURES_EXCLUIR = [
     "es_post_feriado","is_pre_feriado",
 
 # 7. Estacionalidad general
-    #"mes_sin", "mes_cos",
-    #"dias_sem_sin", "dias_sem_cos",
+    # mes_sin/cos y dias_sem_sin/cos se excluyen esta sesión: sin gain, perm
+    # ni SHAP consistentes en las corridas recientes — a diferencia de los
+    # ejes de proximidad a cierre (mes/trim/año), no tenían ya evidencia
+    # fuerte a favor, así que se sacan directo sin necesitar el paso
+    # intermedio de "coexiste con la cruda" que sí se probó para esos otros.
+    "mes_sin", "mes_cos",
+    "dias_sem_sin", "dias_sem_cos",
 
 # 8. Proximidad a cierres institucionales
-    #"dias_al_cierre_mes_sin", "dias_al_cierre_mes_cos",
+    # dias_al_cierre_mes_sin/cos y dias_cal_al_cierre_mes se excluyen esta
+    # sesión: revierte la decisión de la sesión anterior, que las había
+    # dejado activas por la evidencia de aux_diagnostico_ventana_mala.py
+    # (sección F). Esa evidencia comparaba sin/cos contra NO tener nada —
+    # no contra dias_al_cierre_mes (el crudo hábil, que sigue activo y sin
+    # tocar). Con ambas formas conviviendo, gain/perm/SHAP muestran que
+    # dias_al_cierre_mes_sin/cos y dias_cal_al_cierre_mes le quitan aporte a
+    # dias_al_cierre_mes en vez de sumar señal propia — la redundancia que
+    # se daba por deliberada no se sostuvo para el eje de mes con datos.
+    "dias_al_cierre_mes_sin", "dias_al_cierre_mes_cos",
+    "dias_cal_al_cierre_mes",
     # dias_al_cierre_trim_sin/cos y dias_al_cierre_anio_sin/cos se excluyen
     # esta sesión: el heatmap de importancia por permutación (Δloss relativo,
     # folds 1-4) muestra su forma cruda (dias_al_cierre_trim, dias_al_cierre_anio)
     # con bandas de alto impacto consistentes en todo el horizonte, mientras
-    # que sus pares sin/cos apenas se distinguen del ruido de fondo — a
-    # diferencia de dias_al_cierre_mes_sin/cos, cuya coexistencia con la forma
-    # cruda sigue justificada (ver hallazgo "redundancia deliberada"). La
-    # hipótesis de la sesión 2026-08-13 (single split cíclico vs. varios) no
-    # se sostuvo para trimestre/año con datos: se prueba dejar solo la cruda.
+    # que sus pares sin/cos apenas se distinguen del ruido de fondo.
     "dias_al_cierre_trim_sin", "dias_al_cierre_trim_cos",
     "dias_al_cierre_anio_sin", "dias_al_cierre_anio_cos",
 
