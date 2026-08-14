@@ -1996,6 +1996,15 @@ LAGS_POSICION_MES = [1, 2, 3, 4]
 # FEATURES_EXCLUIR.
 GUARDAR_N_LAGS_POS = False
 
+# Resguardo de frescura para capacidad_retiro_th: por encima de este número de
+# días calendario entre fecha_t y la fecha REPORTADA del último dato de
+# bbva_encaje.xlsx, merge_asof(backward) estaría proyectando desde un insumo
+# obsoleto en vez de "ayer". 10 deja margen sobre un fin de semana largo
+# (3-4 días) sin penalizar la operación normal, pero corta antes de que un mes
+# sin refrescar el Excel contamine la matriz con valores congelados en
+# silencio — ver el bloque 8c de build_feature_matrix().
+UMBRAL_STALENESS_ENCAJE_DIAS = 10
+
 # Rezagos y ventana del umbral para el feature de RECURRENCIA. Son 12 y no 4
 # porque el estadístico es una proporción y necesita denominador; además con
 # k hasta 12 la máscara h <= 21k cubre los 74 horizontes.
@@ -2636,6 +2645,12 @@ def build_feature_matrix(
 
         _feat_r = bbva_encaje_feat[["fecha"] + _bbva_feat_cols].copy()
         _feat_r["fecha"] = pd.to_datetime(_feat_r["fecha"]).dt.normalize()
+        # Se conserva la fecha REPORTADA antes de renombrarla a fecha_t (la
+        # clave del join): merge_asof(backward) no distingue "encontré un
+        # dato de ayer" de "encontré el único dato disponible, de hace 18
+        # días" — sin esta columna, capacidad_retiro_th no puede detectar
+        # cuándo está proyectando desde un insumo obsoleto (ver 8c).
+        _feat_r["_fecha_reportada"] = _feat_r["fecha"]
         _feat_r = _feat_r.rename(columns={"fecha": "fecha_t"}) \
                           .sort_values("fecha_t")
 
@@ -2648,6 +2663,9 @@ def build_feature_matrix(
 
         for col in _bbva_feat_cols:
             df[col] = _ft_norm.map(_lookup[col]).values
+        # Insumo interno para el resguardo de frescura de 8c; no es feature,
+        # se descarta junto con el resto de insumos de proyección.
+        df["_fecha_reportada_bbva"] = _ft_norm.map(_lookup["_fecha_reportada"]).values
 
         n_ok = df["avance_mes_lag1"].notna().sum()
         logger.info(f"  {banco}: bbva_encaje_feat incorporadas — "
@@ -2715,22 +2733,40 @@ def build_feature_matrix(
                 np.maximum(0.0, df["encaje_diario_lag1"] - _min_por_dia_th)
                 + _overnight_lag1
             )
-            df["capacidad_retiro_th"] = _capacidad.where(_mismo_periodo)
+            # RESGUARDO DE FRESCURA: merge_asof(backward) no distingue "el dato
+            # más reciente es de ayer" de "el más reciente disponible es de
+            # hace 18 días porque el archivo no se actualizó". Sin esto, toda
+            # fecha_t posterior al último dato de bbva_encaje.xlsx recibe LOS
+            # MISMOS insumos congelados, y como la fórmula tiene dos MAX(0,·)
+            # que saturan, produce el mismo número exacto para cientos de
+            # filas — confirmado empíricamente: tras el corte del archivo, un
+            # solo valor (2,596,363,008) cubrió 1,320 filas en 11 fecha_t
+            # consecutivas (aux_diagnostico_capacidad_retiro.py, sesión
+            # 2026-08-13). UMBRAL_STALENESS_ENCAJE_DIAS=10 dista un poco de un
+            # fin de semana largo (3-4 días) para no penalizar la operación
+            # normal, pero corta antes de que un mes sin actualizar el Excel
+            # contamine la matriz en silencio.
+            _dias_stale = (_ft_norm - pd.to_datetime(df["_fecha_reportada_bbva"])).dt.days
+            _fresco = _dias_stale <= UMBRAL_STALENESS_ENCAJE_DIAS
+            df["capacidad_retiro_th"] = _capacidad.where(_mismo_periodo & _fresco)
 
             _cob = df["capacidad_retiro_th"].notna().mean()
             _sin_dato = df["encaje_diario_lag1"].isna().mean()
+            _n_stale = int((_mismo_periodo & ~_fresco).sum())
             logger.info(
                 f"  {banco}: capacidad_retiro_th — cobertura {_cob:.1%} "
                 f"| fuera del período {(~_mismo_periodo).mean():.1%} (NaN, "
                 f"no proyectable sin datos del mes siguiente) "
-                f"| sin dato de encaje {_sin_dato:.1%}"
+                f"| sin dato de encaje {_sin_dato:.1%} "
+                f"| descartadas por dato obsoleto (>{UMBRAL_STALENESS_ENCAJE_DIAS}d): "
+                f"{_n_stale:,} filas"
             )
         # Insumos de proyección, no features: se descartan tras usarlos.
         # encaje_diario_lag1 y encaje_ovn_lag1 quedan también fuera —el
         # segundo ya estaba excluido antes de esta sesión— porque lo que
         # aportan a la matriz es capacidad_retiro_th, ya calculada.
         df = df.drop(columns=["ExigibleTotalMes_est_lag1", "EncajeAcumMes_lag1",
-                              "encaje_diario_lag1"],
+                              "encaje_diario_lag1", "_fecha_reportada_bbva"],
                      errors="ignore")
 
     # Si no hubo archivo de encaje, o le faltaban las columnas necesarias, la
