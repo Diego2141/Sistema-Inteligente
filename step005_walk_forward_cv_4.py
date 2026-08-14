@@ -1519,11 +1519,29 @@ def guardar_diag_y_plots(
 
     n_generados = 0
 
+    # {señal: {τ: serie feature→valor}} — insumo del gráfico de barras de
+    # convergencia (más abajo, tras el bucle). Se llena señal por señal
+    # abajo, colapsando fold Y h para volver a un solo número por feature,
+    # como en el chart de una única cifra por feature de la arquitectura
+    # anterior (un modelo por banco, no uno por fold×h×τ).
+    agregados: dict[str, dict[str, pd.Series]] = {}
+
     for senal, etiqueta, cmap, divergente in SENALES:
         feat_cols = [c for c in df_d.columns if c.startswith(f"{senal}_")]
         if not feat_cols:
             continue
         rename = {c: c[len(senal) + 1:] for c in feat_cols}
+
+        agregados[senal] = {}
+        for ta in taus:
+            sub_ta = df_d.loc[df_d["tau"] == ta, feat_cols].rename(columns=rename)
+            if sub_ta.empty:
+                continue
+            serie = sub_ta.mean(axis=0)
+            serie = _consolidar_sincos_pivot(
+                serie.to_frame("v"), _sincos_pairs(list(serie.index))
+            )["v"]
+            agregados[senal][ta] = serie
 
         # ── Escala de color: FIJA por señal, sobre TODAS las taus y folds —
         # esto sí conviene mantenerlo compartido: deja comparar a simple
@@ -1638,6 +1656,66 @@ def guardar_diag_y_plots(
             n_generados += 1
 
         del pivots, pv_global        # (features × h) por cada (fold, τ)
+        plt.close("all")
+        gc.collect()
+
+    # ── Barras de convergencia gain/perm/SHAP, una figura por cuantil ────────
+    # Heredero directo del chart de la arquitectura anterior (un solo modelo
+    # por banco → una cifra de importancia por feature). Acá hay un modelo
+    # por (fold, h, τ), así que la única forma de volver a un chart 2D por
+    # feature es colapsar fold Y h — pero solo DENTRO de un mismo τ, nunca
+    # mezclando cuantiles, por la misma razón que se corrigió el orden de
+    # los heatmaps de arriba (τ distintos pesan features distintos).
+    _COLORES_CONV = {"gain": "#4C72B0", "perm": "#55A868", "shap": "#C44E52"}
+    _ETIQ_CONV = {"gain": "gain (TRAIN, in-sample)", "perm": "perm (VAL, OOS)",
+                  "shap": "SHAP |mean| (VAL, OOS)"}
+    TOP_N_CONV = 25
+
+    if all(s in agregados for s in ("gain", "perm", "shap")):
+        for ta in taus:
+            series_ta = {s: agregados[s][ta] for s in ("gain", "perm", "shap")
+                         if ta in agregados[s]}
+            if len(series_ta) < 3:
+                continue
+
+            # Orden: por |SHAP| descendente — el mismo árbitro final (OOS +
+            # atribución por instancia) que ya decide el orden de los
+            # heatmaps de arriba, para que ambos tipos de figura sean
+            # consistentes entre sí para un mismo τ.
+            orden_feat = (series_ta["shap"].abs()
+                          .sort_values(ascending=False).index.tolist()[:TOP_N_CONV])
+
+            fig, ax = plt.subplots(figsize=(11, max(6, len(orden_feat) * 0.32)))
+            y = np.arange(len(orden_feat))
+            alto = 0.26
+            for i, senal in enumerate(("gain", "perm", "shap")):
+                serie = series_ta[senal].reindex(orden_feat)
+                escala = float(serie.abs().max()) or 1.0
+                # (i - 1)*alto → -alto/0/+alto: centra las 3 barras alrededor
+                # de y, así el tick (en y) cae en medio del grupo, no pegado
+                # a la barra de gain.
+                ax.barh(y + (i - 1) * alto, (serie / escala).to_numpy(), height=alto,
+                        color=_COLORES_CONV[senal], label=_ETIQ_CONV[senal])
+            ax.set_yticks(y)
+            ax.set_yticklabels(orden_feat, fontsize=8)
+            ax.invert_yaxis()
+            ax.axvline(0, color="black", lw=0.6)
+            ax.set_xlabel("Importancia normalizada (cada señal / su propio máximo en este τ)")
+            ax.set_title(
+                f"gain / perm / SHAP — {banco} · τ={ta}  "
+                f"(agregado sobre folds y horizontes h)\n"
+                f"Convergencia gain≈perm≈SHAP → feature genuinamente útil en este cuantil",
+                fontsize=11, fontweight="bold",
+            )
+            ax.legend(loc="lower right", fontsize=9)
+            ax.grid(True, axis="x", alpha=0.25)
+            plt.tight_layout()
+            ruta = dir_diag / f"convergencia_{ta}.png"
+            fig.savefig(ruta, dpi=DIAG_PLOT_DPI)
+            plt.close(fig)
+            n_generados += 1
+
+        del agregados
         plt.close("all")
         gc.collect()
 
