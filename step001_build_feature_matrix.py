@@ -216,8 +216,17 @@ FEATURES_EXCLUIR = [
 
 # 8. Proximidad a cierres institucionales
     #"dias_al_cierre_mes_sin", "dias_al_cierre_mes_cos",
-    #"dias_al_cierre_trim_sin", "dias_al_cierre_trim_cos",
-    #"dias_al_cierre_anio_sin", "dias_al_cierre_anio_cos",
+    # dias_al_cierre_trim_sin/cos y dias_al_cierre_anio_sin/cos se excluyen
+    # esta sesión: el heatmap de importancia por permutación (Δloss relativo,
+    # folds 1-4) muestra su forma cruda (dias_al_cierre_trim, dias_al_cierre_anio)
+    # con bandas de alto impacto consistentes en todo el horizonte, mientras
+    # que sus pares sin/cos apenas se distinguen del ruido de fondo — a
+    # diferencia de dias_al_cierre_mes_sin/cos, cuya coexistencia con la forma
+    # cruda sigue justificada (ver hallazgo "redundancia deliberada"). La
+    # hipótesis de la sesión 2026-08-13 (single split cíclico vs. varios) no
+    # se sostuvo para trimestre/año con datos: se prueba dejar solo la cruda.
+    "dias_al_cierre_trim_sin", "dias_al_cierre_trim_cos",
+    "dias_al_cierre_anio_sin", "dias_al_cierre_anio_cos",
 
 # 9. Episodios extraordinarios
     "is_post_eleccion",
