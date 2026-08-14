@@ -41,7 +41,15 @@ import numpy as np
 import pandas as pd
 
 RUTA_MATRIZ = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Clean\matriz_features.parquet")
-RUTA_ENCAJE = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\2. Output\bbva_encaje_features_modelo.xlsx")
+# DIR_OUT en aux_encaje_2.py: RUTA.parent.parent.parent / "2. Output" / "encaje_bbva"
+RUTA_ENCAJE = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\2. Output\encaje_bbva\bbva_encaje_features_modelo.xlsx")
+
+# "0" es un piso legítimo de la fórmula (min_por_dia >= encaje Y overnight=0),
+# alcanzable por muchas combinaciones distintas de insumos — no diagnostica
+# staleness por sí solo. El síntoma real es un valor NO-CERO con demasiada
+# precisión decimal para repetirse por coincidencia (como el de la captura:
+# 2,596,363,008). Se analiza aparte del resto del ranking.
+N_TOP_ANALIZAR = 5   # cuántos valores no-cero se inspeccionan en la sección 2
 
 BINS_H   = [1, 5, 15, 30, 50, 75]
 LABELS_H = ["h02-05", "h06-15", "h16-30", "h31-50", "h51-75"]
@@ -69,18 +77,24 @@ def main() -> None:
     for val, n in vc.items():
         print(f"  {val:>18,.0f}  :  {n:>7,} filas  ({n/n_no_nulo:.1%} de los no-nulos)")
 
-    # ── 2) ¿Dónde vive el valor más repetido? ───────────────────────────────
-    if len(vc) > 0:
-        top_val = vc.index[0]
-        sub = df[df["capacidad_retiro_th"] == top_val]
-        print("\n" + "=" * 70)
-        print(f"2 — Rango de fecha_t que produce el valor más repetido ({top_val:,.0f})")
-        print("=" * 70)
-        print(f"  fecha_t: {sub['fecha_t'].min().date()} → {sub['fecha_t'].max().date()}")
-        print(f"  fecha_t distintas involucradas: {sub['fecha_t'].nunique():,}")
-        print(f"  Comparar este rango contra la fecha máxima del Excel de encaje (sección 3).")
-        print(f"  Si el mínimo de este rango coincide con esa fecha máxima (o cae poco después),")
-        print(f"  confirma que son fechas SIN dato fresco de encaje — insumos congelados.")
+    # ── 2) ¿Dónde viven los valores no-cero más repetidos? ──────────────────
+    # "0" se excluye a propósito: es un piso alcanzable por muchas
+    # combinaciones distintas de insumos y no diagnostica staleness por sí
+    # solo. Un valor NO-CERO con precisión decimal repitiéndose sí es
+    # improbable por coincidencia — esa es la señal real.
+    vc_nz = df.loc[df["capacidad_retiro_th"] != 0, "capacidad_retiro_th"] \
+              .value_counts().head(N_TOP_ANALIZAR)
+    print("\n" + "=" * 70)
+    print(f"2 — Rango de fecha_t de los {len(vc_nz)} valores NO-CERO más repetidos")
+    print("=" * 70)
+    print("  Un rango angosto y reciente (cerca del máximo fecha_t de la matriz)")
+    print("  confirma staleness. Un rango amplio y disperso en el tiempo sugiere")
+    print("  que es un valor que ocurre por razones legítimas y recurrentes.\n")
+    for val in vc_nz.index:
+        sub = df[df["capacidad_retiro_th"] == val]
+        n_fechas = sub["fecha_t"].nunique()
+        print(f"  {val:>18,.0f}  ({len(sub):>5,} filas, {n_fechas:>4} fecha_t distintas)")
+        print(f"      rango: {sub['fecha_t'].min().date()} → {sub['fecha_t'].max().date()}")
 
     # ── 3) Fecha máxima real del archivo de encaje ──────────────────────────
     print("\n" + "=" * 70)
