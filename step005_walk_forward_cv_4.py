@@ -2475,18 +2475,52 @@ def _run_interno(banco: str = BANCO) -> None:
                  "q01", "q05", "q40", "q50", "q60", "q95", "q99", "mean"]
 
     if fold_parquet_paths:
+        # Tolerante a fallos transitorios de lectura (drive de red, OneDrive
+        # "Files On-Demand", antivirus bloqueando el archivo un instante):
+        # un solo parquet no disponible ya NO tira las ~50 min de entrenamiento
+        # de los demás folds. Reintenta una vez con una pausa corta; si sigue
+        # fallando, se salta ese fold con una advertencia clara y se sigue con
+        # el resto — mejor una consolidación parcial que ninguna.
         chunks = []
+        faltantes = []
         for p in fold_parquet_paths:
-            chunk = pd.read_parquet(p)
-            extra = [c for c in chunk.columns if c not in col_order]
-            ordered = [c for c in col_order if c in chunk.columns] + extra
-            chunks.append(chunk[ordered])
-        df_all = pd.concat(chunks, ignore_index=True)
+            chunk = None
+            for intento in (1, 2):
+                try:
+                    chunk = pd.read_parquet(p)
+                    break
+                except (FileNotFoundError, OSError) as e:
+                    if intento == 1:
+                        log.warning("No se pudo leer %s (intento 1/2: %s) — "
+                                    "reintentando en 3s.", p.name, e)
+                        time.sleep(3)
+                    else:
+                        log.error("No se pudo leer %s tras 2 intentos (%s) — "
+                                  "se omite este fold de la consolidación. "
+                                  "El archivo por fold ya guardado en disco no "
+                                  "se pierde; puede reintentarse la lectura "
+                                  "aparte sin re-entrenar.", p.name, e)
+                        faltantes.append(p)
+            if chunk is not None:
+                extra = [c for c in chunk.columns if c not in col_order]
+                ordered = [c for c in col_order if c in chunk.columns] + extra
+                chunks.append(chunk[ordered])
 
-        ruta_preds = DIR_MODO / f"preds_base_{banco}_{fecha_hoy}.parquet"
-        df_all.to_parquet(ruta_preds, index=False)
-        print(f"\n✓ Guardado: {ruta_preds}  ({len(df_all):,} filas)")
-        print(f"  Columnas: {list(df_all.columns)}")
+        if not chunks:
+            print("\n⚠  Ningún parquet por fold pudo leerse — nada que consolidar.")
+            df_all = None
+        else:
+            if faltantes:
+                print(f"\n⚠  {len(faltantes)} archivo(s) por fold no se pudieron "
+                      f"leer y quedaron fuera de preds_base: "
+                      f"{[p.name for p in faltantes]}")
+            df_all = pd.concat(chunks, ignore_index=True)
+
+        if df_all is not None:
+            ruta_preds = DIR_MODO / f"preds_base_{banco}_{fecha_hoy}.parquet"
+            df_all.to_parquet(ruta_preds, index=False)
+            print(f"\n✓ Guardado: {ruta_preds}  ({len(df_all):,} filas)")
+            print(f"  Columnas: {list(df_all.columns)}")
         del df_all, chunks
         gc.collect()
     else:
