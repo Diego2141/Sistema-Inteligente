@@ -18,15 +18,34 @@ importancia (gain/perm/SHAP) — todo lo demás (RMSE, pinball por cuantil y
 promedio, coverage 90/98 TEST y VAL, Winkler, CRPS, calibración hit-rate,
 y las tablas por fold × grupo de horizonte) sale completo.
 
+Checklist de consistencia (Sección 0)
+--------------------------------------
+La primera corrida de este script encontró solo 1/4 folds (fold04) pese a
+que el log original mostraba los 4 guardándose bien. Antes de recalcular
+nada, este script ahora:
+  1. Lista el contenido CRUDO de la carpeta de salida (sin filtrar por
+     nombre esperado) — para detectar archivos renombrados por conflicto
+     de sincronización (OneDrive/red: "... (conflicted copy ...)", "~$...").
+  2. Busca preds_test/val_foldNN también en la carpeta hermana del otro
+     modo (fold_exp_arctan ↔ fold_roll_arctan) y en otras fechas — por si
+     el archivo existe pero AJUSTE_ARCTAN/EXPANDING o fecha_hoy no
+     coinciden con lo esperado.
+  3. Valida cada fold encontrado antes de usarlo: 74 horizontes únicos
+     (H_MIN..H_MAX), sin (fecha_t, h) duplicados, columna "fold" interna
+     coincide con el número en el nombre de archivo.
+  4. Si falta algún fold del rango 1..N_FOLDS_ESPERADOS, los archivos de
+     salida se nombran con sufijo "_PARCIAL_foldsX-Y" — nunca con el mismo
+     nombre que tendría la corrida completa — para que step006 u otro
+     script no puedan confundir un resultado parcial con uno completo.
+
 Uso
 ---
-Ajustar FECHA abajo (el sufijo YYYYMMDD de los archivos ya guardados) y
-ejecutar. Si algún preds_val_foldNN no existe (fold sin VAL, poco común),
-ese fold simplemente no aporta a las métricas de VAL — el resto sigue.
+Ajustar FECHA y N_FOLDS_ESPERADOS abajo y ejecutar.
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -35,10 +54,14 @@ import step005_walk_forward_cv_4 as s5
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Ajustar antes de correr: el sufijo de fecha de los preds_test/val_foldNN_*
-# ya guardados en disco (visible en el nombre de archivo, p.ej. "20260814").
+# ya guardados en disco (visible en el nombre de archivo, p.ej. "20260814"),
+# y cuántos folds debería tener la corrida completa (según el log: "Folds: N").
 # ─────────────────────────────────────────────────────────────────────────────
 FECHA = "20260814"
+N_FOLDS_ESPERADOS = 4
 BANCO = s5.BANCO
+
+_RE_FOLD = re.compile(r"preds_(test|val)_fold(\d+)_" + re.escape(BANCO) + r"_(\d{8})\.parquet$")
 
 
 def _col_to_tau() -> dict[str, float]:
@@ -53,34 +76,138 @@ def _preds_dict_desde_wide(df_h: pd.DataFrame, col_tau: dict[str, float]) -> dic
     return d
 
 
+# ---------------------------------------------------------------------------
+# Sección 0 — checklist de consistencia
+# ---------------------------------------------------------------------------
+
+def _listar_crudo(dir_: Path) -> list[Path]:
+    if not dir_.exists():
+        return []
+    return sorted(dir_.iterdir())
+
+
+def _escanear_modo(dir_: Path) -> dict:
+    """Agrupa TODO lo que matchea el patrón preds_(test|val)_foldNN_BANCO_fecha,
+    sin importar la fecha, para ver qué hay realmente en esa carpeta."""
+    hallados: dict[tuple[str, int, str], Path] = {}
+    for p in _listar_crudo(dir_):
+        m = _RE_FOLD.match(p.name)
+        if m:
+            tipo, fold_n, fecha = m.group(1), int(m.group(2)), m.group(3)
+            hallados[(tipo, fold_n, fecha)] = p
+    return hallados
+
+
+def checklist_consistencia() -> tuple[Path, dict, dict]:
+    dir_actual = s5._dir_modo()
+    # Carpeta hermana del otro modo (exp <-> roll), mismo sufijo _arctan.
+    otro_base = "roll" if "exp" in dir_actual.name else "exp"
+    sfx = "_arctan" if "_arctan" in dir_actual.name else ""
+    dir_hermana = dir_actual.parent / f"fold_{otro_base}{sfx}"
+
+    print("=" * 70)
+    print("SECCIÓN 0 — Checklist de consistencia")
+    print("=" * 70)
+
+    print(f"\nCarpeta resuelta por _dir_modo(): {dir_actual}")
+    crudo = _listar_crudo(dir_actual)
+    print(f"  Contenido crudo ({len(crudo)} archivos):")
+    for p in crudo:
+        m = _RE_FOLD.match(p.name)
+        etiqueta = "" if m else "  ← NO matchea el patrón esperado (revisar nombre)"
+        print(f"    {p.name}{etiqueta}")
+
+    hallados_actual = _escanear_modo(dir_actual)
+    hallados_hermana = _escanear_modo(dir_hermana) if dir_hermana.exists() else {}
+    if hallados_hermana:
+        print(f"\n⚠  La carpeta hermana {dir_hermana.name} también tiene archivos "
+              f"preds_*_fold*: {sorted(set(f for _, f, _ in hallados_hermana))} "
+              f"— por si EXPANDING/AJUSTE_ARCTAN cambiaron entre corridas.")
+
+    # Matriz fold × tipo para la FECHA objetivo
+    print(f"\nMatriz de disponibilidad para FECHA={FECHA} "
+          f"(esperados: folds 1..{N_FOLDS_ESPERADOS}):")
+    faltantes = []
+    for fold_n in range(1, N_FOLDS_ESPERADOS + 1):
+        t_ok = (("test", fold_n, FECHA) in hallados_actual)
+        v_ok = (("val", fold_n, FECHA) in hallados_actual)
+        estado = f"  Fold {fold_n}: TEST={'OK' if t_ok else 'FALTA'}  VAL={'OK' if v_ok else 'FALTA'}"
+        if not t_ok:
+            faltantes.append(fold_n)
+            # ¿Existe con OTRA fecha en la misma carpeta? Indicio de que
+            # fecha_hoy cambió a mitad de corrida (cruce de medianoche) o de
+            # que el archivo real quedó con un sufijo distinto al esperado.
+            otras_fechas = sorted({f for (tipo, fn, f) in hallados_actual
+                                    if tipo == "test" and fn == fold_n})
+            if otras_fechas:
+                estado += f"  (existe con otra fecha: {otras_fechas})"
+        print(estado)
+
+    if faltantes:
+        print(f"\n⚠  Faltan {len(faltantes)}/{N_FOLDS_ESPERADOS} folds para FECHA={FECHA}: "
+              f"{faltantes}. Si no aparecen en la carpeta hermana ni con otra fecha "
+              f"arriba, no están en disco — no son recuperables sin re-entrenar esos "
+              f"folds puntuales. Revisa además si tu sincronizador de archivos "
+              f"(OneDrive u otro) generó copias en conflicto en otra carpeta.")
+    else:
+        print(f"\n✓ Los {N_FOLDS_ESPERADOS} folds están completos para FECHA={FECHA}.")
+
+    return dir_actual, hallados_actual, {"faltantes": faltantes}
+
+
+def _validar_fold(df: pd.DataFrame, fold_n_esperado: int, nombre: str) -> list[str]:
+    """Devuelve una lista de problemas encontrados (vacía si todo OK)."""
+    problemas = []
+    if df["fold"].nunique() != 1 or int(df["fold"].iloc[0]) != fold_n_esperado:
+        problemas.append(f"columna 'fold' no coincide con el nombre de archivo "
+                          f"(esperado {fold_n_esperado}, encontrado "
+                          f"{sorted(df['fold'].unique())})")
+    n_h = df["h"].nunique()
+    h_esperados = s5.H_MAX - s5.H_MIN + 1
+    if n_h != h_esperados:
+        problemas.append(f"{n_h}/{h_esperados} horizontes únicos (esperado h="
+                          f"{s5.H_MIN}..{s5.H_MAX})")
+    dup = df.duplicated(subset=["fecha_t", "h"]).sum()
+    if dup:
+        problemas.append(f"{dup} filas con (fecha_t, h) duplicado")
+    if problemas:
+        print(f"  ⚠  {nombre}: " + "; ".join(problemas))
+    return problemas
+
+
 def main() -> None:
-    dir_modo = s5._dir_modo()
+    dir_modo, hallados, _chk = checklist_consistencia()
     col_tau = _col_to_tau()
 
-    test_paths = sorted(dir_modo.glob(f"preds_test_fold*_{BANCO}_{FECHA}.parquet"))
-    if not test_paths:
-        raise FileNotFoundError(
-            f"No se encontró ningún preds_test_fold*_{BANCO}_{FECHA}.parquet en "
-            f"{dir_modo} — revisa FECHA (debe coincidir con el sufijo de los "
-            f"archivos ya guardados por la corrida caída)."
-        )
-    print(f"Carpeta: {dir_modo}")
-    print(f"Folds encontrados (TEST): {[p.name for p in test_paths]}")
+    print("\n" + "=" * 70)
+    print("SECCIÓN 1 — Reconstrucción de métricas")
+    print("=" * 70)
 
     val_by_fold: dict[int, pd.DataFrame] = {}
-    for p in dir_modo.glob(f"preds_val_fold*_{BANCO}_{FECHA}.parquet"):
-        dfv = pd.read_parquet(p)
-        fold_n = int(dfv["fold"].iloc[0])
-        val_by_fold[fold_n] = dfv
-    print(f"Folds encontrados (VAL):  {sorted(val_by_fold)}")
+    for (tipo, fold_n, fecha), p in hallados.items():
+        if tipo == "val" and fecha == FECHA:
+            dfv = pd.read_parquet(p)
+            probs = _validar_fold(dfv, fold_n, p.name)
+            if not probs:
+                val_by_fold[fold_n] = dfv
+    print(f"Folds VAL usados: {sorted(val_by_fold)}")
 
     resultados = []
     fold_scaffolds = []
+    folds_usados = []
 
-    for p in test_paths:
+    for fold_n in range(1, N_FOLDS_ESPERADOS + 1):
+        p = hallados.get(("test", fold_n, FECHA))
+        if p is None:
+            continue
         df_test = pd.read_parquet(p)
-        fold_n = int(df_test["fold"].iloc[0])
+        probs = _validar_fold(df_test, fold_n, p.name)
+        if probs:
+            print(f"  → Fold {fold_n} se omite de la consolidación por los problemas de arriba.")
+            continue
+
         fold_scaffolds.append(df_test)
+        folds_usados.append(fold_n)
         df_val = val_by_fold.get(fold_n)
 
         for h_val, df_h in df_test.groupby("h"):
@@ -101,21 +228,32 @@ def main() -> None:
         print(f"  Fold {fold_n}: {df_test['h'].nunique()} horizontes recalculados")
 
     if not resultados:
-        print("⚠  Sin filas — nada que guardar.")
+        print("\n⚠  Sin filas — nada que guardar.")
         return
+
+    # Sufijo de archivo: nunca el nombre "limpio" si faltan folds, para que
+    # nada aguas abajo (step006, comparaciones manuales) confunda un
+    # resultado parcial con el de la corrida completa.
+    if len(folds_usados) < N_FOLDS_ESPERADOS:
+        tag = f"_PARCIAL_folds{'-'.join(map(str, folds_usados))}"
+        print(f"\n⚠⚠⚠  RESULTADO PARCIAL: {len(folds_usados)}/{N_FOLDS_ESPERADOS} folds "
+              f"({folds_usados}). Los archivos de salida llevan el sufijo '{tag}' — "
+              f"NO promediar estas tablas contra una corrida completa sin tenerlo en cuenta.")
+    else:
+        tag = ""
 
     # ── preds_base (equivalente a la Sección 5 que se cayó) ─────────────────
     col_order = ["banco", "fold", "fecha_t", "fecha_th", "h", "target",
                  "q01", "q05", "q40", "q50", "q60", "q95", "q99", "mean"]
     df_all = pd.concat(fold_scaffolds, ignore_index=True)
     ordered = [c for c in col_order if c in df_all.columns]
-    ruta_preds = dir_modo / f"preds_base_{BANCO}_{FECHA}.parquet"
+    ruta_preds = dir_modo / f"preds_base_{BANCO}_{FECHA}{tag}.parquet"
     df_all[ordered].to_parquet(ruta_preds, index=False)
     print(f"\n✓ Guardado: {ruta_preds}  ({len(df_all):,} filas)")
 
     # ── métricas (equivalente a la Sección 6) ────────────────────────────────
     df_res = pd.DataFrame(resultados)
-    ruta_met = dir_modo / f"metricas_{BANCO}_{FECHA}.parquet"
+    ruta_met = dir_modo / f"metricas_{BANCO}_{FECHA}{tag}.parquet"
     df_res.to_parquet(ruta_met, index=False)
     print(f"✓ Métricas: {ruta_met}  ({len(df_res):,} filas)")
 
@@ -234,8 +372,13 @@ def main() -> None:
           "arriba): n_trees_* (árboles efectivos), hp_report (convergencia Optuna) y "
           "los diagnósticos gain/perm/SHAP.")
 
-    s5.graficar_metricas(df_res, dir_modo, BANCO, FECHA)
-    s5.guardar_tablas_excel(_tablas, dir_modo, BANCO, FECHA)
+    s5.graficar_metricas(df_res, dir_modo, BANCO, FECHA + tag)
+    s5.guardar_tablas_excel(_tablas, dir_modo, BANCO, FECHA + tag)
+
+    if len(folds_usados) < N_FOLDS_ESPERADOS:
+        print(f"\n⚠⚠⚠  Recordatorio final: esto es PARCIAL ({folds_usados} de "
+              f"1..{N_FOLDS_ESPERADOS}). Antes de decidir cualquier cosa con estas "
+              f"tablas, localiza los folds faltantes o vuelve a entrenarlos.")
 
 
 if __name__ == "__main__":
