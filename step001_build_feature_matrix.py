@@ -87,8 +87,13 @@ _fin_historico = (_hoy - pd.offsets.BDay(1)).strftime("%Y-%m-%d")
 FEATURES_EXCLUIR = [
     # ── Rojo: eliminar sin reemplazo ─────────────────────────────────────────
     "log_h",
-    # R_t0, D_t0, R_t-1, D_t-1 reincorporados: nivel absoluto de R/D en t y t-1
-    # son la señal autocorrelativa más directa para h cortos (2..15).
+    # R_t0/D_t0/R_t-1/D_t-1: eran la excepción dentro de esta familia —el resto
+    # de los rezagos (t-2..t-22) ya estaba excluido— con la idea de que el
+    # nivel más reciente fuera la señal autocorrelativa más directa para h
+    # cortos. El heatmap de SHAP |mean| (participación q99, por fold) mostró
+    # los cuatro con participación despreciable frente a dias_al_cierre_mes,
+    # dias_desde_cierre_mes y la familia *_pos — se excluyen también.
+    "R_t0", "D_t0", "R_t-1", "D_t-1",
     "R_t-2", "D_t-2", "R_t-3", "D_t-3",
     "R_t-5", "D_t-5", "R_t-22", "D_t-22",
     "sigma_R_5d", "sigma_D_5d", "ma_R_5d", "ma_D_5d",
@@ -141,10 +146,11 @@ FEATURES_EXCLUIR = [
 
 
 # 1. Información endógena del flujo: modelo base
-    #,"R_t0",
-    #"D_t0",
-    #"R_t-1",
-    #"D_t-1",
+    # R_t0/D_t0/R_t-1/D_t-1 se excluyen más arriba (línea ~90), junto a sus
+    # hermanos R_t-2..t-22: R_t-1/D_t-1 SÍ existen como columna —se generan en
+    # el bucle "for l in todos_lags" (línea 1389), vía f"R_t-{l}"— y por eso
+    # aparecían en el heatmap de SHAP aunque una búsqueda por el texto literal
+    # "R_t-1" no los encontrara en el código.
     #"R_conf_t1",
     #"R_conf_t2",
     #"D_conf_t1",
@@ -205,13 +211,21 @@ FEATURES_EXCLUIR = [
 
 # 9. Episodios extraordinarios
     "is_post_eleccion",
-    "elec_sin", "elec_cos"
+    "elec_sin", "elec_cos",
 # 10. Features atados al horizonte
     # presion_deadline_th/_t se eliminaron esta sesión (reemplazadas por
     # capacidad_retiro_th, sección 8c de build_feature_matrix): medían la
     # obligación de depositar, no la capacidad de retirar, y su nivel era
     # casi constante dentro del mes por construcción algebraica — ver el
     # diccionario de features para el análisis completo.
+    #
+    # capacidad_retiro_th excluida (no borrada): sin poder predictivo medido,
+    # cobertura <3% en horizontes largos por diseño (solo proyecta dentro del
+    # mes calendario de fecha_t), y agregó tiempo de corrida en step005 sin
+    # mejorar cobertura — la empeoró levemente. El código y el resguardo de
+    # frescura quedan intactos por si vale retomarla junto con
+    # capacidad_retiro_pos (mes/trimestre) u otro ángulo.
+    "capacidad_retiro_th",
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
