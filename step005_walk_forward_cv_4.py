@@ -1525,16 +1525,14 @@ def guardar_diag_y_plots(
             continue
         rename = {c: c[len(senal) + 1:] for c in feat_cols}
 
-        # ── Orden de filas y escala de color: FIJOS para las tres decenas de
-        # figuras de esta señal. Sin esto, cada plot elegiría su propio top-25
-        # y su propio máximo, y comparar folds o cuantiles sería imposible.
+        # ── Escala de color: FIJA por señal, sobre TODAS las taus y folds —
+        # esto sí conviene mantenerlo compartido: deja comparar a simple
+        # vista si un cuantil concentra más peso que otro dentro de la misma
+        # señal. Se calcula sobre el universo completo de features, no sobre
+        # un top-25 fijo, porque ese top-25 ya no es el mismo para todas las
+        # figuras (ver orden de filas abajo).
         pv_global = _pivot(df_d, senal, feat_cols, rename)
-        orden = (pv_global.abs().mean(axis=1)
-                 .sort_values(ascending=False).index.tolist())
-        top_n = min(25, len(orden))
-        orden = orden[:top_n]
-
-        vals = pv_global.loc[orden].values
+        vals = pv_global.values
         vals = vals[np.isfinite(vals)]
         if vals.size == 0:
             continue
@@ -1545,6 +1543,24 @@ def guardar_diag_y_plots(
             vmin = 0.0
             vmax = float(np.percentile(vals, 99)) or 1.0
 
+        # ── Orden de filas: POR CUANTIL, no compartido entre todos. Antes se
+        # usaba un único orden — el promedio de |valor| de TODAS las taus
+        # mezcladas — para las ~7 figuras de una misma señal, así que el
+        # panel de q01 y el de q99 mostraban el mismo ranking de arriba
+        # abajo aunque cada cuantil pese features distintos (dias_al_cierre_mes
+        # dominando en casi todos los paneles era en parte artefacto de ese
+        # orden compartido, no evidencia de que domine en cada cuantil por
+        # separado). Ahora cada τ ordena por su propia importancia agregada
+        # entre folds; lo que se mantiene fijo es el orden DENTRO de un mismo
+        # τ al comparar folds, no entre distintos τ.
+        top_n = min(25, len(pv_global.index))
+        orden_por_tau: dict[str, list[str]] = {}
+        for ta in taus:
+            pv_ta = _pivot(df_d[df_d["tau"] == ta], senal, feat_cols, rename)
+            orden_por_tau[ta] = (pv_ta.abs().mean(axis=1)
+                                  .sort_values(ascending=False)
+                                  .index.tolist()[:top_n])
+
         # Pre-calcula los pivots (fold, τ) una sola vez: se usan en la figura
         # individual y otra vez en el panel resumen.
         pivots: dict = {}
@@ -1553,7 +1569,8 @@ def guardar_diag_y_plots(
                 sub = df_d[(df_d["fold"] == fo) & (df_d["tau"] == ta)]
                 if sub.empty:
                     continue
-                pivots[(fo, ta)] = _pivot(sub, senal, feat_cols, rename).reindex(orden)
+                pivots[(fo, ta)] = (_pivot(sub, senal, feat_cols, rename)
+                                     .reindex(orden_por_tau[ta]))
 
         def _dibujar(ax, pv: pd.DataFrame, titulo: str, con_yticks: bool):
             hs = pv.columns.tolist()
@@ -1609,7 +1626,8 @@ def guardar_diag_y_plots(
                 im = _dibujar(axes[j], pv, f"Fold {fo}", con_yticks=(j == 0))
             fig.suptitle(
                 f"{etiqueta} — {banco} · {ta}\n"
-                f"Misma escala de color y mismo orden de filas en todos los paneles",
+                f"Filas ordenadas por importancia propia de τ={ta} (igual entre folds, "
+                f"distinto entre cuantiles) · escala de color común a toda la señal",
                 fontsize=11, fontweight="bold", y=1.01,
             )
             fig.colorbar(im, ax=axes.tolist(), fraction=0.015, pad=0.01,
