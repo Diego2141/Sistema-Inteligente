@@ -2519,6 +2519,42 @@ def _run_interno(banco: str = BANCO) -> None:
                        df_res.groupby("h_grupo", observed=True)["pinball_q50"]
                        .mean().round(4)))
 
+            # Tabla por fold × grupo (pinball_q50) — mismo formato que las
+            # tablas de cobertura, para leer ambas una al lado de la otra.
+            print("\nPinball q50 por fold y grupo de horizonte:")
+            _pb50 = (
+                df_res.groupby(["fold", "h_grupo"], observed=True)["pinball_q50"]
+                .mean()
+                .unstack("h_grupo")
+            )
+            _pb50.index = ["Fold {}".format(f) for f in _pb50.index]
+            _reg(_tablas, "pinball_q50_fold_grupo", _pb50)
+            print(_pb50.round(0).to_string())
+
+        # Pinball promedio sobre los 7 cuantiles de TAUS — una sola cifra que
+        # resume dónde pesa la pérdida total, análoga a coverage_90/98 pero
+        # sensible a la magnitud del error (no solo a si cae dentro del
+        # intervalo). Se calcula fila a fila antes de agrupar.
+        _pinball_cols = [c for c in df_res.columns
+                          if c.startswith("pinball_q") and not c.startswith("pinball_rel")]
+        if _pinball_cols:
+            df_res["pinball_prom"] = df_res[_pinball_cols].mean(axis=1)
+
+            print(f"\nPinball promedio ({len(_pinball_cols)} cuantiles) por grupo de horizonte (MM USD):")
+            _pbp = df_res.groupby("h_grupo", observed=True)["pinball_prom"].mean() / 1e6
+            _reg(_tablas, "pinball_prom_por_grupo", _pbp.round(3))
+            print(_pbp.round(3))
+
+            print("\nPinball promedio por fold y grupo de horizonte (MM USD):")
+            _pbp_fg = (
+                df_res.groupby(["fold", "h_grupo"], observed=True)["pinball_prom"]
+                .mean()
+                .unstack("h_grupo") / 1e6
+            )
+            _pbp_fg.index = ["Fold {}".format(f) for f in _pbp_fg.index]
+            _reg(_tablas, "pinball_prom_fold_grupo", _pbp_fg)
+            print(_pbp_fg.round(3).to_string())
+
         if "coverage_90" in df_res.columns:
             print("\nCobertura empírica 90% [Q05-Q95] TEST media por grupo de horizonte:")
             _c90 = df_res.groupby("h_grupo", observed=True)["coverage_90"].mean()
