@@ -245,6 +245,18 @@ FEATURES_EXCLUIR = [
     # frescura quedan intactos por si vale retomarla junto con
     # capacidad_retiro_pos (mes/trimestre) u otro ángulo.
     "capacidad_retiro_th",
+    # esc_deposito_pos (anclada al cierre) queda superada por
+    # esc_deposito_pos_ap (anclada a la apertura): en importancia por
+    # permutación, esc_deposito_pos_ap superó notablemente a esta versión.
+    # Tiene sentido mecánico — los depósitos fuertes ocurren a inicios de
+    # mes, así que anclar al cierre desalinea la posición buscada en los
+    # meses previos con el día donde realmente ocurre el depósito grande.
+    # NO se replica el mismo argumento para esc_neto_max_pos: su espejo de
+    # apertura (esc_neto_max_pos_ap) ya se probó y salió débil, así que el
+    # extremo del NETO al cierre captura algo distinto del depósito puro
+    # (ver hallazgo "asimetría cierre/apertura" en el diccionario de
+    # features) y se mantiene activo.
+    "esc_deposito_pos",
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
