@@ -1440,12 +1440,17 @@ with pd.ExcelWriter(ruta_fe, engine="openpyxl") as _wr:
 print(f"\n  Exportado: {ruta_fe.name}")
 print(f"  Hoja 'Datos'    : {len(df_fe):,} filas × {len(df_fe.columns)} columnas")
 print(f"  Hoja 'Formulas' : {len(df_formulas)} columnas documentadas")
+# Grupos derivados de _COLS_EXPORT (no de listas escritas a mano aparte):
+# antes eran una copia paralela y quedó desincronizada cuando se agregó
+# encaje_diario_lag1 — el conteo real subía a 25 pero este print seguía
+# mostrando las 5 columnas lag1 de siempre. Los índices reflejan las
+# secciones comentadas dentro de _COLS_EXPORT.
 print(f"\n  Columnas exportadas:")
 for _g, _cols in [
-    ("Base (origen)",          ["fecha","overnight","cta_cte","caja","tose","exigible","retiro_neto"]),
-    ("Intermedias",            ["encaje","encaje_ovn","var_encaje_ovn","dia_mes","dias_en_mes","NecAcumMes","EncajeAcumMes","ExigibleTotalMes_est"]),
-    ("Features sin lag (t)",   ["avance_mes","exceso_abs","ratio_ovn_total"]),
-    ("Features lag1 (modelo)", ["avance_mes_lag1","exceso_abs_lag1","exceso_dia_lag1","encaje_ovn_lag1","ratio_ovn_total_lag1"]),
+    ("Base (origen)",          _COLS_EXPORT[0:7]),
+    ("Intermedias",            _COLS_EXPORT[7:15]),
+    ("Features sin lag (t)",   _COLS_EXPORT[15:19]),
+    ("Features lag1 (modelo)", _COLS_EXPORT[19:25]),
 ]:
     print(f"    {_g}: {', '.join(_cols)}")
 
