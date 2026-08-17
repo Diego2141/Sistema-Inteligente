@@ -318,9 +318,32 @@ def graf_bbva_arrastra(df):
     return fig, datos, detalle
 
 
-# ── 6. Export para el one-pager (artifact) ────────────────────────────────
+# ── 6. Magnitud absoluta del retiro, indexada ───────────────────────────────
 
-def exportar_json_artifact(datos1, datos2, datos3, ruta):
+VENTANA_MAGNITUD_BDAYS = 2  # dias_al_cierre_mes <= 2  →  últimos 3 días hábiles
+
+def datos_magnitud_retiro(df):
+    """Retiro TOTAL (no % del mes) del sistema en los últimos 3 días hábiles de
+    cada cierre de trimestre, sumado por año e indexado al primer año = 100.
+
+    Los gráficos 1-3 normalizan a % del mes o usan proporciones/ratios — por
+    diseño no pueden mostrar que el monto absoluto creció. Esta serie es el
+    complemento: mide el crecimiento real, no la forma. Se exporta como índice,
+    no como monto en soles/dólares, para no imprimir cifras de flujo absolutas
+    del sistema en un artifact que puede terminar compartido."""
+    tramo = df[(df["es_mes_cierre_trim"] == 1) & (df["dias_al_cierre_mes"] <= VENTANA_MAGNITUD_BDAYS)]
+    por_anio = tramo.groupby("anio")["R"].sum().reset_index().rename(
+        columns={"anio": "año", "R": "retiro_absoluto"})
+    por_anio = por_anio.sort_values("año")
+
+    base = por_anio["retiro_absoluto"].iloc[0] if len(por_anio) else 0
+    por_anio["indice_retiro"] = (por_anio["retiro_absoluto"] / base * 100).round(1) if base > 0 else None
+    return por_anio
+
+
+# ── 7. Export para el one-pager (artifact) ────────────────────────────────
+
+def exportar_json_artifact(datos1, datos2, datos3, datos4, ruta):
     """Escribe un JSON compacto con SOLO las series que se dibujan.
 
     Deliberadamente NO incluye el detalle por banco ni el agregado diario:
@@ -332,8 +355,8 @@ def exportar_json_artifact(datos1, datos2, datos3, ruta):
     # NaN a todo el calculo del grafico. Los NaN aqui son reales (bancos sin
     # retiro fuera del tramo de cierre → division sin definir), asi que van
     # como null y el grafico los dibuja como hueco, no como cero.
-    def _registros(d):
-        d = d.round(3)
+    def _registros(d, cols=None):
+        d = d[cols].round(3) if cols else d.round(3)
         return d.astype(object).where(pd.notna(d), None).to_dict(orient="records")
 
     payload = {
@@ -341,16 +364,20 @@ def exportar_json_artifact(datos1, datos2, datos3, ruta):
             "ventana_cierre_bdays": VENTANA_CIERRE_BDAYS,
             "umbral_inicio_retiro": UMBRAL_INICIO_RETIRO,
             "banco_foco": BANCO_FOCO,
+            "ventana_magnitud_bdays": VENTANA_MAGNITUD_BDAYS,
         },
         "g1_ciclo_encaje": _registros(datos1),
         "g2_inicio_retiro": _registros(datos2),
         "g3_bbva": _registros(datos3),
+        # Solo el índice, NO "retiro_absoluto": la cifra en soles/dólares del
+        # sistema no debería terminar embebida en un artifact compartible.
+        "g4_magnitud": _registros(datos4, cols=["año", "indice_retiro"]),
     }
     with open(ruta, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
 
 
-# ── 7. Export a Excel ─────────────────────────────────────────────────────
+# ── 8. Export a Excel ─────────────────────────────────────────────────────
 
 def _hoja(writer, nombre, datos, nota):
     """Escribe una hoja con la nota en la fila 1 y la tabla desde la fila 3."""
@@ -396,6 +423,9 @@ def main():
     fig3, datos3, detalle3 = graf_bbva_arrastra(df)
     fig3.write_html(RUTA_SALIDA / "03_bbva_arrastra_agregado.html", include_plotlyjs=PLOTLYJS_MODE)
 
+    print("Calculando magnitud absoluta del retiro (índice por año)...")
+    datos4 = datos_magnitud_retiro(df)
+
     # Excel de validación: una hoja por serie graficada + el agregado base
     print("Exportando Excel de validación...")
     base = df.copy()
@@ -412,13 +442,17 @@ def main():
               "Grafico 3 — participación de BBVA e intensidad de retiro, por trimestre")
         _hoja(writer, "G3_detalle_banco", detalle3,
               "Grafico 3 (insumo) — retiro e intensidad banco por banco, por trimestre")
+        _hoja(writer, "G4_magnitud", datos4,
+              f"Grafico 4 — retiro TOTAL del sistema (soles/dolares, sin normalizar) en los últimos "
+              f"{VENTANA_MAGNITUD_BDAYS + 1} días hábiles de cierre-trimestre, por año, e indexado al primer año=100. "
+              f"'retiro_absoluto' NO se exporta al JSON del one-pager — solo 'indice_retiro'.")
         _hoja(writer, "Base_banco_fecha", base,
               "Agregado base: R y D por banco y fecha, tras alias y limpieza (insumo de los 3 gráficos)")
 
     # JSON compacto para incrustar las curvas reales en el one-pager
     print("Exportando JSON para el one-pager...")
     ruta_json = RUTA_SALIDA / "datos_para_onepager.json"
-    exportar_json_artifact(datos1, datos2, datos3, ruta_json)
+    exportar_json_artifact(datos1, datos2, datos3, datos4, ruta_json)
 
     print(f"\nListo. Archivos en: {RUTA_SALIDA}")
     print(f"  Excel de validación : {ruta_xlsx.name}")
