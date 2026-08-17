@@ -184,7 +184,12 @@ FEATURES_EXCLUIR = [
     "VIX",
     "FED_FUNDS",
     "T10Y",
-    #"TASA_REF_BCRP",
+    # TASA_REF_BCRP se excluye esta sesión: plana en gain, perm y SHAP en
+    # las 5 corridas de convergencia (q01/q05/q50/q95/q99) — sin señal en
+    # ninguna de las tres métricas, en ningún cuantil. A diferencia de la
+    # familia *_pos (SHAP alto, perm bajo por redundancia entre features
+    # correlacionadas), acá no hay ni SHAP que la respalde.
+    "TASA_REF_BCRP",
     #"CDS_PERU_5Y_frac",
     "COPPER_frac",
     
@@ -240,6 +245,13 @@ FEATURES_EXCLUIR = [
     # que sus pares sin/cos apenas se distinguen del ruido de fondo.
     "dias_al_cierre_trim_sin", "dias_al_cierre_trim_cos",
     "dias_al_cierre_anio_sin", "dias_al_cierre_anio_cos",
+    # is_cierre_encaje y es_mes_cierre_trim se excluyen esta sesión: mismo
+    # motivo que TASA_REF_BCRP arriba — planas en gain, perm y SHAP en las 5
+    # corridas de convergencia, sin señal propia en ningún cuantil. Ambas
+    # eran binarias derivadas de dias_al_cierre_mes/mes, que siguen activos
+    # en su forma entera y ya cubren la misma información sin necesitar el
+    # split adicional que la binaria pretendía facilitar.
+    "is_cierre_encaje", "es_mes_cierre_trim",
 
 # 9. Episodios extraordinarios
     "is_post_eleccion",
