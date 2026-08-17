@@ -53,8 +53,11 @@ BANCO_FOCO = "BBVA"
 #                 mandar UN archivo suelto por correo, sin la carpeta.
 PLOTLYJS_MODE = "directory"
 
-# Ventana de días hábiles antes del cierre de mes que se considera "tramo de cierre"
-VENTANA_CIERRE_BDAYS = 10
+# Ventana de cierre: los últimos N días hábiles del mes (dias_al_cierre_mes < N,
+# es decir 0..N-1). UNA sola definición para todos los gráficos — antes convivían
+# dos ventanas distintas (10 días para intensidad/anticipación, 3 para magnitud),
+# lo que obligaba a explicar en la reunión por qué "cierre" significaba dos cosas.
+VENTANA_CIERRE_BDAYS = 5
 # Umbral de masa acumulada de retiro para fijar el "día de inicio del retiro"
 UMBRAL_INICIO_RETIRO = 0.5
 
@@ -320,18 +323,17 @@ def graf_bbva_arrastra(df):
 
 # ── 6. Magnitud absoluta del retiro, indexada ───────────────────────────────
 
-VENTANA_MAGNITUD_BDAYS = 2  # dias_al_cierre_mes <= 2  →  últimos 3 días hábiles
-
 def datos_magnitud_retiro(df):
-    """Retiro TOTAL (no % del mes) del sistema en los últimos 3 días hábiles de
-    cada cierre de trimestre, sumado por año e indexado al primer año = 100.
+    """Retiro TOTAL (no % del mes) del sistema en la ventana de cierre
+    (VENTANA_CIERRE_BDAYS días hábiles) de cada cierre de trimestre, sumado por
+    año e indexado al primer año = 100.
 
     Los gráficos 1-3 normalizan a % del mes o usan proporciones/ratios — por
     diseño no pueden mostrar que el monto absoluto creció. Esta serie es el
     complemento: mide el crecimiento real, no la forma. Se exporta como índice,
     no como monto en soles/dólares, para no imprimir cifras de flujo absolutas
     del sistema en un artifact que puede terminar compartido."""
-    tramo = df[(df["es_mes_cierre_trim"] == 1) & (df["dias_al_cierre_mes"] <= VENTANA_MAGNITUD_BDAYS)]
+    tramo = df[(df["es_mes_cierre_trim"] == 1) & (df["dias_al_cierre_mes"] < VENTANA_CIERRE_BDAYS)]
     por_anio = tramo.groupby("anio")["R"].sum().reset_index().rename(
         columns={"anio": "año", "R": "retiro_absoluto"})
     por_anio = por_anio.sort_values("año")
@@ -364,7 +366,6 @@ def exportar_json_artifact(datos1, datos2, datos3, datos4, ruta):
             "ventana_cierre_bdays": VENTANA_CIERRE_BDAYS,
             "umbral_inicio_retiro": UMBRAL_INICIO_RETIRO,
             "banco_foco": BANCO_FOCO,
-            "ventana_magnitud_bdays": VENTANA_MAGNITUD_BDAYS,
         },
         "g1_ciclo_encaje": _registros(datos1),
         "g2_inicio_retiro": _registros(datos2),
@@ -444,7 +445,7 @@ def main():
               "Grafico 3 (insumo) — retiro e intensidad banco por banco, por trimestre")
         _hoja(writer, "G4_magnitud", datos4,
               f"Grafico 4 — retiro TOTAL del sistema (soles/dolares, sin normalizar) en los últimos "
-              f"{VENTANA_MAGNITUD_BDAYS + 1} días hábiles de cierre-trimestre, por año, e indexado al primer año=100. "
+              f"{VENTANA_CIERRE_BDAYS} días hábiles de cierre-trimestre, por año, e indexado al primer año=100. "
               f"'retiro_absoluto' NO se exporta al JSON del one-pager — solo 'indice_retiro'.")
         _hoja(writer, "Base_banco_fecha", base,
               "Agregado base: R y D por banco y fecha, tras alias y limpieza (insumo de los 3 gráficos)")
