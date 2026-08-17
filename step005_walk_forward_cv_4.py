@@ -212,6 +212,27 @@ DIAG_BLOCK_SIZE       = 5      # bloques pequeños: val solo tiene ~120 filas
 DIAG_N_REPEATS        = 3      # repeticiones por permutación
 DIAG_SHAP_MAX_SAMPLES = None   # None = todas las filas de val (~120)
 
+# Block-permutation POR FAMILIA (además de la individual de arriba). Motivo:
+# _diag_perm_h baraja una columna a la vez, así que un grupo de features
+# correlacionadas entre sí (la familia *_pos es el caso típico) puede salir
+# con perm individual ~0 para todas aunque el grupo completo sí importe —
+# el modelo compensa con las columnas correlacionadas que quedaron intactas.
+# Acá se baraja TODA la familia con el MISMO vector de permutación de
+# bloques, destruyendo la información conjunta en vez de solo la de una.
+# Nombres deben existir en la matriz activa (no en FEATURES_EXCLUIR); los que
+# no coincidan se ignoran en tiempo de ejecución, no truenan la corrida.
+FAMILIAS_PERM: dict[str, list[str]] = {
+    "calendario_cierre": ["dias_al_cierre_mes", "dias_desde_cierre_mes",
+                          "dias_al_cierre_trim"],
+    "pos_extremos":      ["esc_neto_min_pos", "esc_neto_max_pos", "esc_retiro_pos",
+                          "esc_deposito_pos_ap", "esc_neto_max_pos_ap"],
+    "pos_acumulado":     ["acum_neto_min_pos", "acum_neto_max_pos", "frec_flujo_pos"],
+    "ccovn_bcr":         ["ccovn_sistema_lag1", "ccovn_bbva_lag1",
+                          "var_ccovn_sistema_lag1", "var_ccovn_bbva_lag1"],
+    "flujo_crudo":       ["sigma_flujo_ratio", "ma_flujo_5d", "ma_flujo_20d", "R_conf_t2"],
+    "encaje_bbva":       ["avance_mes_lag1", "exceso_abs_lag1"],
+}
+
 # ---------------------------------------------------------------------------
 # Helper functions
 # ---------------------------------------------------------------------------
@@ -1122,6 +1143,61 @@ def _diag_perm_h(
     return out
 
 
+def _diag_perm_familias_h(
+    modelos: dict,
+    X_val: pd.DataFrame,
+    y_val: np.ndarray,
+    familias: dict[str, list[str]],
+) -> dict:
+    """
+    Block-permutation CONJUNTA por familia — ver FAMILIAS_PERM para el
+    porqué. Mismo esquema de bloques que _diag_perm_h (misma DIAG_BLOCK_SIZE),
+    pero con una semilla de rng distinta a propósito: si compartieran la
+    semilla, el shuffle de una familia de 1 feature coincidiría exactamente
+    con el de _diag_perm_h para esa misma columna, lo cual no es un problema
+    de correctitud pero sí desperdicia la variación entre repeticiones.
+
+    Returns {tau: {familia: Δloss_relativo}}. Familias sin ningún feature
+    presente en X_val se omiten (p.ej. si FEATURES_EXCLUIR cambia y una
+    familia entera queda vacía).
+    """
+    n = len(X_val)
+    bs = max(2, min(DIAG_BLOCK_SIZE, n // 3))
+    block_starts = np.arange(0, n, bs)
+    rng = np.random.default_rng(43)   # distinta de la 42 de _diag_perm_h
+
+    y = np.asarray(y_val)
+    out: dict = {}
+
+    for tau, model in modelos.items():
+        if tau == "mean":
+            _loss = lambda yy, pp: float(np.mean((yy - pp) ** 2))
+        else:
+            _loss = lambda yy, pp, _t=tau: _pinball(yy, pp, _t)
+
+        base_preds = model.predict(X_val)
+        base_loss  = _loss(y, base_preds)
+        den = abs(base_loss) if base_loss != 0 else 1.0
+
+        fam_deltas: dict[str, float] = {}
+        for fam, cols in familias.items():
+            cols_presentes = [c for c in cols if c in X_val.columns]
+            if not cols_presentes:
+                continue
+            deltas = []
+            for _ in range(DIAG_N_REPEATS):
+                perm = rng.permutation(block_starts)
+                Xp = X_val.copy()
+                for c in cols_presentes:
+                    orig = X_val[c].values
+                    Xp[c] = np.concatenate([orig[s:s + bs] for s in perm])[:n]
+                deltas.append(_loss(y, model.predict(Xp)) - base_loss)
+            fam_deltas[fam] = float(np.mean(deltas)) / den
+        out[tau] = fam_deltas
+
+    return out
+
+
 def _shap_compat_booster(model):
     """
     Patch xgb.Booster.predict at CLASS level (once per session) to translate
@@ -1732,6 +1808,87 @@ def guardar_diag_y_plots(
           f"{n_generados} figuras en {dir_diag}")
 
 
+def guardar_diag_familias(
+    diag_rows: list[dict],
+    diag_familia_rows: list[dict],
+    familias: dict[str, list[str]],
+    dir_modo: Path,
+    banco: str,
+    fecha_hoy: str,
+) -> None:
+    """
+    Compara la permutación INDIVIDUAL (Σ perm_<feat> de cada familia, ya
+    calculada feature por feature en diag_rows) contra la permutación
+    CONJUNTA de la familia completa (diag_familia_rows, ver FAMILIAS_PERM y
+    _diag_perm_familias_h).
+
+    Lectura de ratio_redundancia = |Δ_conjunto| / |Σ Δ_individual|:
+      ~1     → los features de la familia son ~independientes entre sí; el
+               perm individual bajo YA reflejaba bajo aporte real.
+      >> 1   → redundantes entre sí: el modelo compensaba con las columnas
+               correlacionadas cuando se barajaba solo una, así que la suma
+               de los Δ individuales subestimaba el aporte real del grupo.
+      Δ_conjunto ≈ 0 (con cualquier ratio) → la familia completa no aporta.
+
+    Debe llamarse ANTES de guardar_diag_y_plots(): esa función vacía
+    diag_rows (diag_rows.clear()) para liberar memoria antes de graficar, y
+    acá se necesitan las columnas perm_<feat> todavía intactas.
+
+    Guarda un CSV con el detalle (fold × h × τ × familia) y un resumen
+    agregado (familia × τ) impreso a consola.
+    """
+    if not diag_familia_rows:
+        return
+
+    df_ind = pd.DataFrame(diag_rows)
+    df_fam = pd.DataFrame(diag_familia_rows)
+
+    filas = []
+    for fam, cols in familias.items():
+        if fam not in df_fam.columns:
+            continue
+        cols_perm = [f"perm_{c}" for c in cols if f"perm_{c}" in df_ind.columns]
+        if not cols_perm:
+            continue
+        ind = df_ind[["fold", "h", "tau"] + cols_perm].copy()
+        ind["delta_individual_sum"] = ind[cols_perm].sum(axis=1)
+        merged = ind[["fold", "h", "tau", "delta_individual_sum"]].merge(
+            df_fam[["fold", "h", "tau", fam]].rename(columns={fam: "delta_conjunto"}),
+            on=["fold", "h", "tau"], how="inner",
+        )
+        merged["familia"] = fam
+        filas.append(merged)
+
+    if not filas:
+        log.warning("guardar_diag_familias: ninguna familia de FAMILIAS_PERM "
+                    "tiene features presentes en la matriz — nada que comparar.")
+        return
+
+    df_cmp = pd.concat(filas, ignore_index=True)
+    eps = 1e-9
+    df_cmp["ratio_redundancia"] = (
+        df_cmp["delta_conjunto"].abs() / (df_cmp["delta_individual_sum"].abs() + eps)
+    )
+
+    ruta_csv = dir_modo / f"diag_perm_familias_{banco}_{fecha_hoy}.csv"
+    df_cmp.to_csv(ruta_csv, index=False)
+    log.info("CSV perm por familias: %s (%d filas)", ruta_csv.name, len(df_cmp))
+
+    resumen = (
+        df_cmp.groupby(["familia", "tau"], observed=True)
+        [["delta_individual_sum", "delta_conjunto", "ratio_redundancia"]]
+        .mean()
+        .round(4)
+    )
+    print("\nPerm por familia — individual (Σ) vs conjunta, por τ:")
+    print(resumen.to_string())
+    print("\n  ratio_redundancia = |Δ_conjunto| / |Σ Δ_individual|")
+    print("  ~1   → independientes (el perm individual bajo ya reflejaba bajo aporte)")
+    print("  >> 1 → redundantes entre sí (juntas importan más que la suma de las partes)")
+    print("  Δ_conjunto ≈ 0 → la familia completa no aporta, con cualquier ratio")
+    print(f"[OK] Perm por familias: {ruta_csv.name}")
+
+
 
 def _reg(tablas: dict, nombre: str, obj):
     """
@@ -2288,6 +2445,7 @@ def _run_interno(banco: str = BANCO) -> None:
     resultados:    list[dict] = []
     hp_report_rows: list[dict] = []   # acumula HPs por fold × grupo para el reporte
     diag_rows:  list[dict] = []
+    diag_familia_rows: list[dict] = []   # perm conjunta por familia (ver FAMILIAS_PERM)
     cruces_rows: list[dict] = []      # cruces de cuantiles por fold
     _tablas: dict = {}                # tablas de consola → Excel de resumen
     n_horizontes = H_MAX - H_MIN + 1
@@ -2516,6 +2674,11 @@ def _run_interno(banco: str = BANCO) -> None:
                     diagnosticar_h(modelos, X_val, y_val, cols_feat,
                                    fold["fold"], h_val)
                 )
+                _perm_fam = _diag_perm_familias_h(modelos, X_val, y_val, FAMILIAS_PERM)
+                for tau in _orden_taus(modelos):
+                    _fila = {"fold": fold["fold"], "h": h_val, "tau": _tau_label(tau)}
+                    _fila.update(_perm_fam.get(tau, {}))
+                    diag_familia_rows.append(_fila)
 
             del modelos, X_train, y_train, X_val, y_val, X_test, y_test
             gc.collect()
@@ -2790,6 +2953,17 @@ def _run_interno(banco: str = BANCO) -> None:
     # 8. Feature diagnostics (gain / perm / SHAP per h)
     # ------------------------------------------------------------------
     if DIAG_FEATURES and diag_rows:
+        # guardar_diag_familias PRIMERO: necesita las columnas perm_<feat> de
+        # diag_rows todavía intactas, y guardar_diag_y_plots las vacía
+        # (diag_rows.clear()) apenas arranca para liberar memoria antes de
+        # graficar.
+        try:
+            guardar_diag_familias(diag_rows, diag_familia_rows, FAMILIAS_PERM,
+                                   DIR_MODO, banco, fecha_hoy)
+        except Exception as e:
+            log.error("Fallo en guardar_diag_familias (%s) — no afecta el "
+                      "resto del diagnóstico", type(e).__name__)
+
         # Aislado: el CSV de diagnóstico es lo valioso y se escribe primero.
         # Si el graficado falla (168 figuras es donde se agotaba la memoria),
         # no debe impedir que la sección 9 escriba el Excel de tablas.
