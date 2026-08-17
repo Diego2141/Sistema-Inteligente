@@ -25,6 +25,7 @@ Si no se pasa ruta, usa la ruta por defecto de step001 (params["ruta_datos_banca
 """
 
 import sys
+import json
 import pathlib
 
 import numpy as np
@@ -317,7 +318,33 @@ def graf_bbva_arrastra(df):
     return fig, datos, detalle
 
 
-# ── 6. Export a Excel ─────────────────────────────────────────────────────
+# ── 6. Export para el one-pager (artifact) ────────────────────────────────
+
+def exportar_json_artifact(datos1, datos2, datos3, ruta):
+    """Escribe un JSON compacto con SOLO las series que se dibujan.
+
+    Deliberadamente NO incluye el detalle por banco ni el agregado diario:
+    el one-pager solo necesita las curvas, y así lo que sale de la máquina
+    es el mínimo indispensable. Los valores van redondeados."""
+    g1 = datos1.copy()
+    g1["retiro_pct_del_mes"] = g1["retiro_pct_del_mes"].round(3)
+    g1["deposito_pct_del_mes"] = g1["deposito_pct_del_mes"].round(3)
+
+    payload = {
+        "meta": {
+            "ventana_cierre_bdays": VENTANA_CIERRE_BDAYS,
+            "umbral_inicio_retiro": UMBRAL_INICIO_RETIRO,
+            "banco_foco": BANCO_FOCO,
+        },
+        "g1_ciclo_encaje": g1.to_dict(orient="records"),
+        "g2_inicio_retiro": datos2.round(3).to_dict(orient="records"),
+        "g3_bbva": datos3.round(3).to_dict(orient="records"),
+    }
+    with open(ruta, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
+
+
+# ── 7. Export a Excel ─────────────────────────────────────────────────────
 
 def _hoja(writer, nombre, datos, nota):
     """Escribe una hoja con la nota en la fila 1 y la tabla desde la fila 3."""
@@ -382,8 +409,14 @@ def main():
         _hoja(writer, "Base_banco_fecha", base,
               "Agregado base: R y D por banco y fecha, tras alias y limpieza (insumo de los 3 gráficos)")
 
+    # JSON compacto para incrustar las curvas reales en el one-pager
+    print("Exportando JSON para el one-pager...")
+    ruta_json = RUTA_SALIDA / "datos_para_onepager.json"
+    exportar_json_artifact(datos1, datos2, datos3, ruta_json)
+
     print(f"\nListo. Archivos en: {RUTA_SALIDA}")
-    print(f"  Excel de validación: {ruta_xlsx.name}")
+    print(f"  Excel de validación : {ruta_xlsx.name}")
+    print(f"  JSON one-pager      : {ruta_json.name} ({ruta_json.stat().st_size / 1024:.0f} KB)")
 
 
 if __name__ == "__main__":
