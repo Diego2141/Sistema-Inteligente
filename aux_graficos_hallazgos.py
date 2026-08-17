@@ -326,9 +326,15 @@ def exportar_json_artifact(datos1, datos2, datos3, ruta):
     Deliberadamente NO incluye el detalle por banco ni el agregado diario:
     el one-pager solo necesita las curvas, y así lo que sale de la máquina
     es el mínimo indispensable. Los valores van redondeados."""
-    g1 = datos1.copy()
-    g1["retiro_pct_del_mes"] = g1["retiro_pct_del_mes"].round(3)
-    g1["deposito_pct_del_mes"] = g1["deposito_pct_del_mes"].round(3)
+    # NaN → None. json.dump escribe los NaN de pandas como el literal `NaN`,
+    # que NO es JSON valido: un parser estricto lo rechaza y, peor, si el JSON
+    # se incrusta como literal JS el `NaN` se cuela silenciosamente y propaga
+    # NaN a todo el calculo del grafico. Los NaN aqui son reales (bancos sin
+    # retiro fuera del tramo de cierre → division sin definir), asi que van
+    # como null y el grafico los dibuja como hueco, no como cero.
+    def _registros(d):
+        d = d.round(3)
+        return d.astype(object).where(pd.notna(d), None).to_dict(orient="records")
 
     payload = {
         "meta": {
@@ -336,12 +342,12 @@ def exportar_json_artifact(datos1, datos2, datos3, ruta):
             "umbral_inicio_retiro": UMBRAL_INICIO_RETIRO,
             "banco_foco": BANCO_FOCO,
         },
-        "g1_ciclo_encaje": g1.to_dict(orient="records"),
-        "g2_inicio_retiro": datos2.round(3).to_dict(orient="records"),
-        "g3_bbva": datos3.round(3).to_dict(orient="records"),
+        "g1_ciclo_encaje": _registros(datos1),
+        "g2_inicio_retiro": _registros(datos2),
+        "g3_bbva": _registros(datos3),
     }
     with open(ruta, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
+        json.dump(payload, f, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
 
 
 # ── 7. Export a Excel ─────────────────────────────────────────────────────
