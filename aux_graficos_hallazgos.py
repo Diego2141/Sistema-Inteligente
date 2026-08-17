@@ -42,6 +42,16 @@ RUTA_SALIDA = pathlib.Path(__file__).parent / "2. Output" / "graficos_hallazgos"
 ALIAS_BANCOS = {"CONTINEN": "BBVA"}
 BANCO_FOCO = "BBVA"
 
+# Cómo se incluye plotly.js en los HTML generados:
+#   "directory" → escribe plotly.min.js una vez en la carpeta de salida y los tres
+#                 HTML lo referencian. Funciona sin internet (red corporativa con
+#                 CDN bloqueado) y no repite la librería en cada archivo.
+#   "cdn"       → los HTML piden plotly.js a internet. Archivos de ~45 KB, pero se
+#                 ven en blanco si el CDN está bloqueado.
+#   True        → embebe la librería en cada HTML (~4.8 MB c/u). Úsalo si necesitas
+#                 mandar UN archivo suelto por correo, sin la carpeta.
+PLOTLYJS_MODE = "directory"
+
 # Ventana de días hábiles antes del cierre de mes que se considera "tramo de cierre"
 VENTANA_CIERRE_BDAYS = 10
 # Umbral de masa acumulada de retiro para fijar el "día de inicio del retiro"
@@ -343,15 +353,15 @@ def main():
 
     print("\nGenerando gráfico 1 — ciclo de encaje (slider por año)...")
     fig1, datos1 = graf_ciclo_encaje(df)
-    fig1.write_html(RUTA_SALIDA / "01_ciclo_encaje_slider.html", include_plotlyjs="cdn")
+    fig1.write_html(RUTA_SALIDA / "01_ciclo_encaje_slider.html", include_plotlyjs=PLOTLYJS_MODE)
 
     print("Generando gráfico 2 — retiro cada vez más temprano...")
     fig2, datos2, detalle2 = graf_retiro_mas_temprano(df)
-    fig2.write_html(RUTA_SALIDA / "02_retiro_mas_temprano.html", include_plotlyjs="cdn")
+    fig2.write_html(RUTA_SALIDA / "02_retiro_mas_temprano.html", include_plotlyjs=PLOTLYJS_MODE)
 
     print("Generando gráfico 3 — BBVA arrastra el agregado...")
     fig3, datos3, detalle3 = graf_bbva_arrastra(df)
-    fig3.write_html(RUTA_SALIDA / "03_bbva_arrastra_agregado.html", include_plotlyjs="cdn")
+    fig3.write_html(RUTA_SALIDA / "03_bbva_arrastra_agregado.html", include_plotlyjs=PLOTLYJS_MODE)
 
     # Excel de validación: una hoja por serie graficada + el agregado base
     print("Exportando Excel de validación...")
