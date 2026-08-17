@@ -288,6 +288,20 @@ def graf_bbva_arrastra(df):
                  / drenaje_sistema.where(drenaje_sistema > 0) * 100)
     part_bbva = part_bbva.replace([np.inf, -np.inf], np.nan).dropna()
 
+    # ── Montos absolutos, para la tabla del one-pager ─────────────────────────
+    # El neto del SISTEMA aquí es el agregado real (suma de todos los bancos,
+    # con signo), no la suma de netos positivos: es lo que se compara contra el
+    # neto de BBVA. Puede ser <= 0 — trimestres en que el sistema recibió más de
+    # lo que sacó —, y en esos la proporción no significa nada y se deja vacía.
+    N_bbva = N_tramo_banco.xs(BANCO_FOCO, level="banco")
+    N_sistema = ventana.groupby("trimestre").apply(neto)
+    prop_bbva = (N_bbva / N_sistema.where(N_sistema > 0) * 100).replace([np.inf, -np.inf], np.nan)
+    MUSD = 1e6
+    n_sin_prop = int((N_sistema <= 0).sum())
+    if n_sin_prop:
+        print(f"  · {n_sin_prop} trimestres sin proporción: el sistema fue receptor neto "
+              f"en la ventana (proporción vacía, no cero)")
+
     # ── Tamaño de BBVA, para contrastarlo con su cuota del drenaje ────────────
     # Una cuota alta del drenaje no prueba nada por sí sola: un banco grande
     # mueve más en términos absolutos. La referencia honesta es su peso en el
@@ -350,6 +364,9 @@ def graf_bbva_arrastra(df):
     datos = pd.DataFrame({
         "participacion_bbva_pct_retiro_sistema": part_bbva,   # cuota del DRENAJE neto
         "tamano_bbva_pct_bruto_sistema": tam_bbva,            # cuota del FLUJO BRUTO = su tamaño
+        "neto_bbva_musd": N_bbva / MUSD,                      # millones USD, + = salio plata
+        "neto_sistema_musd": N_sistema / MUSD,                # idem, agregado real con signo
+        "proporcion_bbva_pct": prop_bbva,                     # vacia si el sistema no drenó
         "intensidad_bbva": int_bbva,
         "intensidad_otros_grandes_prom": int_pares_prom,
     })
@@ -435,8 +452,10 @@ def exportar_json_artifact(datos1, datos2, datos3, datos4, ruta):
         "g1_ciclo_encaje": _registros(datos1),
         "g2_inicio_retiro": _registros(datos2),
         "g3_bbva": _registros(datos3),
-        # Solo el índice, NO "salida_neta"/"retiro_bruto": la cifra en soles/dólares del
-        # sistema no debería terminar embebida en un artifact compartible.
+        # Del índice sale solo el número indexado, no el monto que lo genera.
+        # Los montos de g3 (neto_bbva_musd / neto_sistema_musd) SÍ viajan: la
+        # tabla del one-pager los muestra, a pedido — quedan legibles en el
+        # código fuente de la página publicada.
         "g4_magnitud": _registros(datos4, cols=["año", "indice_retiro"]),
     }
     with open(ruta, "w", encoding="utf-8") as f:
