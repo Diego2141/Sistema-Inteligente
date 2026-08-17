@@ -1866,6 +1866,12 @@ def guardar_diag_familias(
 
     df_cmp = pd.concat(filas, ignore_index=True)
     eps = 1e-9
+    # ratio_redundancia por FILA (fold × h): se guarda en el CSV porque sirve
+    # para inspeccionar casos puntuales, pero NO se promedia tal cual — si el
+    # denominador de una sola fila pasa cerca de cero, ese ratio individual
+    # explota (se vieron valores de 700-900x en la primera corrida) y arrastra
+    # cualquier promedio simple. "Media de ratios" no es lo mismo que "ratio
+    # de medias" cuando el denominador puede rondar cero.
     df_cmp["ratio_redundancia"] = (
         df_cmp["delta_conjunto"].abs() / (df_cmp["delta_individual_sum"].abs() + eps)
     )
@@ -1874,15 +1880,23 @@ def guardar_diag_familias(
     df_cmp.to_csv(ruta_csv, index=False)
     log.info("CSV perm por familias: %s (%d filas)", ruta_csv.name, len(df_cmp))
 
+    # Resumen: promedia delta_individual_sum y delta_conjunto primero (esos
+    # promedios sí son estables), y el ratio se calcula DESPUÉS sobre esos
+    # promedios — "ratio de medias", no "media de ratios".
     resumen = (
         df_cmp.groupby(["familia", "tau"], observed=True)
-        [["delta_individual_sum", "delta_conjunto", "ratio_redundancia"]]
+        [["delta_individual_sum", "delta_conjunto"]]
         .mean()
-        .round(4)
     )
+    resumen["ratio_redundancia"] = (
+        resumen["delta_conjunto"].abs() / (resumen["delta_individual_sum"].abs() + eps)
+    )
+    resumen = resumen.round(4)
     print("\nPerm por familia — individual (Σ) vs conjunta, por τ:")
     print(resumen.to_string())
-    print("\n  ratio_redundancia = |Δ_conjunto| / |Σ Δ_individual|")
+    print("\n  ratio_redundancia = |Δ_conjunto promedio| / |Σ Δ_individual promedio|")
+    print("  (ratio de medias, no media de ratios — evita que una sola fila con")
+    print("  denominador cercano a 0 infle el promedio)")
     print("  ~1   → independientes (el perm individual bajo ya reflejaba bajo aporte)")
     print("  >> 1 → redundantes entre sí (juntas importan más que la suma de las partes)")
     print("  Δ_conjunto ≈ 0 → la familia completa no aporta, con cualquier ratio")
