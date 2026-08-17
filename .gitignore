@@ -38,6 +38,8 @@
 2. Output/aux_visualizar_series/
 2. Output/calibracion_v1/
 2. Output/diagnostico_sistema/
+# Gráficos de hallazgos: HTML + Excel con datos reales de la banca
+2. Output/graficos_hallazgos/
 # Excepción: el Excel de referencia sí se trackea
 !2. Output/hiperparametros_optuna.xlsx
 
