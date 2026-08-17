@@ -288,6 +288,18 @@ def graf_bbva_arrastra(df):
                  / drenaje_sistema.where(drenaje_sistema > 0) * 100)
     part_bbva = part_bbva.replace([np.inf, -np.inf], np.nan).dropna()
 
+    # ── Tamaño de BBVA, para contrastarlo con su cuota del drenaje ────────────
+    # Una cuota alta del drenaje no prueba nada por sí sola: un banco grande
+    # mueve más en términos absolutos. La referencia honesta es su peso en el
+    # flujo BRUTO del sistema en la misma ventana — cuánto del movimiento total
+    # es suyo. La brecha entre "cuota del drenaje" y "cuota del tamaño" es lo
+    # que realmente mide si drena más de lo que le correspondería.
+    bruto_tramo_banco = ventana.groupby(["trimestre", "banco"])[["R", "D"]].sum().sum(axis=1)
+    bruto_tramo_sistema = bruto_tramo_banco.groupby("trimestre").sum()
+    tam_bbva = (bruto_tramo_banco.xs(BANCO_FOCO, level="banco")
+                / bruto_tramo_sistema.where(bruto_tramo_sistema > 0) * 100)
+    tam_bbva = tam_bbva.replace([np.inf, -np.inf], np.nan).dropna()
+
     # ── Intensidad: neto del cierre contra la ESCALA del banco ────────────────
     # El denominador natural sería el neto diario fuera de la ventana, pero ese
     # neto es negativo casi siempre: los bancos acumulan durante el mes y drenan
@@ -323,6 +335,9 @@ def graf_bbva_arrastra(df):
                                           "Salida neta diaria en la ventana, por unidad de flujo bruto diario"))
     fig.add_trace(go.Scatter(x=part_bbva.index.to_timestamp(), y=part_bbva.values, mode="lines+markers",
                               name="% BBVA del drenaje del sistema", line=dict(color="#a85a2b")), row=1, col=1)
+    fig.add_trace(go.Scatter(x=tam_bbva.index.to_timestamp(), y=tam_bbva.values, mode="lines",
+                              name="% BBVA del flujo bruto (su tamaño)",
+                              line=dict(color="#5c6673", dash="dot")), row=1, col=1)
     fig.add_trace(go.Scatter(x=int_bbva.index.to_timestamp(), y=int_bbva.values, mode="lines+markers",
                               name="Intensidad BBVA", line=dict(color="#a85a2b")), row=2, col=1)
     fig.add_trace(go.Scatter(x=int_pares_prom.index.to_timestamp(), y=int_pares_prom.values, mode="lines+markers",
@@ -333,7 +348,8 @@ def graf_bbva_arrastra(df):
     fig.update_layout(title="BBVA arrastra el agregado del sistema (salida neta)", template="plotly_white", legend=dict(orientation="h", y=-0.15))
 
     datos = pd.DataFrame({
-        "participacion_bbva_pct_retiro_sistema": part_bbva,   # ahora sobre el NETO
+        "participacion_bbva_pct_retiro_sistema": part_bbva,   # cuota del DRENAJE neto
+        "tamano_bbva_pct_bruto_sistema": tam_bbva,            # cuota del FLUJO BRUTO = su tamaño
         "intensidad_bbva": int_bbva,
         "intensidad_otros_grandes_prom": int_pares_prom,
     })
