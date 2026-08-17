@@ -263,22 +263,55 @@ def graf_retiro_mas_temprano(df):
 # ── 5. Gráfico 3 — BBVA arrastra el agregado (solo con datos de flujo) ──────
 
 def graf_bbva_arrastra(df):
-    """Panel A: % del retiro del sistema en el tramo de cierre que es de BBVA.
-    Panel B: intensidad de BBVA en el tramo de cierre (R_tramo / R_promedio_diario_resto_del_mes)
-    vs. el mismo índice promediado en los demás bancos grandes."""
+    """Panel A: cuota de BBVA en el DRENAJE NETO del sistema en la ventana de cierre.
+    Panel B: intensidad — salida neta diaria en la ventana por unidad de flujo
+    bruto diario del banco — de BBVA vs. el resto de bancos grandes.
+
+    Usa neto (R - D), no retiro bruto: los depósitos son entradas de capital que
+    compensan la salida, así que el bruto sobreestima cuánto se drena de verdad.
+    A cambio, el neto puede acercarse a cero o cambiar de signo, y ahí tanto el
+    porcentaje como el ratio dejan de tener sentido — por eso cada métrica se
+    calcula bajo guarda y lo descartado se reporta, no se esconde."""
     ventana = df[(df["es_mes_cierre_trim"] == 1) & (df["dias_al_cierre_mes"] < VENTANA_CIERRE_BDAYS)]
     resto = df[(df["es_mes_cierre_trim"] == 1) & (df["dias_al_cierre_mes"] >= VENTANA_CIERRE_BDAYS)]
 
-    R_tramo_banco = ventana.groupby(["trimestre", "banco"])["R"].sum()
-    R_tramo_sistema = ventana.groupby("trimestre")["R"].sum()
-    part_bbva = (R_tramo_banco.xs(BANCO_FOCO, level="banco") / R_tramo_sistema * 100).dropna()
+    neto = lambda g: g["R"].sum() - g["D"].sum()   # salida neta: + = sale plata
+    N_tramo_banco = ventana.groupby(["trimestre", "banco"]).apply(neto)
 
+    # ── Participación: cuota del DRENAJE, no del neto agregado ────────────────
+    # El neto del sistema no sirve de denominador: los bancos que están entrando
+    # capital lo achican, y la cuota de BBVA se dispara por encima de 100% o
+    # cambia de signo sin que su comportamiento haya cambiado. Se usa la suma de
+    # los netos positivos — cuánto se drena en total —, que siempre da 0-100%.
+    drenaje_sistema = N_tramo_banco.clip(lower=0).groupby("trimestre").sum()
+    part_bbva = (N_tramo_banco.xs(BANCO_FOCO, level="banco").clip(lower=0)
+                 / drenaje_sistema.where(drenaje_sistema > 0) * 100)
+    part_bbva = part_bbva.replace([np.inf, -np.inf], np.nan).dropna()
+
+    # ── Intensidad: neto del cierre contra la ESCALA del banco ────────────────
+    # El denominador natural sería el neto diario fuera de la ventana, pero ese
+    # neto es negativo casi siempre: los bancos acumulan durante el mes y drenan
+    # al cierre — justamente el patrón que describe el one-pager. Dividir por él
+    # da un ratio negativo y sin sentido. Se divide por el flujo BRUTO diario,
+    # que mide el tamaño operativo del banco y nunca es ~0: la métrica pasa a ser
+    # "cuánto drena por día en el cierre, por unidad de su actividad diaria".
     dias_resto = resto.groupby(["trimestre", "banco"])["fecha"].nunique()
-    R_diario_resto = (resto.groupby(["trimestre", "banco"])["R"].sum() / dias_resto).replace([np.inf, -np.inf], np.nan)
-    R_diario_tramo = R_tramo_banco / VENTANA_CIERRE_BDAYS
-    intensidad = (R_diario_tramo / R_diario_resto).replace([np.inf, -np.inf], np.nan)
+    N_diario_resto = resto.groupby(["trimestre", "banco"]).apply(neto) / dias_resto
+    N_diario_tramo = N_tramo_banco / VENTANA_CIERRE_BDAYS
+    bruto_diario_resto = (resto.groupby(["trimestre", "banco"])[["R", "D"]].sum().sum(axis=1) / dias_resto)
+    escala = bruto_diario_resto.where(bruto_diario_resto > 0)
+    intensidad = (N_diario_tramo / escala).replace([np.inf, -np.inf], np.nan)
 
-    volumen_banco = df.groupby("banco")[["R", "D"]].sum().sum(axis=1).sort_values(ascending=False)
+    n_sin_escala = int(bruto_diario_resto.notna().sum() - escala.notna().sum())
+    n_sin_drenaje = int((drenaje_sistema <= 0).sum())
+    print(f"  Neto: {n_sin_drenaje} trimestres sin drenaje agregado, "
+          f"{n_sin_escala} pares banco-trimestre sin escala (banco inactivo ese mes)")
+    n_neg = int((N_tramo_banco.xs(BANCO_FOCO, level="banco") < 0).sum())
+    if n_neg:
+        print(f"  · {n_neg} trimestres en que {BANCO_FOCO} fue receptor neto en la ventana "
+              f"(participación 0% esos trimestres, no negativa)")
+
+    volumen_banco = df.groupby("banco")[["R", "D"]].sum().sum(axis=1).sort_values(ascending=False)  # tamaño = flujo bruto
     grandes = [b for b in volumen_banco.index[:6] if b != BANCO_FOCO]
 
     int_bbva = intensidad.xs(BANCO_FOCO, level="banco").dropna()
@@ -286,21 +319,21 @@ def graf_bbva_arrastra(df):
     int_pares_prom = int_pares.groupby("trimestre").mean().dropna()
 
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                         subplot_titles=("% del retiro del sistema (tramo de cierre) que es de BBVA",
-                                          "Intensidad del retiro en el tramo de cierre (BBVA vs. resto de bancos grandes)"))
+                         subplot_titles=("% de la salida NETA del sistema (ventana de cierre) que es de BBVA",
+                                          "Salida neta diaria en la ventana, por unidad de flujo bruto diario"))
     fig.add_trace(go.Scatter(x=part_bbva.index.to_timestamp(), y=part_bbva.values, mode="lines+markers",
-                              name="% BBVA del retiro sistema", line=dict(color="#a85a2b")), row=1, col=1)
+                              name="% BBVA del drenaje del sistema", line=dict(color="#a85a2b")), row=1, col=1)
     fig.add_trace(go.Scatter(x=int_bbva.index.to_timestamp(), y=int_bbva.values, mode="lines+markers",
                               name="Intensidad BBVA", line=dict(color="#a85a2b")), row=2, col=1)
     fig.add_trace(go.Scatter(x=int_pares_prom.index.to_timestamp(), y=int_pares_prom.values, mode="lines+markers",
                               name="Intensidad — otros bancos grandes (prom.)", line=dict(color="#5c6673", dash="dot")), row=2, col=1)
 
-    fig.update_yaxes(title_text="% del retiro sistema", row=1, col=1)
-    fig.update_yaxes(title_text="× veces su ritmo normal", row=2, col=1)
-    fig.update_layout(title="BBVA arrastra el agregado del sistema", template="plotly_white", legend=dict(orientation="h", y=-0.15))
+    fig.update_yaxes(title_text="% del drenaje del sistema", row=1, col=1)
+    fig.update_yaxes(title_text="neto de cierre / actividad diaria", row=2, col=1)
+    fig.update_layout(title="BBVA arrastra el agregado del sistema (salida neta)", template="plotly_white", legend=dict(orientation="h", y=-0.15))
 
     datos = pd.DataFrame({
-        "participacion_bbva_pct_retiro_sistema": part_bbva,
+        "participacion_bbva_pct_retiro_sistema": part_bbva,   # ahora sobre el NETO
         "intensidad_bbva": int_bbva,
         "intensidad_otros_grandes_prom": int_pares_prom,
     })
@@ -309,9 +342,10 @@ def graf_bbva_arrastra(df):
 
     # Detalle por banco: insumo de ambos paneles, para auditar banco por banco
     detalle = pd.DataFrame({
-        "retiro_tramo_cierre": R_tramo_banco,
-        "retiro_diario_tramo_cierre": R_diario_tramo,
-        "retiro_diario_resto_del_mes": R_diario_resto,
+        "neto_ventana_cierre": N_tramo_banco,
+        "neto_diario_ventana_cierre": N_diario_tramo,
+        "neto_diario_resto_del_mes": N_diario_resto,
+        "bruto_diario_resto_del_mes": bruto_diario_resto,   # denominador de la intensidad
         "intensidad": intensidad,
     }).reset_index()
     detalle["trimestre"] = detalle["trimestre"].astype(str)
@@ -328,18 +362,33 @@ def datos_magnitud_retiro(df):
     (VENTANA_CIERRE_BDAYS días hábiles) de cada cierre de trimestre, sumado por
     año e indexado al primer año = 100.
 
-    Los gráficos 1-3 normalizan a % del mes o usan proporciones/ratios — por
+    Los otros gráficos normalizan a % del mes o usan proporciones/ratios — por
     diseño no pueden mostrar que el monto absoluto creció. Esta serie es el
     complemento: mide el crecimiento real, no la forma. Se exporta como índice,
     no como monto en soles/dólares, para no imprimir cifras de flujo absolutas
-    del sistema en un artifact que puede terminar compartido."""
-    tramo = df[(df["es_mes_cierre_trim"] == 1) & (df["dias_al_cierre_mes"] < VENTANA_CIERRE_BDAYS)]
-    por_anio = tramo.groupby("anio")["R"].sum().reset_index().rename(
-        columns={"anio": "año", "R": "retiro_absoluto"})
-    por_anio = por_anio.sort_values("año")
+    del sistema en un artifact que puede terminar compartido.
 
-    base = por_anio["retiro_absoluto"].iloc[0] if len(por_anio) else 0
-    por_anio["indice_retiro"] = (por_anio["retiro_absoluto"] / base * 100).round(1) if base > 0 else None
+    Mide SALIDA NETA (R - D), no retiro bruto: en la ventana de cierre también
+    entran depósitos, y contar solo los retiros sobreestima cuánto se drena."""
+    tramo = df[(df["es_mes_cierre_trim"] == 1) & (df["dias_al_cierre_mes"] < VENTANA_CIERRE_BDAYS)]
+    por_anio = tramo.groupby("anio")[["R", "D"]].sum().reset_index().rename(columns={"anio": "año"})
+    por_anio["salida_neta"] = por_anio["R"] - por_anio["D"]
+    por_anio["retiro_bruto"] = por_anio["R"]          # se conserva para comparar en el Excel
+    por_anio = por_anio.sort_values("año").drop(columns=["R", "D"])
+
+    base = por_anio["salida_neta"].iloc[0] if len(por_anio) else 0
+    if base > 0:
+        por_anio["indice_retiro"] = (por_anio["salida_neta"] / base * 100).round(1)
+        n_neg = int((por_anio["salida_neta"] < 0).sum())
+        if n_neg:
+            print(f"  ⚠ {n_neg} años con salida neta NEGATIVA en la ventana de cierre: "
+                  f"esos años el sistema fue receptor neto, y el índice sale bajo cero.")
+    else:
+        # Indexar contra una base <= 0 da un índice sin sentido (signo invertido o
+        # división por ~0). Mejor no publicar la serie que publicarla mal.
+        por_anio["indice_retiro"] = np.nan
+        print(f"  ⚠ Año base con salida neta <= 0 ({base:,.0f}): no se puede indexar. "
+              f"Índice omitido — revisar el año base o usar retiro bruto.")
     return por_anio
 
 
@@ -370,7 +419,7 @@ def exportar_json_artifact(datos1, datos2, datos3, datos4, ruta):
         "g1_ciclo_encaje": _registros(datos1),
         "g2_inicio_retiro": _registros(datos2),
         "g3_bbva": _registros(datos3),
-        # Solo el índice, NO "retiro_absoluto": la cifra en soles/dólares del
+        # Solo el índice, NO "salida_neta"/"retiro_bruto": la cifra en soles/dólares del
         # sistema no debería terminar embebida en un artifact compartible.
         "g4_magnitud": _registros(datos4, cols=["año", "indice_retiro"]),
     }
@@ -444,9 +493,10 @@ def main():
         _hoja(writer, "G3_detalle_banco", detalle3,
               "Grafico 3 (insumo) — retiro e intensidad banco por banco, por trimestre")
         _hoja(writer, "G4_magnitud", datos4,
-              f"Grafico 4 — retiro TOTAL del sistema (soles/dolares, sin normalizar) en los últimos "
-              f"{VENTANA_CIERRE_BDAYS} días hábiles de cierre-trimestre, por año, e indexado al primer año=100. "
-              f"'retiro_absoluto' NO se exporta al JSON del one-pager — solo 'indice_retiro'.")
+              f"Grafico 4 — SALIDA NETA (retiros - depositos) del sistema en los últimos "
+              f"{VENTANA_CIERRE_BDAYS} días hábiles de cierre-trimestre, por año, indexada al primer año=100. "
+              f"'retiro_bruto' se incluye para comparar cuanto sobreestima el bruto. "
+              f"Al JSON del one-pager solo va 'indice_retiro'.")
         _hoja(writer, "Base_banco_fecha", base,
               "Agregado base: R y D por banco y fecha, tras alias y limpieza (insumo de los 3 gráficos)")
 
