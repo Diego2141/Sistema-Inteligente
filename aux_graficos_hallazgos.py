@@ -229,7 +229,13 @@ def anotar_calendario_encaje(df):
     except Exception as e:
         print(f"  · no se pudo cruzar con el calendario PE+US: {e}")
 
-    cols = ["fecha", "dias_al_cierre_mes", "es_mes_cierre_trim", "anio", "trimestre", "mes_completo"]
+    # pos_en_mes (1 = primer día hábil) se exporta junto a dias_al_cierre_mes
+    # (0 = último): los meses tienen entre ~19 y ~23 días hábiles, así que el
+    # inicio y el cierre necesitan anclajes distintos. Contar el inicio desde el
+    # cierre haría que las posiciones más lejanas solo existan en los meses
+    # largos, y la barra de ese día promediaría un subconjunto sesgado.
+    cols = ["fecha", "pos_en_mes", "dias_al_cierre_mes", "es_mes_cierre_trim",
+            "anio", "trimestre", "mes_completo"]
     return df.merge(cal[cols], on="fecha", how="left")
 
 
@@ -238,7 +244,7 @@ def anotar_calendario_encaje(df):
 def graf_ciclo_encaje(df):
     """R y D del sistema como % del volumen mensual, por día-al-cierre,
     separando meses cierre-trimestre vs. resto. Slider recorre los años."""
-    sistema = df.groupby(["fecha", "dias_al_cierre_mes", "es_mes_cierre_trim", "anio"])[["R", "D"]].sum().reset_index()
+    sistema = df.groupby(["fecha", "pos_en_mes", "dias_al_cierre_mes", "es_mes_cierre_trim", "anio"])[["R", "D"]].sum().reset_index()
 
     total_mes = (
         df.assign(mes=df["fecha"].dt.to_period("M"))
@@ -249,11 +255,28 @@ def graf_ciclo_encaje(df):
     sistema["R_pct"] = np.where(sistema["R_total_mes"] > 0, sistema["R"] / sistema["R_total_mes"] * 100, 0)
     sistema["D_pct"] = np.where(sistema["D_total_mes"] > 0, sistema["D"] / sistema["D_total_mes"] * 100, 0)
 
+    # Dos agregados con anclajes distintos: uno contando desde el primer día
+    # hábil del mes y otro desde el último. Un mes de 19 días hábiles y uno de 23
+    # aportan ambos a "día 1" y a "día 0 al cierre", pero solo el largo llega a
+    # "22 días al cierre" — por eso el inicio se ancla al inicio.
     agg = (
         sistema.groupby(["anio", "es_mes_cierre_trim", "dias_al_cierre_mes"])[["R_pct", "D_pct"]]
         .mean()
         .reset_index()
     )
+    agg_ini = (
+        sistema.groupby(["anio", "es_mes_cierre_trim", "pos_en_mes"])[["R_pct", "D_pct"]]
+        .mean()
+        .reset_index()
+    )
+    # Cuántos meses aportan a cada posición: si una barra promedia pocos meses,
+    # conviene saberlo antes de leerla como representativa.
+    n_ini = (sistema.groupby(["anio", "es_mes_cierre_trim", "pos_en_mes"])["fecha"]
+             .nunique().rename("n_meses").reset_index())
+    n_fin = (sistema.groupby(["anio", "es_mes_cierre_trim", "dias_al_cierre_mes"])["fecha"]
+             .nunique().rename("n_meses").reset_index())
+    agg_ini = agg_ini.merge(n_ini, on=["anio", "es_mes_cierre_trim", "pos_en_mes"])
+    agg = agg.merge(n_fin, on=["anio", "es_mes_cierre_trim", "dias_al_cierre_mes"])
 
     anios = sorted(agg["anio"].unique())
     fig = go.Figure()
@@ -289,14 +312,13 @@ def graf_ciclo_encaje(df):
         template="plotly_white",
         legend=dict(orientation="h", y=-0.2),
     )
-    datos = agg.rename(columns={
-        "anio": "año",
-        "es_mes_cierre_trim": "es_mes_cierre_trimestre",
-        "dias_al_cierre_mes": "dias_al_cierre_mes",
-        "R_pct": "retiro_pct_del_mes",
-        "D_pct": "deposito_pct_del_mes",
-    }).sort_values(["año", "es_mes_cierre_trimestre", "dias_al_cierre_mes"], ascending=[True, False, False])
-    return fig, datos
+    ren = {"anio": "año", "es_mes_cierre_trim": "es_mes_cierre_trimestre",
+           "R_pct": "retiro_pct_del_mes", "D_pct": "deposito_pct_del_mes"}
+    datos = agg.rename(columns=ren).sort_values(
+        ["año", "es_mes_cierre_trimestre", "dias_al_cierre_mes"], ascending=[True, False, False])
+    datos_ini = agg_ini.rename(columns=ren).sort_values(
+        ["año", "es_mes_cierre_trimestre", "pos_en_mes"], ascending=[True, False, True])
+    return fig, datos, datos_ini
 
 
 # ── 4. Gráfico 2 — el retiro llega cada vez más temprano ────────────────────
@@ -573,7 +595,7 @@ def datos_magnitud_retiro(df):
 
 # ── 7. Export para el one-pager (artifact) ────────────────────────────────
 
-def exportar_json_artifact(datos1, datos2, datos3, datos4, datos5, ruta):
+def exportar_json_artifact(datos1, datos1_ini, datos2, datos3, datos4, datos5, ruta):
     """Escribe un JSON compacto con SOLO las series que se dibujan.
 
     Deliberadamente NO incluye el detalle por banco ni el agregado diario:
@@ -595,7 +617,10 @@ def exportar_json_artifact(datos1, datos2, datos3, datos4, datos5, ruta):
             "umbral_inicio_retiro": UMBRAL_INICIO_RETIRO,
             "banco_foco": BANCO_FOCO,
         },
+        # Dos series con anclajes distintos: g1 cuenta días hacia atrás desde el
+        # cierre, g1_inicio cuenta hacia adelante desde el primer día hábil.
         "g1_ciclo_encaje": _registros(datos1),
+        "g1_inicio_mes": _registros(datos1_ini),
         "g2_inicio_retiro": _registros(datos2),
         "g3_bbva": _registros(datos3),
         # Del índice sale solo el número indexado, no el monto que lo genera.
@@ -731,7 +756,7 @@ def main():
     RUTA_SALIDA.mkdir(parents=True, exist_ok=True)
 
     print("\nGenerando gráfico 1 — ciclo de encaje (slider por año)...")
-    fig1, datos1 = graf_ciclo_encaje(df)
+    fig1, datos1, datos1_ini = graf_ciclo_encaje(df)
     fig1.write_html(RUTA_SALIDA / "01_ciclo_encaje_slider.html", include_plotlyjs=PLOTLYJS_MODE)
 
     print("Generando gráfico 2 — retiro cada vez más temprano...")
@@ -762,6 +787,9 @@ def main():
     base["trimestre"] = base["trimestre"].astype(str)
     ruta_xlsx = RUTA_SALIDA / "datos_graficos_hallazgos.xlsx"
     with pd.ExcelWriter(ruta_xlsx, engine="openpyxl") as writer:
+        _hoja(writer, "G1_inicio_mes", datos1_ini,
+              "Grafico 1 (inicio) — mismo calculo anclado al PRIMER dia habil del mes. "
+              "n_meses indica cuantos meses aportan a cada posicion.")
         _hoja(writer, "G1_ciclo_encaje", datos1,
               "Grafico 1 — promedio por año/día-al-cierre del % del volumen mensual (una fila por línea del slider)")
         _hoja(writer, "G2_inicio_retiro", datos2,
@@ -789,7 +817,7 @@ def main():
     # JSON compacto para incrustar las curvas reales en el one-pager
     print("Exportando JSON para el one-pager...")
     ruta_json = RUTA_SALIDA / "datos_para_onepager.json"
-    exportar_json_artifact(datos1, datos2, datos3, datos4, datos5, ruta_json)
+    exportar_json_artifact(datos1, datos1_ini, datos2, datos3, datos4, datos5, ruta_json)
 
     print(f"\nListo. Archivos en: {RUTA_SALIDA}")
     print(f"  Excel de validación : {ruta_xlsx.name}")
