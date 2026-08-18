@@ -489,7 +489,7 @@ def graf_bbva_arrastra(df):
 # Match por subcadena sobre el nombre normalizado, porque el archivo escribe
 # "J.P. MORGAN", "BANK OF CHINA (PERÚ)" y variantes con puntos y paréntesis.
 CLAVES_GLOBALES = ("BBVA", "CONTINEN", "CITI", "JPMORGAN", "DEUTSCHE",
-                   "SCOTIABANK", "BANKOFCHINA", "ICBC", "BCI")
+                   "SCOTIABANK", "BANKOFCHINA", "ICBC", "BCI", "SANTANDER", "HSBC")
 
 
 def _es_global(nombre):
