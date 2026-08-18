@@ -479,6 +479,53 @@ def graf_bbva_arrastra(df):
     return fig, datos, detalle
 
 
+
+# ── 5b. Cuota anual de cada banco en la salida neta ─────────────────────────
+
+# Bancos con matriz en el exterior. La hipótesis a contrastar es que el patrón
+# de salida al cierre lo siguen los bancos globales y no los de capital local.
+# Se listan TODOS los que califican, no solo los dos que sostienen la hipótesis:
+# si Scotiabank o Deutsche no muestran el patrón, eso debe verse.
+BANCOS_GLOBALES = {"BBVA", "CITIBANK", "SCOTIABANK", "DEUTSCHE"}
+
+
+def datos_cuota_por_banco(df):
+    """Cuota de cada banco en la salida neta del sistema, por AÑO.
+
+    Es un agregado anual de verdad: suma los netos del año y recién ahí divide.
+    No es el promedio de las cuotas trimestrales, que le daría el mismo peso a
+    un trimestre chico que a uno grande.
+
+    Denominador = suma de los netos positivos del año, es decir cuánta salida
+    hubo en total. Los bancos que fueron receptores netos no lo achican."""
+    ventana = df[(df["es_mes_cierre_trim"] == 1) & (df["mes_completo"] == 1)
+                 & (df["dias_al_cierre_mes"] < VENTANA_CIERRE_BDAYS)]
+    if ventana.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    neto_banco = (ventana.groupby(["anio", "banco"])
+                  .apply(lambda g: g["R"].sum() - g["D"].sum())
+                  .rename("neto"))
+    salida_total = neto_banco.clip(lower=0).groupby("anio").sum().rename("salida_sistema")
+
+    d = neto_banco.reset_index().merge(salida_total.reset_index(), on="anio")
+    d["cuota_pct"] = np.where(d["salida_sistema"] > 0,
+                              d["neto"].clip(lower=0) / d["salida_sistema"] * 100, np.nan)
+    d["neto_musd"] = d["neto"] / 1e6
+    d["es_global"] = d["banco"].isin(BANCOS_GLOBALES).astype(int)
+
+    # Trimestres cerrados por año: para marcar el año en curso como parcial
+    trim = (ventana.groupby("anio")["trimestre"].nunique().rename("trimestres_cerrados"))
+    d = d.merge(trim.reset_index(), on="anio")
+    d = d.rename(columns={"anio": "año"}).sort_values(["año", "cuota_pct"],
+                                                       ascending=[True, False])
+
+    # Serie ancha: una fila por año, una columna por banco
+    ancha = d.pivot(index="año", columns="banco", values="cuota_pct").reset_index()
+    ancha = ancha.merge(trim.reset_index().rename(columns={"anio": "año"}), on="año")
+    return d, ancha
+
+
 # ── 6. Magnitud absoluta del retiro, indexada ───────────────────────────────
 
 def datos_magnitud_retiro(df):
@@ -518,7 +565,7 @@ def datos_magnitud_retiro(df):
 
 # ── 7. Export para el one-pager (artifact) ────────────────────────────────
 
-def exportar_json_artifact(datos1, datos2, datos3, datos4, ruta):
+def exportar_json_artifact(datos1, datos2, datos3, datos4, datos5, ruta):
     """Escribe un JSON compacto con SOLO las series que se dibujan.
 
     Deliberadamente NO incluye el detalle por banco ni el agregado diario:
@@ -548,6 +595,11 @@ def exportar_json_artifact(datos1, datos2, datos3, datos4, ruta):
         # tabla del one-pager los muestra, a pedido — quedan legibles en el
         # código fuente de la página publicada.
         "g4_magnitud": _registros(datos4, cols=["año", "indice_retiro"]),
+        # Cuota anual de cada banco en la salida neta. Va el porcentaje y el
+        # monto: el monto permite ver si una cuota alta viene de un año chico.
+        "g5_cuota_bancos": _registros(
+            datos5, cols=["año", "banco", "cuota_pct", "neto_musd", "es_global",
+                          "trimestres_cerrados"]),
     }
     with open(ruta, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
@@ -685,6 +737,17 @@ def main():
     print("Calculando magnitud absoluta del retiro (índice por año)...")
     datos4 = datos_magnitud_retiro(df)
 
+    print("Calculando cuota anual por banco...")
+    datos5, cuota_ancha = datos_cuota_por_banco(df)
+    if not datos5.empty:
+        ult = datos5[datos5["año"] == datos5["año"].max()]
+        print(f"  Cuota de la salida neta en {int(datos5['año'].max())} "
+              f"({int(ult['trimestres_cerrados'].iloc[0])} trimestres):")
+        for _, r in ult.head(6).iterrows():
+            if pd.notna(r["cuota_pct"]):
+                g = " [global]" if r["es_global"] else ""
+                print(f"    {r['banco']:<14}{r['cuota_pct']:>6.1f}%{g}")
+
     # Excel de validación: una hoja por serie graficada + el agregado base
     print("Exportando Excel de validación...")
     base = df.copy()
@@ -706,13 +769,19 @@ def main():
               f"{VENTANA_CIERRE_BDAYS} días hábiles de cierre-trimestre, por año, indexada al primer año=100. "
               f"'retiro_bruto' se incluye para comparar cuanto sobreestima el bruto. "
               f"Al JSON del one-pager solo va 'indice_retiro'.")
+        _hoja(writer, "G5_cuota_por_banco", datos5,
+              "Grafico 5 — cuota de cada banco en la salida neta del sistema, por AÑO. "
+              "Agregado anual real (suma los netos del año y despues divide), no promedio "
+              "de cuotas trimestrales. es_global marca los bancos con matriz en el exterior.")
+        _hoja(writer, "G5_cuota_ancha", cuota_ancha,
+              "Grafico 5 (vista ancha) — una fila por año, una columna por banco.")
         _hoja(writer, "Base_banco_fecha", base,
               "Agregado base: R y D por banco y fecha, tras alias y limpieza (insumo de los 3 gráficos)")
 
     # JSON compacto para incrustar las curvas reales en el one-pager
     print("Exportando JSON para el one-pager...")
     ruta_json = RUTA_SALIDA / "datos_para_onepager.json"
-    exportar_json_artifact(datos1, datos2, datos3, datos4, ruta_json)
+    exportar_json_artifact(datos1, datos2, datos3, datos4, datos5, ruta_json)
 
     print(f"\nListo. Archivos en: {RUTA_SALIDA}")
     print(f"  Excel de validación : {ruta_xlsx.name}")
