@@ -556,6 +556,29 @@ def datos_cuota_por_banco(df):
     return d, ancha
 
 
+
+# ── 5c. Serie diaria cruda del sistema ──────────────────────────────────────
+
+def datos_serie_diaria(df):
+    """Retiro y depósito diarios del sistema entero, en millones USD.
+
+    Es la variable que el modelo busca proyectar, sin normalizar ni agregar por
+    posición en el mes: la serie tal cual. Sirve de establecimiento antes de los
+    hallazgos, que son todos lecturas de esta misma serie.
+
+    Claves cortas (f/r/d) a propósito: son ~4.000 días y con nombres largos el
+    JSON del one-pager se triplica."""
+    diario = df.groupby("fecha")[["R", "D"]].sum().reset_index().sort_values("fecha")
+    out = pd.DataFrame({
+        "f": diario["fecha"].dt.strftime("%Y-%m-%d"),
+        "r": (diario["R"] / 1e6).round(1),
+        "d": (diario["D"] / 1e6).round(1),
+    })
+    print(f"  Serie diaria: {len(out):,} días "
+          f"({out['f'].iloc[0]} → {out['f'].iloc[-1]})")
+    return out
+
+
 # ── 6. Magnitud absoluta del retiro, indexada ───────────────────────────────
 
 def datos_magnitud_retiro(df):
@@ -595,7 +618,7 @@ def datos_magnitud_retiro(df):
 
 # ── 7. Export para el one-pager (artifact) ────────────────────────────────
 
-def exportar_json_artifact(datos1, datos1_ini, datos2, datos3, datos4, datos5, ruta):
+def exportar_json_artifact(datos0, datos1, datos1_ini, datos2, datos3, datos4, datos5, ruta):
     """Escribe un JSON compacto con SOLO las series que se dibujan.
 
     Deliberadamente NO incluye el detalle por banco ni el agregado diario:
@@ -612,6 +635,8 @@ def exportar_json_artifact(datos1, datos1_ini, datos2, datos3, datos4, datos5, r
         return d.astype(object).where(pd.notna(d), None).to_dict(orient="records")
 
     payload = {
+        # Serie cruda primero: es la variable a modelar, y el resto son lecturas de ella.
+        "g0_serie_diaria": _registros(datos0, cols=["f", "r", "d"]),
         "meta": {
             "ventana_cierre_bdays": VENTANA_CIERRE_BDAYS,
             "umbral_inicio_retiro": UMBRAL_INICIO_RETIRO,
@@ -772,6 +797,9 @@ def main():
 
     print("Calculando cuota anual por banco...")
     datos5, cuota_ancha = datos_cuota_por_banco(df)
+
+    print("Preparando serie diaria del sistema...")
+    datos0 = datos_serie_diaria(df)
     if not datos5.empty:
         ult = datos5[datos5["año"] == datos5["año"].max()]
         print(f"  Cuota de la salida neta en {int(datos5['año'].max())} "
@@ -817,7 +845,7 @@ def main():
     # JSON compacto para incrustar las curvas reales en el one-pager
     print("Exportando JSON para el one-pager...")
     ruta_json = RUTA_SALIDA / "datos_para_onepager.json"
-    exportar_json_artifact(datos1, datos1_ini, datos2, datos3, datos4, datos5, ruta_json)
+    exportar_json_artifact(datos0, datos1, datos1_ini, datos2, datos3, datos4, datos5, ruta_json)
 
     print(f"\nListo. Archivos en: {RUTA_SALIDA}")
     print(f"  Excel de validación : {ruta_xlsx.name}")
