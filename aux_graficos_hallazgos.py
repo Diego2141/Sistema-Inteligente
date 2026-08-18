@@ -484,9 +484,17 @@ def graf_bbva_arrastra(df):
 
 # Bancos con matriz en el exterior. La hipótesis a contrastar es que el patrón
 # de salida al cierre lo siguen los bancos globales y no los de capital local.
-# Se listan TODOS los que califican, no solo los dos que sostienen la hipótesis:
-# si Scotiabank o Deutsche no muestran el patrón, eso debe verse.
-BANCOS_GLOBALES = {"BBVA", "CITIBANK", "SCOTIABANK", "DEUTSCHE"}
+# Se listan TODOS los que califican, no solo los que sostienen la hipótesis: si
+# Scotiabank, ICBC o Bank of China no muestran el patrón, eso tiene que verse.
+# Match por subcadena sobre el nombre normalizado, porque el archivo escribe
+# "J.P. MORGAN", "BANK OF CHINA (PERÚ)" y variantes con puntos y paréntesis.
+CLAVES_GLOBALES = ("BBVA", "CONTINEN", "CITI", "JPMORGAN", "DEUTSCHE",
+                   "SCOTIABANK", "BANKOFCHINA", "ICBC", "BCI")
+
+
+def _es_global(nombre):
+    n = "".join(ch for ch in str(nombre).upper() if ch.isalnum())
+    return int(any(k in n for k in CLAVES_GLOBALES))
 
 
 def datos_cuota_por_banco(df):
@@ -512,7 +520,7 @@ def datos_cuota_por_banco(df):
     d["cuota_pct"] = np.where(d["salida_sistema"] > 0,
                               d["neto"].clip(lower=0) / d["salida_sistema"] * 100, np.nan)
     d["neto_musd"] = d["neto"] / 1e6
-    d["es_global"] = d["banco"].isin(BANCOS_GLOBALES).astype(int)
+    d["es_global"] = d["banco"].apply(_es_global)
 
     # Trimestres cerrados por año: para marcar el año en curso como parcial
     trim = (ventana.groupby("anio")["trimestre"].nunique().rename("trimestres_cerrados"))
