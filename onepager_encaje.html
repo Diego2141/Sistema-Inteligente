@@ -244,6 +244,28 @@
   .ask-card.warm { border-color: color-mix(in srgb, var(--warm) 35%, var(--line)); }
   .ask-card.warm h3 { color: var(--warm); }
 
+  /* Cita-tesis (el faro) */
+  .thesis { font-size: .95rem; font-style: italic; color: var(--accent-ink);
+    background: var(--accent-soft); border-radius: 10px; padding: .9rem 1.05rem;
+    margin: 1.1rem 0 0; max-width: 62ch; line-height: 1.6; border-left: 3px solid var(--accent); }
+  .thesis b { font-style: normal; font-weight: 700; }
+
+  /* Los 3 pilares */
+  .pillars { display: flex; flex-wrap: wrap; gap: .7rem; margin: 1.1rem 0 0; }
+  .pillar { flex: 1 1 150px; border: 1px solid var(--line); border-radius: 10px;
+    padding: .75rem .85rem; background: var(--panel); }
+  .pillar-n { display: inline-flex; align-items: center; justify-content: center;
+    width: 1.35rem; height: 1.35rem; border-radius: 50%; background: var(--line-2);
+    color: var(--ink-soft); font-size: .72rem; font-weight: 700;
+    font-family: ui-monospace, monospace; margin-bottom: .45rem; }
+  .pillar-k { display: block; font-family: ui-serif, Georgia, serif; font-weight: 600;
+    font-size: .98rem; color: var(--ink); }
+  .pillar-d { display: block; font-size: .78rem; color: var(--ink-soft);
+    margin-top: .22rem; line-height: 1.42; }
+  .pillar.is-focus { border-color: var(--accent); background: var(--accent-soft); }
+  .pillar.is-focus .pillar-n { background: var(--accent); color: var(--paper); }
+  .pillar.is-focus .pillar-k { color: var(--accent-ink); }
+
   .next { margin-top: 2.4rem; padding-top: 1.2rem; border-top: 1px solid var(--line-2);
     display: flex; gap: 1rem; align-items: flex-start; }
   .next .tag { flex: none; font-size: .68rem; letter-spacing: .08em; text-transform: uppercase;
@@ -367,10 +389,40 @@
       </div>
     </section>
 
+    <!-- ── Marco: cómo encaja esto en la gestión de las RIN ── -->
+    <section id="marco">
+      <div class="sec-head"><h2>Cómo encaja esto en la gestión de las RIN</h2><span class="n">el rol del faro</span></div>
+      <p class="f-body" style="max-width:62ch">Antes de proponer qué construir, vale la pena situar el proyecto: no buscamos prescribir la gestión de liquidez de las RIN, sino darle a quien la ejerce una referencia más clara del entorno en el que decide.</p>
+      <p class="thesis">Pensamos en esto como el <b>Faro de Alejandría</b> del entorno de liquidez de las RIN: el faro no trazaba la ruta de cada barco, era una herramienta de apoyo — un espejo visible a kilómetros que ayudaba a que muchas naves se guiaran y no encallaran. No pretendemos, por ahora, plantear el camino exacto que debería seguir la gestión de liquidez, sino guiar y esclarecer ese entorno, tal como era la labor del faro.</p>
+
+      <p class="f-body" style="max-width:62ch; margin-top:1.4rem">En términos concretos, así opera hoy la liquidez de corto plazo: los ingresos netos del Sistema Financiero ingresan a dos portafolios de corto plazo, y desde ahí el dinero se asigna a distintos instrumentos y plazos de money market — depósitos, certificados de depósito, FX swap, entre otros.</p>
+
+      <div class="asks">
+        <div class="ask-card">
+          <h3>Portafolio de disponibilidad inmediata</h3>
+          <p style="margin:0; font-size:.87rem; line-height:1.5; color:var(--ink-soft)">Cubre el requerimiento más cercano en el tiempo: la caja que debe estar lista sin fricción.</p>
+        </div>
+        <div class="ask-card warm">
+          <h3>Portafolio de liquidez</h3>
+          <p style="margin:0; font-size:.87rem; line-height:1.5; color:var(--ink-soft)">Cubre el resto del horizonte de corto plazo, colocado a distintos instrumentos y plazos de money market.</p>
+        </div>
+      </div>
+
+      <p class="f-body" style="max-width:62ch; margin-top:1.4rem">La gestión de las RIN sigue tres pilares. El proyecto apunta directamente al segundo — liquidez — en los tramos de corto plazo:</p>
+
+      <div class="pillars">
+        <div class="pillar"><span class="pillar-n">1</span><span class="pillar-k">Seguridad</span><span class="pillar-d">determinada por el universo de inversión: contrapartes aprobadas.</span></div>
+        <div class="pillar is-focus"><span class="pillar-n">2</span><span class="pillar-k">Liquidez</span><span class="pillar-d">foco de este proyecto en los tramos de corto plazo.</span></div>
+        <div class="pillar"><span class="pillar-n">3</span><span class="pillar-k">Retorno</span><span class="pillar-d">rendimiento de la posición colocada.</span></div>
+      </div>
+
+      <p class="f-body" style="max-width:62ch; margin-top:1.4rem">Y la decisión de <b>cuánto</b> y a <b>qué plazo</b> invertir sigue una premisa concreta: una expectativa de los requerimientos de liquidez del Sistema Financiero, es decir, sus retiros netos. Esa expectativa es exactamente lo que buscamos anticipar con la serie que identificamos arriba.</p>
+    </section>
+
     <!-- ── Por qué proyectar el flujo acumulado ── -->
     <section id="proyeccion">
       <div class="sec-head"><h2>Qué queremos construir con esto</h2><span class="n">flujo acumulado</span></div>
-      <p class="f-body" style="max-width:62ch">Los tres hallazgos anteriores describen el pasado. El paso que sigue es usarlos para decidir hacia adelante: cuánto colocar hoy y a qué plazo, dado lo que se espera que retire el sistema. Para esa decisión, el dato que importa no es el flujo aislado de un solo día — es el <b>flujo acumulado</b> a lo largo del plazo que se está cubriendo.</p>
+      <p class="f-body" style="max-width:62ch">Esa expectativa de requerimientos de liquidez no puede leerse día por día: el dato que informa la decisión de monto y plazo es el <b>flujo acumulado</b> a lo largo del horizonte que se está cubriendo, no el flujo aislado del día de vencimiento.</p>
 
       <div class="finding" style="border-top:none; padding-top:0; margin-top:1.4rem">
         <span class="f-tag">por qué acumulado, no diario</span>
