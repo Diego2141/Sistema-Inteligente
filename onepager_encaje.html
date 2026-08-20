@@ -266,6 +266,26 @@
   .pillar.is-focus .pillar-n { background: var(--accent); color: var(--paper); }
   .pillar.is-focus .pillar-k { color: var(--accent-ink); }
 
+  /* Caja de matiz — donde el argumento se corrige a sí mismo */
+  .caveat { border: 1px solid color-mix(in srgb, var(--warm) 32%, var(--line));
+    border-radius: 10px; padding: .85rem 1rem; margin: 1.2rem 0 0; max-width: 62ch;
+    background: color-mix(in srgb, var(--warm) 5%, var(--panel)); }
+  .caveat-k { display: block; font-size: .7rem; letter-spacing: .07em; text-transform: uppercase;
+    font-weight: 700; color: var(--warm); margin-bottom: .35rem; }
+  .caveat p { margin: 0; font-size: .88rem; line-height: 1.55; color: var(--ink-soft); }
+  .caveat p b { color: var(--ink); font-weight: 600; }
+
+  /* Ficha del producto */
+  .spec { display: grid; grid-template-columns: max-content 1fr; gap: .5rem 1.1rem;
+    margin: 1.1rem 0 0; padding: .95rem 1.1rem; background: var(--panel);
+    border: 1px solid var(--line-2); border-radius: 10px; }
+  .spec dt { font-size: .72rem; letter-spacing: .06em; text-transform: uppercase;
+    font-weight: 700; color: var(--ink-faint); padding-top: .12rem; }
+  .spec dd { margin: 0; font-size: .88rem; line-height: 1.5; color: var(--ink-soft); }
+  .spec dd b { color: var(--ink); font-weight: 600; }
+  @media (max-width: 560px) { .spec { grid-template-columns: 1fr; gap: .15rem .5rem; }
+    .spec dd { margin-bottom: .5rem; } }
+
   .next { margin-top: 2.4rem; padding-top: 1.2rem; border-top: 1px solid var(--line-2);
     display: flex; gap: 1rem; align-items: flex-start; }
   .next .tag { flex: none; font-size: .68rem; letter-spacing: .08em; text-transform: uppercase;
@@ -427,7 +447,7 @@
       <div class="finding" style="border-top:none; padding-top:0; margin-top:1.4rem">
         <span class="f-tag">por qué acumulado, no diario</span>
         <p class="f-title">El día de vencimiento no muestra cuánta caja hizo falta en el camino</p>
-        <p class="f-body">Un caso simple, con visión perfecta de los retiros: el sistema recibe 200 MM el día 1, retira 1.000 MM el día 2 y 300 MM el día 3. Mirado día a día, el día 3 —el vencimiento— pide cubrir apenas 300 MM, y ese sería el tamaño del depósito a colocar. Pero el sistema nunca estuvo en –300; para el día 2 ya acumulaba –800, y al cierre del día 3 el déficit acumulado llega a –1.100. Ese es el nivel que una posición a tres días necesita cubrir, no el flujo del último día por sí solo.</p>
+        <p class="f-body">Un caso simple, con visión perfecta de los retiros: el sistema recibe 200 MM el día 1, retira 1.000 MM el día 2 y 300 MM el día 3. Mirado día a día, el día 3 —el vencimiento— pide cubrir apenas 300 MM, y ese sería el tamaño del depósito a colocar. Pero el sistema nunca estuvo en –300; para el día 2 ya acumulaba –800, y al cierre del día 3 el déficit acumulado llega a –1.100.</p>
 
         <div class="chart-wrap">
           <svg class="chart" viewBox="0 0 660 240" role="img" aria-label="Ejemplo ilustrativo: flujo de cada día frente al flujo acumulado, del día 0 al día 3">
@@ -444,14 +464,14 @@
 
             <line x1="580" y1="126" x2="580" y2="178" stroke="var(--line)" stroke-width="1" stroke-dasharray="2 3"/>
 
-            <polyline points="60,74 233,54 407,154 580,184" fill="none" stroke="var(--accent)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-            <circle cx="60" cy="74" r="4" fill="var(--paper)" stroke="var(--accent)" stroke-width="2.5"/>
-            <circle cx="233" cy="54" r="4" fill="var(--paper)" stroke="var(--accent)" stroke-width="2.5"/>
-            <circle cx="407" cy="154" r="4" fill="var(--paper)" stroke="var(--accent)" stroke-width="2.5"/>
-            <circle cx="580" cy="184" r="4" fill="var(--paper)" stroke="var(--accent)" stroke-width="2.5"/>
+            <polyline points="60,74 233,54 407,154 580,184" fill="none" stroke="var(--ink)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+            <circle cx="60" cy="74" r="4" fill="var(--paper)" stroke="var(--ink)" stroke-width="2.5"/>
+            <circle cx="233" cy="54" r="4" fill="var(--paper)" stroke="var(--ink)" stroke-width="2.5"/>
+            <circle cx="407" cy="154" r="4" fill="var(--paper)" stroke="var(--ink)" stroke-width="2.5"/>
+            <circle cx="580" cy="184" r="4" fill="var(--paper)" stroke="var(--ink)" stroke-width="2.5"/>
 
-            <text x="407" y="142" text-anchor="middle" font-size="11" font-weight="700" fill="var(--accent)">-800</text>
-            <text x="594" y="188" text-anchor="start" font-size="11" font-weight="700" fill="var(--accent)">-1.100</text>
+            <text x="407" y="142" text-anchor="middle" font-size="11" font-weight="700" fill="var(--ink)">-800</text>
+            <text x="594" y="188" text-anchor="start" font-size="11" font-weight="700" fill="var(--ink)">-1.100</text>
 
             <text x="60" y="222" text-anchor="middle" font-size="11" fill="var(--ink-faint)">día 0</text>
             <text x="233" y="222" text-anchor="middle" font-size="11" fill="var(--ink-faint)">día 1</text>
@@ -462,16 +482,152 @@
         <div class="legend">
           <span><span class="swatch" style="background:var(--s-dep)"></span>entrada del día</span>
           <span><span class="swatch" style="background:var(--s-retiro)"></span>salida del día</span>
-          <span><span class="swatch dash" style="color:var(--accent)"></span>acumulado</span>
+          <span><span class="swatch" style="background:var(--ink)"></span>acumulado</span>
         </div>
         <ul class="hint"><li>Ejemplo ilustrativo con visión perfecta de retiros — no son datos observados del sistema.</li></ul>
 
         <div class="stat">
-          <div><span class="v cool">300 MM</span><span class="k">depósito que sugiere mirar solo el flujo del día de vencimiento</span></div>
-          <div><span class="v">1.100 MM</span><span class="k">depósito que realmente cubre el camino, según el flujo acumulado</span></div>
+          <div><span class="v cool">300 MM</span><span class="k">monto que sugiere mirar solo el flujo del día de vencimiento</span></div>
+          <div><span class="v">1.100 MM</span><span class="k">déficit acumulado real al cierre del día 3</span></div>
         </div>
+      </div>
 
-        <p class="f-q">Si construimos la proyección del flujo acumulado sobre la serie que ya identificamos —no solo el neto de cierre—, con cuánto anticipo la necesitarían para que informe la decisión de monto y plazo, y a qué nivel de agregación: sistema completo, por banco, o ambos?</p>
+      <!-- ── La envolvente ── -->
+      <div class="finding">
+        <span class="f-tag">la envolvente</span>
+        <p class="f-title">Y el acumulado al vencimiento tampoco basta: hay que cubrir cada fecha del camino</p>
+        <p class="f-body">Aquí el ejemplo se corrige a sí mismo. Un depósito de 1.100 MM que vence el día 3 <b>igual falla</b>: el día 2 el sistema ya acumulaba –800 y no había con qué cubrirlo. El acumulado al horizonte da el <b>monto</b> correcto, pero no el <b>plazo</b>.</p>
+        <p class="f-body" style="margin-top:.7rem">La regla que realmente se deduce es más exigente: la escalera de vencimientos tiene que dominar la trayectoria acumulada <b>en cada fecha</b>, no solo al final. Eso define el objeto que hay que proyectar — la <b>envolvente</b>: el mínimo corriente del flujo acumulado, fecha por fecha. Es una curva, no un número, y es lo que permite decidir monto y plazo a la vez.</p>
+
+        <div class="chart-wrap">
+          <svg class="chart" viewBox="0 0 660 200" role="img" aria-label="Liquidez requerida por fecha frente a la que entrega un solo vencimiento a 3 días: falta cobertura el día 2">
+            <rect x="407" y="73.3" width="173" height="86.7" fill="var(--s-retiro)" opacity=".12"/>
+            <line x1="60" y1="160" x2="638" y2="160" stroke="var(--line)" stroke-width="1"/>
+
+            <path d="M60,160 L407,160 L407,73.3 L580,73.3 L580,40.8 L638,40.8" fill="none" stroke="var(--s-retiro)" stroke-width="2.5" stroke-linejoin="round"/>
+            <path d="M60,160 L580,160 L580,40.8 L638,40.8" fill="none" stroke="var(--s-dep)" stroke-width="2.5" stroke-dasharray="6 3" stroke-linejoin="round"/>
+
+            <text x="415" y="66" font-size="11" font-weight="700" fill="var(--s-retiro)">800 requeridos</text>
+            <text x="493" y="120" text-anchor="middle" font-size="11" font-weight="700" fill="var(--s-retiro)">faltan 800</text>
+            <text x="493" y="134" text-anchor="middle" font-size="10" fill="var(--ink-faint)">el día 2</text>
+            <text x="588" y="34" font-size="11" font-weight="700" fill="var(--ink)">1.100</text>
+
+            <text x="60" y="182" text-anchor="middle" font-size="11" fill="var(--ink-faint)">día 0</text>
+            <text x="233" y="182" text-anchor="middle" font-size="11" fill="var(--ink-faint)">día 1</text>
+            <text x="407" y="182" text-anchor="middle" font-size="11" fill="var(--ink-faint)">día 2</text>
+            <text x="580" y="182" text-anchor="middle" font-size="11" fill="var(--ink-faint)">día 3</text>
+          </svg>
+        </div>
+        <div class="legend">
+          <span><span class="swatch" style="background:var(--s-retiro)"></span>liquidez requerida por fecha (envolvente)</span>
+          <span><span class="swatch dash" style="color:var(--s-dep)"></span>lo que entrega un solo vencimiento a 3 días</span>
+        </div>
+      </div>
+
+      <!-- ── El signo de la corrección ── -->
+      <div class="finding">
+        <span class="f-tag">un matiz que conviene declarar</span>
+        <p class="f-title">La vista acumulada no siempre pide más liquidez — a veces pide menos</p>
+        <p class="f-body">Conviene no dejar la impresión de que mirar el acumulado implica siempre un requerimiento mayor, porque el equipo de Operaciones sabe que no es así.</p>
+        <div class="caveat">
+          <span class="caveat-k">el sesgo cambia de signo según el calendario</span>
+          <p>Con el patrón del hallazgo 2 —el sistema deposita al abrir el mes y retira contra el cierre— la trayectoria sube y luego cae, así que sobre un horizonte de <b>mes completo</b> los depósitos tempranos autofinancian parte del retiro final: ahí mirar el día pico <b>sobreestima</b> el requerimiento. La corrección solo va hacia arriba si el horizonte <b>arranca después</b> de que ese colchón ya se drenó. En otras palabras, el hallazgo 2 no es contexto: es lo que determina en qué régimen se está parado.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── El producto ── -->
+    <section id="producto">
+      <div class="sec-head"><h2>El producto</h2><span class="n">bandas a 3 meses</span></div>
+      <p class="f-body" style="max-width:62ch">Con visión perfecta esto es aritmética. Sin ella, el entregable no puede ser un estimado puntual: la función de costo es marcadamente asimétrica —quedarse corto obliga a romper una posición o salir a fondearse; quedarse largo cuesta unos pocos puntos básicos de carry—, así que la decisión se toma contra un <b>cuantil</b> de la trayectoria, no contra su media.</p>
+
+      <dl class="spec">
+        <dt>Entregable</dt><dd>Proyección del <b>flujo acumulado</b> del Sistema Financiero a <b>3 meses</b>, diaria, en bandas de confianza.</dd>
+        <dt>Modelo</dt><dd><b>XGBoost cuantílico</b> (pérdida pinball), un ajuste por nivel de confianza.</dd>
+        <dt>Objetivo</dt><dd>La <b>envolvente</b> —mínimo corriente del acumulado— modelada <b>directamente</b> como variable objetivo por horizonte.</dd>
+        <dt>Insumos</dt><dd>Los tres hallazgos <em>son</em> la especificación de features: día hábil del mes, distancia al cierre, marca de cierre trimestral, y desagregación por banco con BBVA aparte.</dd>
+        <dt>Uso</dt><dd>Fija el <b>monto</b> y el <b>plazo</b> de la escalera de vencimientos de los portafolios de corto plazo.</dd>
+      </dl>
+
+      <div class="chart-wrap">
+        <svg class="chart" viewBox="0 0 660 268" role="img" aria-label="Representación del producto: proyección del flujo acumulado a tres meses con bandas de confianza y la envolvente precautoria">
+            <line x1="638.0" y1="22" x2="638.0" y2="236" stroke="var(--grid)" stroke-width="1" stroke-dasharray="2 4"/>
+            <line x1="442.9" y1="22" x2="442.9" y2="236" stroke="var(--grid)" stroke-width="1" stroke-dasharray="2 4"/>
+            <line x1="247.8" y1="22" x2="247.8" y2="236" stroke="var(--grid)" stroke-width="1" stroke-dasharray="2 4"/>
+            <line x1="62" y1="90.8" x2="638" y2="90.8" stroke="var(--line)" stroke-width="1"/>
+            <path d="M62.0,89.9 L71.3,86.7 L80.6,82.9 L89.9,79.1 L99.2,75.5 L108.5,72.3 L117.7,69.4 L127.0,66.5 L136.3,63.3 L145.6,59.7 L154.9,55.7 L164.2,51.4 L173.5,52.8 L182.8,53.8 L192.1,54.7 L201.4,55.7 L210.6,64.7 L219.9,70.2 L229.2,80.2 L238.5,97.3 L247.8,124.7 L257.1,113.8 L266.4,109.8 L275.7,106.3 L285.0,103.0 L294.3,99.9 L303.5,96.5 L312.8,92.6 L322.1,88.4 L331.4,83.9 L340.7,79.5 L350.0,75.5 L359.3,71.9 L368.6,73.1 L377.9,74.0 L387.2,74.7 L396.5,75.6 L405.7,87.4 L415.0,92.7 L424.3,102.5 L433.6,119.5 L442.9,146.8 L452.2,134.1 L461.5,130.9 L470.8,127.3 L480.1,123.4 L489.4,119.1 L498.6,114.5 L507.9,110.1 L517.2,106.1 L526.5,102.4 L535.8,99.1 L545.1,95.9 L554.4,92.3 L563.7,93.5 L573.0,94.2 L582.3,94.9 L591.5,95.7 L600.8,111.7 L610.1,120.6 L619.4,137.4 L628.7,166.8 L638.0,214.2 L638.0,140.3 L628.7,93.5 L619.4,64.7 L610.1,48.5 L600.8,40.2 L591.5,46.8 L582.3,46.4 L573.0,46.2 L563.7,45.8 L554.4,45.1 L545.1,49.1 L535.8,52.8 L526.5,56.6 L517.2,60.6 L507.9,65.2 L498.6,70.0 L489.4,75.0 L480.1,79.9 L470.8,84.3 L461.5,88.3 L452.2,92.0 L442.9,86.4 L433.6,59.9 L424.3,43.6 L415.0,34.6 L405.7,30.0 L396.5,36.5 L387.2,36.1 L377.9,36.0 L368.6,35.7 L359.3,35.0 L350.0,39.2 L340.7,43.8 L331.4,48.7 L322.1,53.8 L312.8,58.6 L303.5,63.1 L294.3,67.1 L285.0,70.9 L275.7,74.8 L266.4,79.0 L257.1,83.7 L247.8,82.1 L238.5,55.7 L229.2,39.6 L219.9,30.7 L210.6,26.3 L201.4,30.0 L192.1,29.8 L182.8,29.8 L173.5,29.6 L164.2,29.1 L154.9,34.4 L145.6,39.4 L136.3,44.1 L127.0,48.3 L117.7,52.4 L108.5,56.6 L99.2,61.2 L89.9,66.3 L80.6,71.8 L71.3,77.6 L62.0,83.5 Z" fill="var(--s-retiro)" opacity=".13"/>
+            <path d="M62.0,88.0 L71.3,84.0 L80.6,79.6 L89.9,75.3 L99.2,71.3 L108.5,67.7 L117.7,64.4 L127.0,61.1 L136.3,57.7 L145.6,53.7 L154.9,49.4 L164.2,44.8 L173.5,46.0 L182.8,46.7 L192.1,47.3 L201.4,48.1 L210.6,53.4 L219.9,58.5 L229.2,68.2 L238.5,85.0 L247.8,112.1 L257.1,104.9 L266.4,100.7 L275.7,97.0 L285.0,93.6 L294.3,90.2 L303.5,86.6 L312.8,82.6 L322.1,78.1 L331.4,73.5 L340.7,69.0 L350.0,64.8 L359.3,61.0 L368.6,62.1 L377.9,62.7 L387.2,63.3 L396.5,64.0 L405.7,70.5 L415.0,75.5 L424.3,85.1 L433.6,101.9 L442.9,128.9 L452.2,121.7 L461.5,118.3 L470.8,114.6 L480.1,110.6 L489.4,106.1 L498.6,101.4 L507.9,96.8 L517.2,92.7 L526.5,88.9 L535.8,85.5 L545.1,82.1 L554.4,78.4 L563.7,79.4 L573.0,80.0 L582.3,80.6 L591.5,81.3 L600.8,90.6 L610.1,99.4 L619.4,116.0 L628.7,145.2 L638.0,192.4 L638.0,162.1 L628.7,115.2 L619.4,86.2 L610.1,69.8 L600.8,61.3 L591.5,61.3 L582.3,60.7 L573.0,60.4 L563.7,59.9 L554.4,59.1 L545.1,62.9 L535.8,66.5 L526.5,70.1 L517.2,74.0 L507.9,78.4 L498.6,83.2 L489.4,88.0 L480.1,92.7 L470.8,97.0 L461.5,100.8 L452.2,104.4 L442.9,104.2 L433.6,77.5 L424.3,61.0 L415.0,51.7 L405.7,47.0 L396.5,48.0 L387.2,47.5 L377.9,47.2 L368.6,46.7 L359.3,45.9 L350.0,49.9 L340.7,54.3 L331.4,59.1 L322.1,64.0 L312.8,68.7 L303.5,72.9 L294.3,76.8 L285.0,80.4 L275.7,84.1 L266.4,88.1 L257.1,92.6 L247.8,94.7 L238.5,68.0 L229.2,51.6 L219.9,42.3 L210.6,37.7 L201.4,37.6 L192.1,37.1 L182.8,36.9 L173.5,36.5 L164.2,35.7 L154.9,40.7 L145.6,45.4 L136.3,49.8 L127.0,53.7 L117.7,57.4 L108.5,61.2 L99.2,65.4 L89.9,70.0 L80.6,75.1 L71.3,80.3 L62.0,85.3 Z" fill="var(--s-retiro)" opacity=".26"/>
+            <path d="M62.0,91.2 L71.3,88.5 L80.6,85.2 L89.9,81.8 L99.2,78.5 L108.5,75.6 L117.7,72.9 L127.0,70.3 L136.3,67.3 L145.6,63.9 L154.9,60.1 L164.2,56.0 L173.5,57.6 L182.8,58.8 L192.1,59.8 L201.4,61.0 L210.6,72.7 L219.9,78.4 L229.2,88.6 L238.5,105.9 L247.8,133.6 L257.1,120.0 L266.4,116.2 L275.7,112.8 L285.0,109.7 L294.3,106.7 L303.5,103.4 L312.8,99.7 L322.1,95.5 L331.4,91.2 L340.7,86.9 L350.0,83.0 L359.3,79.5 L368.6,80.9 L377.9,81.8 L387.2,82.6 L396.5,83.6 L405.7,99.3 L415.0,104.7 L424.3,114.7 L433.6,131.8 L442.9,159.2 L452.2,142.8 L461.5,139.7 L470.8,136.3 L480.1,132.4 L489.4,128.2 L498.6,123.7 L507.9,119.4 L517.2,115.5 L526.5,111.9 L535.8,108.7 L545.1,105.5 L554.4,102.1 L563.7,103.3 L573.0,104.2 L582.3,104.9 L591.5,105.9 L600.8,126.5 L610.1,135.6 L619.4,152.5 L628.7,182.0 L638.0,229.5" fill="none" stroke="var(--s-retiro)" stroke-width="1.5" stroke-dasharray="5 3" opacity=".9"/>
+            <path d="M62.0,86.7 L71.3,82.1 L80.6,77.4 L89.9,72.7 L99.2,68.3 L108.5,64.4 L117.7,60.9 L127.0,57.4 L136.3,53.7 L145.6,49.6 L154.9,45.0 L164.2,40.3 L173.5,41.2 L182.8,41.8 L192.1,42.2 L201.4,42.8 L210.6,45.5 L219.9,50.4 L229.2,59.9 L238.5,76.5 L247.8,103.4 L257.1,98.7 L266.4,94.4 L275.7,90.5 L285.0,87.0 L294.3,83.5 L303.5,79.8 L312.8,75.6 L322.1,71.1 L331.4,66.3 L340.7,61.6 L350.0,57.3 L359.3,53.5 L368.6,54.4 L377.9,55.0 L387.2,55.4 L396.5,56.0 L405.7,58.7 L415.0,63.6 L424.3,73.0 L433.6,89.7 L442.9,116.6 L452.2,113.0 L461.5,109.6 L470.8,105.8 L480.1,101.6 L489.4,97.1 L498.6,92.3 L507.9,87.6 L517.2,83.3 L526.5,79.5 L535.8,76.0 L545.1,72.5 L554.4,68.7 L563.7,69.6 L573.0,70.2 L582.3,70.6 L591.5,71.3 L600.8,76.0 L610.1,84.6 L619.4,101.1 L628.7,130.2 L638.0,177.2" fill="none" stroke="var(--ink)" stroke-width="2" stroke-linejoin="round"/>
+            <path d="M62.0,91.2 L71.3,91.2 L80.6,91.2 L89.9,91.2 L99.2,91.2 L108.5,91.2 L117.7,91.2 L127.0,91.2 L136.3,91.2 L145.6,91.2 L154.9,91.2 L164.2,91.2 L173.5,91.2 L182.8,91.2 L192.1,91.2 L201.4,91.2 L210.6,91.2 L219.9,91.2 L229.2,91.2 L238.5,105.9 L247.8,133.6 L257.1,133.6 L266.4,133.6 L275.7,133.6 L285.0,133.6 L294.3,133.6 L303.5,133.6 L312.8,133.6 L322.1,133.6 L331.4,133.6 L340.7,133.6 L350.0,133.6 L359.3,133.6 L368.6,133.6 L377.9,133.6 L387.2,133.6 L396.5,133.6 L405.7,133.6 L415.0,133.6 L424.3,133.6 L433.6,133.6 L442.9,159.2 L452.2,159.2 L461.5,159.2 L470.8,159.2 L480.1,159.2 L489.4,159.2 L498.6,159.2 L507.9,159.2 L517.2,159.2 L526.5,159.2 L535.8,159.2 L545.1,159.2 L554.4,159.2 L563.7,159.2 L573.0,159.2 L582.3,159.2 L591.5,159.2 L600.8,159.2 L610.1,159.2 L619.4,159.2 L628.7,182.0 L638.0,229.5" fill="none" stroke="var(--s-dep)" stroke-width="2.5" stroke-linejoin="round"/>
+            <text x="54" y="202.7" text-anchor="end" font-size="10" fill="var(--ink-faint)">-1.000</text>
+            <text x="54" y="148.5" text-anchor="end" font-size="10" fill="var(--ink-faint)">-500</text>
+            <text x="54" y="94.3" text-anchor="end" font-size="10" fill="var(--ink-faint)">0</text>
+            <text x="54" y="40.1" text-anchor="end" font-size="10" fill="var(--ink-faint)">500</text>
+            <text x="62.0" y="254" text-anchor="start" font-size="10" fill="var(--ink-faint)">hoy</text>
+            <text x="247.8" y="254" text-anchor="middle" font-size="10" fill="var(--ink-faint)">mes 1</text>
+            <text x="442.9" y="254" text-anchor="middle" font-size="10" fill="var(--ink-faint)">mes 2</text>
+            <text x="638.0" y="254" text-anchor="end" font-size="10" fill="var(--ink-faint)">mes 3</text>
+            <text x="507.9" y="150.2" text-anchor="middle" font-size="10.5" font-weight="700" fill="var(--s-dep)">envolvente</text>
+            <circle cx="638.0" cy="229.5" r="3.5" fill="var(--s-dep)"/>
+            <text x="340.7" y="52.6" text-anchor="middle" font-size="10.5" font-weight="700" fill="var(--ink)">mediana</text>
+        </svg>
+      </div>
+      <div class="legend">
+        <span><span class="swatch" style="background:var(--ink)"></span>mediana proyectada</span>
+        <span><span class="swatch" style="background:var(--s-retiro); opacity:.26"></span>banda 50%</span>
+        <span><span class="swatch" style="background:var(--s-retiro); opacity:.13"></span>banda 90%</span>
+        <span><span class="swatch dash" style="color:var(--s-retiro)"></span>cuantil 1%</span>
+        <span><span class="swatch" style="background:var(--s-dep)"></span>envolvente precautoria</span>
+      </div>
+      <ul class="hint">
+        <li><b>Representación del formato de salida, no un pronóstico</b>: la serie es sintética y sigue la forma que documentan los hallazgos.</li>
+        <li>Flujo acumulado en MM USD desde hoy; bajo cero significa que el sistema retiró más de lo que depositó.</li>
+        <li>La envolvente es monótona por construcción: solo puede profundizarse, nunca recuperarse.</li>
+        <li>El mes 3 cierra trimestre — de ahí la caída más pronunciada del tramo final.</li>
+      </ul>
+
+      <!-- ── El nivel precautorio ── -->
+      <div class="finding" style="margin-top:2rem">
+        <span class="f-tag">a qué nivel tomar la envolvente</span>
+        <p class="f-title">El 1% es correcto en economía, pero no es estimable a 3 meses</p>
+        <p class="f-body">Tomar la envolvente al 1% va en la dirección correcta y tiene respaldo económico: si romper una posición cuesta del orden de cien veces el carry que se cede por mantener liquidez, la lógica de <em>newsvendor</em> ubica el nivel óptimo de cobertura cerca del 99%. El problema no es económico, es estadístico.</p>
+        <div class="caveat">
+          <span class="caveat-k">de dónde saldría ese 1%</span>
+          <p>La muestra 2010–2026 tiene unos <b>4.000 días hábiles</b>, pero solo <b>~64 trimestres independientes</b>. Las ventanas de 3 meses superpuestas dan más filas, no más información. Estimar un cuantil 1% de un acumulado trimestral con ~64 observaciones efectivas es <b>extrapolar la cola</b>: harían falta 100+ para tener siquiera <em>una</em> observación dentro de ella.</p>
+        </div>
+        <p class="f-body" style="margin-top:1.2rem">La salida natural es hacer el nivel <b>dependiente del horizonte</b>, que además coloca la exigencia donde sí hay datos:</p>
+        <ul class="hint" style="font-style:normal; color:var(--ink-soft)">
+          <li><b>Tramo corto (días a pocas semanas)</b> — 1%. Hay miles de observaciones efectivas, y es donde las posiciones ya están colocadas y no hay margen de reacción.</li>
+          <li><b>Tramo largo (hacia los 3 meses)</b> — 5% o 10%. Es lo estimable, y de todos modos se reproyecta a diario: se vuelve a decidir muchas veces antes de llegar ahí.</li>
+        </ul>
+        <p class="f-body" style="margin-top:1rem">Si aun así se quiere un 1% en el tramo largo, la vía honesta no es pedirle a XGBoost que ajuste ese cuantil directamente, sino ajustar el rango estimable (10%–50%) y extrapolar la cola con un supuesto paramétrico explícito, para que el supuesto quede a la vista en lugar de esconderse en el modelo.</p>
+      </div>
+
+      <!-- ── Trampas de implementación ── -->
+      <div class="finding">
+        <span class="f-tag">tres trampas de implementación</span>
+        <p class="f-title">Detalles que decidirían si el número sirve o engaña</p>
+        <ul class="hint" style="font-style:normal; color:var(--ink-soft); margin-top:.8rem">
+          <li><b>No sumar cuantiles diarios.</b> La suma de los cuantiles 1% de cada día no es el cuantil 1% de la suma: asume dependencia perfecta en la cola y sobreaprovisiona de forma severa. El acumulado se modela <b>directamente</b> por horizonte.</li>
+          <li><b>El mínimo de los cuantiles no es el cuantil del mínimo.</b> Por eso la envolvente conviene definirla como variable objetivo —el mínimo corriente del acumulado— y ajustarle cuantiles a ella, en vez de derivarla de las bandas punto a punto.</li>
+          <li><b>Los árboles no extrapolan.</b> El hallazgo 1 dice que la magnitud viene creciendo; un XGBoost entrenado sobre niveles queda acotado por el máximo visto en entrenamiento y subestimaría de forma sistemática. Hay que modelar en espacio normalizado —escalado por tamaño del sistema, o en diferencias— y no en niveles crudos.</li>
+        </ul>
+        <ul class="hint"><li>Los cuantiles ajustados por separado pueden cruzarse; se corrige con reordenamiento monótono antes de publicar la banda.</li></ul>
+      </div>
+
+      <!-- ── La propuesta de valor ── -->
+      <div class="finding">
+        <span class="f-tag">por qué importa</span>
+        <p class="f-title">El valor no es evitar quedarse corto: es liberar el colchón que hoy cubre la falta de visibilidad</p>
+        <p class="f-body">Presentado como defensa —"así no nos quedamos cortos"— el proyecto es fácil de descartar: la gestión ya lo resuelve con un colchón precautorio. El argumento fuerte es el inverso.</p>
+        <p class="thesis">Si hoy se mantiene un colchón porque <b>no se ve la trayectoria acumulada</b>, una proyección con bandas libera ese exceso hacia tramos más largos <b>con el mismo riesgo de shortfall</b>. Eso mejora el pilar 3 —retorno— sin ceder nada del pilar 2, y es cuantificable: puntos básicos sobre el monto liberado.</p>
+        <p class="f-body" style="margin-top:1.2rem">Formulado así, el proyecto deja de competir con el criterio del tesorero y pasa a ampliarle el conjunto de decisiones disponibles, que es exactamente el rol del faro: no elegir la ruta, sino hacer visible el entorno en el que se elige.</p>
+        <p class="f-q">Para dimensionar ese beneficio necesitamos una referencia suya: cuánto del portafolio de disponibilidad inmediata está hoy sostenido por incertidumbre sobre los retiros —y no por un mandato o un piso regulatorio—, y qué diferencial de tasa habría entre ese tramo y el plazo al que podría moverse?</p>
+      </div>
+
+      <div class="pie">
+        <p><b>Alcance.</b> Lo que se proyecta aquí es el requerimiento de liquidez originado en los retiros netos del Sistema Financiero. Los flujos del sector público quedan <b>fuera</b>, por ser gestionados en un portafolio distinto. Sí queda pendiente la <b>intervención cambiaria</b>: es un componente de la necesidad de liquidez que esta serie no captura, y que tendría que sumarse aparte al dimensionar la escalera de vencimientos.</p>
       </div>
     </section>
 
