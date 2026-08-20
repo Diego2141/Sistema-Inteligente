@@ -340,7 +340,7 @@
     </section>
 
     <section>
-      <div class="sec-head"><h2>Qué encontramos</h2><span class="n">3 hallazgos</span></div>
+      <div class="sec-head"><h2>¿Qué encontramos?</h2><span class="n">3 hallazgos</span></div>
 
       <!-- ── Hallazgo 1 · CUÁNTO ── -->
       <div class="finding">
@@ -422,7 +422,7 @@
 
     <!-- ── Marco: cómo encaja esto en la gestión de las RIN ── -->
     <section id="marco">
-      <div class="sec-head"><h2>Cómo encaja esto en la gestión de las RIN</h2><span class="n">el rol del faro</span></div>
+      <div class="sec-head"><h2>¿Cómo encaja esto en la gestión de las RIN?</h2><span class="n">el rol del faro</span></div>
       <p class="f-body" style="max-width:62ch">Antes de proponer qué construir, vale la pena situar el proyecto: no buscamos prescribir la gestión de liquidez de las RIN, sino darle a quien la ejerce una referencia más clara del entorno en el que decide.</p>
       <p class="thesis">Pensamos en esto como el <b>Faro de Alejandría</b> del entorno de liquidez de las RIN: el faro no trazaba la ruta de cada barco, era una herramienta de apoyo — un espejo visible a kilómetros que ayudaba a que muchas naves se guiaran y no encallaran. No pretendemos, por ahora, plantear el camino exacto que debería seguir la gestión de liquidez, sino guiar y esclarecer ese entorno, tal como era la labor del faro.</p>
 
@@ -454,11 +454,11 @@
 
     <!-- ── Por qué proyectar el flujo acumulado ── -->
     <section id="proyeccion">
-      <div class="sec-head"><h2>Qué queremos construir con esto</h2><span class="n">flujo acumulado</span></div>
+      <div class="sec-head"><h2>¿Qué queremos construir con esto?</h2><span class="n">flujo acumulado</span></div>
       <p class="f-body" style="max-width:62ch">Esa expectativa de requerimientos de liquidez no puede leerse día por día: el dato que informa la decisión de monto y plazo es el <b>flujo acumulado</b> a lo largo del horizonte que se está cubriendo, no el flujo aislado del día de vencimiento.</p>
 
       <div class="finding" style="border-top:none; padding-top:0; margin-top:1.4rem">
-        <span class="f-tag">por qué acumulado, no diario</span>
+        <span class="f-tag">¿por qué acumulado, no diario?</span>
         <p class="f-title">El día de vencimiento no muestra cuánta caja hizo falta en el camino</p>
         <p class="f-body">Un caso simple, con visión perfecta de los retiros: el sistema recibe 200 MM el día 1, retira 1.000 MM el día 2 y 300 MM el día 3. Mirado día a día, el día 3 —el vencimiento— pide cubrir apenas 300 MM, y ese sería el tamaño del depósito a colocar. Pero el sistema nunca estuvo en –300; para el día 2 ya acumulaba –800, y al cierre del día 3 el déficit acumulado llega a –1.100.</p>
 
@@ -614,7 +614,7 @@
 
       <!-- ── La propuesta de valor ── -->
       <div class="finding">
-        <span class="f-tag">por qué importa</span>
+        <span class="f-tag">¿por qué importa?</span>
         <p class="f-title">El valor no es evitar quedarse corto: es liberar el colchón que hoy cubre la falta de visibilidad</p>
         <p class="f-body">Presentado como defensa —"así no nos quedamos cortos"— el proyecto es fácil de descartar: la gestión ya lo resuelve con un colchón precautorio. El argumento fuerte es el inverso.</p>
         <p class="thesis">Si hoy se mantiene un colchón porque <b>no se ve la trayectoria acumulada</b>, una proyección con bandas libera ese exceso hacia tramos más largos <b>con el mismo riesgo de shortfall</b>. Eso mejora el pilar 3 —retorno— sin ceder nada del pilar 2, y es cuantificable: puntos básicos sobre el monto liberado.</p>
