@@ -367,6 +367,62 @@
       </div>
     </section>
 
+    <!-- ── Por qué proyectar el flujo acumulado ── -->
+    <section id="proyeccion">
+      <div class="sec-head"><h2>Qué queremos construir con esto</h2><span class="n">flujo acumulado</span></div>
+      <p class="f-body" style="max-width:62ch">Los tres hallazgos anteriores describen el pasado. El paso que sigue es usarlos para decidir hacia adelante: cuánto colocar hoy y a qué plazo, dado lo que se espera que retire el sistema. Para esa decisión, el dato que importa no es el flujo aislado de un solo día — es el <b>flujo acumulado</b> a lo largo del plazo que se está cubriendo.</p>
+
+      <div class="finding" style="border-top:none; padding-top:0; margin-top:1.4rem">
+        <span class="f-tag">por qué acumulado, no diario</span>
+        <p class="f-title">El día de vencimiento no muestra cuánta caja hizo falta en el camino</p>
+        <p class="f-body">Un caso simple, con visión perfecta de los retiros: el sistema recibe 200 MM el día 1, retira 1.000 MM el día 2 y 300 MM el día 3. Mirado día a día, el día 3 —el vencimiento— pide cubrir apenas 300 MM, y ese sería el tamaño del depósito a colocar. Pero el sistema nunca estuvo en –300; para el día 2 ya acumulaba –800, y al cierre del día 3 el déficit acumulado llega a –1.100. Ese es el nivel que una posición a tres días necesita cubrir, no el flujo del último día por sí solo.</p>
+
+        <div class="chart-wrap">
+          <svg class="chart" viewBox="0 0 660 240" role="img" aria-label="Ejemplo ilustrativo: flujo de cada día frente al flujo acumulado, del día 0 al día 3">
+            <line x1="60" y1="74" x2="612" y2="74" stroke="var(--line)" stroke-width="1" stroke-dasharray="2 4"/>
+            <text x="50" y="78" text-anchor="end" font-size="11" fill="var(--ink-faint)">0</text>
+
+            <rect x="211" y="54" width="44" height="20" rx="2" fill="var(--s-dep)"/>
+            <rect x="385" y="74" width="44" height="100" rx="2" fill="var(--s-retiro)"/>
+            <rect x="558" y="74" width="44" height="30" rx="2" fill="var(--s-retiro)"/>
+
+            <text x="233" y="46" text-anchor="middle" font-size="11" font-weight="700" fill="var(--ink)">+200</text>
+            <text x="407" y="190" text-anchor="middle" font-size="11" font-weight="700" fill="var(--ink)">-1.000</text>
+            <text x="580" y="120" text-anchor="middle" font-size="11" font-weight="700" fill="var(--ink)">-300</text>
+
+            <line x1="580" y1="126" x2="580" y2="178" stroke="var(--line)" stroke-width="1" stroke-dasharray="2 3"/>
+
+            <polyline points="60,74 233,54 407,154 580,184" fill="none" stroke="var(--accent)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+            <circle cx="60" cy="74" r="4" fill="var(--paper)" stroke="var(--accent)" stroke-width="2.5"/>
+            <circle cx="233" cy="54" r="4" fill="var(--paper)" stroke="var(--accent)" stroke-width="2.5"/>
+            <circle cx="407" cy="154" r="4" fill="var(--paper)" stroke="var(--accent)" stroke-width="2.5"/>
+            <circle cx="580" cy="184" r="4" fill="var(--paper)" stroke="var(--accent)" stroke-width="2.5"/>
+
+            <text x="407" y="142" text-anchor="middle" font-size="11" font-weight="700" fill="var(--accent)">-800</text>
+            <text x="594" y="188" text-anchor="start" font-size="11" font-weight="700" fill="var(--accent)">-1.100</text>
+
+            <text x="60" y="222" text-anchor="middle" font-size="11" fill="var(--ink-faint)">día 0</text>
+            <text x="233" y="222" text-anchor="middle" font-size="11" fill="var(--ink-faint)">día 1</text>
+            <text x="407" y="222" text-anchor="middle" font-size="11" fill="var(--ink-faint)">día 2</text>
+            <text x="580" y="222" text-anchor="middle" font-size="11" fill="var(--ink-faint)">día 3</text>
+          </svg>
+        </div>
+        <div class="legend">
+          <span><span class="swatch" style="background:var(--s-dep)"></span>entrada del día</span>
+          <span><span class="swatch" style="background:var(--s-retiro)"></span>salida del día</span>
+          <span><span class="swatch dash" style="color:var(--accent)"></span>acumulado</span>
+        </div>
+        <ul class="hint"><li>Ejemplo ilustrativo con visión perfecta de retiros — no son datos observados del sistema.</li></ul>
+
+        <div class="stat">
+          <div><span class="v cool">300 MM</span><span class="k">depósito que sugiere mirar solo el flujo del día de vencimiento</span></div>
+          <div><span class="v">1.100 MM</span><span class="k">depósito que realmente cubre el camino, según el flujo acumulado</span></div>
+        </div>
+
+        <p class="f-q">Si construimos la proyección del flujo acumulado sobre la serie que ya identificamos —no solo el neto de cierre—, con cuánto anticipo la necesitarían para que informe la decisión de monto y plazo, y a qué nivel de agregación: sistema completo, por banco, o ambos?</p>
+      </div>
+    </section>
+
     <section>
       <div class="sec-head"><h2>Solicitud de insumos</h2><span class="n">conocimiento + datos</span></div>
       <div class="asks">
