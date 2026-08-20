@@ -215,7 +215,6 @@
   .f-q { font-size: .9rem; font-style: italic; color: var(--accent-ink);
     background: var(--accent-soft); border-radius: 10px; padding: .7rem .9rem;
     margin: 1.1rem 0 0; max-width: 60ch; line-height: 1.55; }
-  .f-q::before { content: "¿ "; font-style: normal; opacity: .6; }
 
   .tip { position: absolute; pointer-events: none; opacity: 0; transform: translate(-50%, -115%);
     background: var(--tip-bg); color: var(--tip-ink); border-radius: 7px;
@@ -245,6 +244,10 @@
   .ask-card li { font-size: .87rem; line-height: 1.5; color: var(--ink-soft); margin-bottom: .6rem; }
   .ask-card li:last-child { margin-bottom: 0; }
   .ask-card li b { color: var(--ink); font-weight: 600; }
+  .ask-plazo { margin: -.35rem 0 .55rem; font-size: .74rem; letter-spacing: .04em;
+    text-transform: uppercase; font-weight: 700; color: var(--accent); }
+  .ask-plazo b { color: var(--ink); }
+  .ask-plazo.warm { color: var(--warm); }
   .ask-card.warm { border-color: color-mix(in srgb, var(--warm) 35%, var(--line)); }
   .ask-card.warm h3 { color: var(--warm); }
 
@@ -351,7 +354,7 @@
           <li>El año en curso se proyecta a cuatro trimestres.</li>
         </ul>
         <details><summary>Ver los datos de este gráfico</summary><div class="tbl-scroll" id="tb1mag"></div></details>
-        <p class="f-q">Qué cambió alrededor de 2018–2019 para que el cierre de mes pasara de equilibrado a una salida sostenida? Nuestra primera hipótesis es la gestión del encaje, pero puede haber otras: calendario tributario, pagos corporativos concentrados, estrategia de fondeo. Y acompaña al crecimiento del sistema en general, o creció por encima del balance de la banca?</p>
+        <p class="f-q">¿Qué cambió alrededor de 2018–2019 para que el cierre de mes pasara de equilibrado a una salida sostenida? Nuestra primera hipótesis es la gestión del encaje, pero puede haber otras: calendario tributario, pagos corporativos concentrados, estrategia de fondeo. ¿Y acompaña al crecimiento del sistema en general, o creció por encima del balance de la banca?</p>
       </div>
 
       <!-- ── Hallazgo 2 · CÓMO ── -->
@@ -379,7 +382,7 @@
         <ul class="hint" id="w1gapnote" style="color:var(--warm)"></ul>
         <details><summary>Ver los datos de este gráfico (incluye los días omitidos)</summary><div class="tbl-scroll" id="tb1"></div></details>
 
-        <p class="f-q">Es gestión activa de la tasa overnight, algo estructural del lado del cliente como nómina, pagos corporativos o calendario tributario, o ambas? Y por qué se acentúa justo en cierre de trimestre: provisión de utilidades, reportes a la SBS, vencimiento de depósitos a plazo institucionales?</p>
+        <p class="f-q">¿Es gestión activa de la tasa overnight, algo estructural del lado del cliente como nómina, pagos corporativos o calendario tributario, o ambas? ¿Y por qué se acentúa justo en cierre de trimestre: provisión de utilidades, reportes a la SBS, vencimiento de depósitos a plazo institucionales?</p>
       </div>
 
       <!-- ── Hallazgo 3 · QUIÉN ── -->
@@ -409,7 +412,7 @@
         <ul class="hint" id="tb3pie"></ul>
         </details>
         <details><summary>Ver los porcentajes y la intensidad</summary><div class="tbl-scroll" id="tb3"></div></details>
-        <p class="f-q">La matriz en el exterior es lo que explica que BBVA y Citibank compartan este patrón? Si lo es, qué hace la casa matriz con esa liquidez al cierre. Y qué cambió en BBVA alrededor de 2022: tesorero, mandato interno, estrategia de fondeo?</p>
+        <p class="f-q">¿La matriz en el exterior es lo que explica que BBVA y Citibank compartan este patrón? Si lo es, ¿qué hace la casa matriz con esa liquidez al cierre? ¿Y qué cambió en BBVA alrededor de 2022: tesorero, mandato interno, estrategia de fondeo?</p>
       </div>
     </section>
 
@@ -424,11 +427,13 @@
       <div class="asks">
         <div class="ask-card">
           <h3>Portafolio de disponibilidad inmediata</h3>
-          <p style="margin:0; font-size:.87rem; line-height:1.5; color:var(--ink-soft)">Cubre el requerimiento más cercano en el tiempo: la caja que debe estar lista sin fricción.</p>
+          <p class="ask-plazo">Plazo de inversión: hasta <b>7 días</b></p>
+          <p style="margin:0; font-size:.87rem; line-height:1.5; color:var(--ink-soft)">Cubre el requerimiento más cercano en el tiempo: la caja que debe estar lista sin fricción. Lo que tiene que mantener disponible es la <b>caída máxima que el flujo acumulado puede alcanzar dentro de esa ventana de 7 días</b> — no el flujo del último día.</p>
         </div>
         <div class="ask-card warm">
           <h3>Portafolio de liquidez</h3>
-          <p style="margin:0; font-size:.87rem; line-height:1.5; color:var(--ink-soft)">Cubre el resto del horizonte de corto plazo, colocado a distintos instrumentos y plazos de money market.</p>
+          <p class="ask-plazo warm">Plazo de inversión: hasta <b>3 meses</b></p>
+          <p style="margin:0; font-size:.87rem; line-height:1.5; color:var(--ink-soft)">Cubre el resto del horizonte de corto plazo, en distintos instrumentos y plazos de money market. Cada tramo se dimensiona con la misma lógica, contra la <b>caída máxima acumulada de su propio plazo</b>; y como esa caída solo puede profundizarse al alargar el horizonte, un tramo más largo nunca exige menos que uno más corto.</p>
         </div>
       </div>
 
@@ -605,7 +610,7 @@
         <p class="f-body">Presentado como defensa —"así no nos quedamos cortos"— el proyecto es fácil de descartar: la gestión ya lo resuelve con un colchón precautorio. El argumento fuerte es el inverso.</p>
         <p class="thesis">Si hoy se mantiene un colchón porque <b>no se ve la trayectoria acumulada</b>, una proyección con bandas libera ese exceso hacia tramos más largos <b>con el mismo riesgo de shortfall</b>. Eso mejora el pilar 3 —retorno— sin ceder nada del pilar 2, y es cuantificable: puntos básicos sobre el monto liberado.</p>
         <p class="f-body" style="margin-top:1.2rem">Formulado así, el proyecto deja de competir con el criterio del tesorero y pasa a ampliarle el conjunto de decisiones disponibles, que es exactamente el rol del faro: no elegir la ruta, sino hacer visible el entorno en el que se elige.</p>
-        <p class="f-q">Para dimensionar ese beneficio necesitamos una referencia suya: cuánto del portafolio de disponibilidad inmediata está hoy sostenido por incertidumbre sobre los retiros —y no por un mandato o un piso regulatorio—, y qué diferencial de tasa habría entre ese tramo y el plazo al que podría moverse?</p>
+        <p class="f-q">Para dimensionar ese beneficio necesitamos una referencia suya: ¿cuánto del portafolio de disponibilidad inmediata está hoy sostenido por incertidumbre sobre los retiros —y no por un mandato o un piso regulatorio—, y qué diferencial de tasa habría entre ese tramo y el plazo al que podría moverse?</p>
       </div>
 
       <div class="pie">
