@@ -423,16 +423,13 @@
     <!-- ── Marco: cómo encaja esto en la gestión de las RIN ── -->
     <section id="marco">
       <div class="sec-head"><h2>¿Cómo encaja esto en la gestión de las RIN?</h2><span class="n">el rol del faro</span></div>
-      <p class="f-body" style="max-width:62ch">Antes de proponer qué construir, vale la pena situar el proyecto: no buscamos prescribir la gestión de liquidez de las RIN, sino darle a quien la ejerce una referencia más clara del entorno en el que decide.</p>
-      <p class="thesis">Pensamos en esto como el <b>Faro de Alejandría</b> del entorno de liquidez de las RIN: el faro no trazaba la ruta de cada barco, era una herramienta de apoyo — un espejo visible a kilómetros que ayudaba a que muchas naves se guiaran y no encallaran. No pretendemos, por ahora, plantear el camino exacto que debería seguir la gestión de liquidez, sino guiar y esclarecer ese entorno, tal como era la labor del faro.</p>
-
-      <p class="f-body" style="max-width:62ch; margin-top:1.4rem">En términos concretos, así opera hoy la liquidez de corto plazo: los ingresos netos del Sistema Financiero ingresan a dos portafolios de corto plazo, y desde ahí el dinero se asigna a distintos instrumentos y plazos de money market — depósitos, certificados de depósito, FX swap, entre otros.</p>
+      <p class="f-body" style="max-width:62ch; ">En términos concretos, así opera hoy la liquidez de corto plazo: los ingresos netos del Sistema Financiero ingresan a dos portafolios de corto plazo, y desde ahí el dinero se asigna a distintos instrumentos y plazos de money market — depósitos, certificados de depósito, FX swap, entre otros.</p>
 
       <div class="asks">
         <div class="ask-card">
           <h3>Portafolio de disponibilidad inmediata</h3>
-          <p class="ask-plazo">Plazo de inversión: hasta <b>7 días</b></p>
-          <p style="margin:0; font-size:.87rem; line-height:1.5; color:var(--ink-soft)">Cubre el requerimiento más cercano en el tiempo: la caja que debe estar lista sin fricción. Lo que tiene que mantener disponible es la <b>caída máxima que el flujo acumulado puede alcanzar dentro de esa ventana de 7 días</b> — no el flujo del último día.</p>
+          <p class="ask-plazo">Plazo de inversión: hasta <b>1 semana</b></p>
+          <p style="margin:0; font-size:.87rem; line-height:1.5; color:var(--ink-soft)">Cubre el requerimiento más cercano en el tiempo: la caja que debe estar lista sin fricción. Lo que tiene que mantener disponible es la <b>caída máxima que el flujo acumulado puede alcanzar dentro de esta ventana de una semana</b> — no el flujo del último día.</p>
         </div>
         <div class="ask-card warm">
           <h3>Portafolio de liquidez</h3>
@@ -440,6 +437,9 @@
           <p style="margin:0; font-size:.87rem; line-height:1.5; color:var(--ink-soft)">Cubre el resto del horizonte de corto plazo, en distintos instrumentos y plazos de money market. Cada tramo se dimensiona con la misma lógica, contra la <b>caída máxima acumulada de su propio plazo</b>; y como esa caída solo puede profundizarse al alargar el horizonte, un tramo más largo nunca exige menos que uno más corto.</p>
         </div>
       </div>
+
+      <p class="f-body" style="max-width:62ch; margin-top:1.8rem">Antes de proponer qué construir, vale la pena situar el proyecto: no buscamos prescribir la gestión de liquidez de las RIN, sino darle a quien la ejerce una referencia más clara del entorno de riesgo en el que decide.</p>
+      <p class="thesis">Pensamos en esto como el <b>Faro de Alejandría</b> del entorno de riesgo liquidez de las RIN: el faro no trazaba la ruta de cada barco, era una herramienta de apoyo — un espejo visible a kilómetros que ayudaba a que muchas naves se guiaran y no encallaran. No pretendemos, por ahora, plantear el camino exacto que debería seguir la gestión de liquidez, sino esclarecer ese entorno y caracterizar su riesgo, tal como era la labor del faro.</p>
 
       <p class="f-body" style="max-width:62ch; margin-top:1.4rem">La gestión de las RIN sigue tres pilares. El proyecto apunta directamente al segundo — liquidez — en los tramos de corto plazo:</p>
 
@@ -449,7 +449,7 @@
         <div class="pillar"><span class="pillar-n">3</span><span class="pillar-k">Retorno</span><span class="pillar-d">rendimiento de la posición colocada.</span></div>
       </div>
 
-      <p class="f-body" style="max-width:62ch; margin-top:1.4rem">La decisión de <b>cuánto</b> y a <b>qué plazo</b> invertir sigue una premisa concreta: una expectativa de los requerimientos de liquidez del Sistema Financiero, es decir, sus retiros netos. En consecuencia, esa expectativa es exactamente lo que buscamos anticipar con la serie que identificamos arriba.</p>
+      <p class="f-body" style="max-width:62ch; margin-top:1.4rem">La decisión de <b>cuánto</b> y a <b>qué plazo</b> invertir sigue una premisa concreta: una expectativa de los requerimientos de liquidez del Sistema Financiero, es decir, sus retiros netos. En consecuencia, nos interesa caracterizar el <b>escenario extremo intertemporal</b> que pueda servir de referencia para la gestión del riesgo de liquidez de las RIN.</p>
     </section>
 
     <!-- ── Por qué proyectar el flujo acumulado ── -->
