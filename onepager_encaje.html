@@ -587,35 +587,6 @@
         <li>El mes 3 cierra trimestre — de ahí la caída más pronunciada del tramo final.</li>
       </ul>
 
-      <!-- ── El nivel precautorio ── -->
-      <div class="finding" style="margin-top:2rem">
-        <span class="f-tag">a qué nivel tomar la envolvente</span>
-        <p class="f-title">El 1% es correcto en economía, pero no es estimable a 3 meses</p>
-        <p class="f-body">Tomar la envolvente al 1% va en la dirección correcta y tiene respaldo económico: si romper una posición cuesta del orden de cien veces el carry que se cede por mantener liquidez, la lógica de <em>newsvendor</em> ubica el nivel óptimo de cobertura cerca del 99%. El problema no es económico, es estadístico.</p>
-        <div class="caveat">
-          <span class="caveat-k">de dónde saldría ese 1%</span>
-          <p>La muestra 2010–2026 tiene unos <b>4.000 días hábiles</b>, pero solo <b>~64 trimestres independientes</b>. Las ventanas de 3 meses superpuestas dan más filas, no más información. Estimar un cuantil 1% de un acumulado trimestral con ~64 observaciones efectivas es <b>extrapolar la cola</b>: harían falta 100+ para tener siquiera <em>una</em> observación dentro de ella.</p>
-        </div>
-        <p class="f-body" style="margin-top:1.2rem">La salida natural es hacer el nivel <b>dependiente del horizonte</b>, que además coloca la exigencia donde sí hay datos:</p>
-        <ul class="hint" style="font-style:normal; color:var(--ink-soft)">
-          <li><b>Tramo corto (días a pocas semanas)</b> — 1%. Hay miles de observaciones efectivas, y es donde las posiciones ya están colocadas y no hay margen de reacción.</li>
-          <li><b>Tramo largo (hacia los 3 meses)</b> — 5% o 10%. Es lo estimable, y de todos modos se reproyecta a diario: se vuelve a decidir muchas veces antes de llegar ahí.</li>
-        </ul>
-        <p class="f-body" style="margin-top:1rem">Si aun así se quiere un 1% en el tramo largo, la vía honesta no es pedirle a XGBoost que ajuste ese cuantil directamente, sino ajustar el rango estimable (10%–50%) y extrapolar la cola con un supuesto paramétrico explícito, para que el supuesto quede a la vista en lugar de esconderse en el modelo.</p>
-      </div>
-
-      <!-- ── Trampas de implementación ── -->
-      <div class="finding">
-        <span class="f-tag">tres trampas de implementación</span>
-        <p class="f-title">Detalles que decidirían si el número sirve o engaña</p>
-        <ul class="hint" style="font-style:normal; color:var(--ink-soft); margin-top:.8rem">
-          <li><b>No sumar cuantiles diarios.</b> La suma de los cuantiles 1% de cada día no es el cuantil 1% de la suma: asume dependencia perfecta en la cola y sobreaprovisiona de forma severa. El acumulado se modela <b>directamente</b> por horizonte.</li>
-          <li><b>El mínimo de los cuantiles no es el cuantil del mínimo.</b> Por eso la envolvente conviene definirla como variable objetivo —el mínimo corriente del acumulado— y ajustarle cuantiles a ella, en vez de derivarla de las bandas punto a punto.</li>
-          <li><b>Los árboles no extrapolan.</b> El hallazgo 1 dice que la magnitud viene creciendo; un XGBoost entrenado sobre niveles queda acotado por el máximo visto en entrenamiento y subestimaría de forma sistemática. Hay que modelar en espacio normalizado —escalado por tamaño del sistema, o en diferencias— y no en niveles crudos.</li>
-        </ul>
-        <ul class="hint"><li>Los cuantiles ajustados por separado pueden cruzarse; se corrige con reordenamiento monótono antes de publicar la banda.</li></ul>
-      </div>
-
       <!-- ── La propuesta de valor ── -->
       <div class="finding">
         <span class="f-tag">por qué importa</span>
