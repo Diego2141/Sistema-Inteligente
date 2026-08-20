@@ -20,6 +20,7 @@
     --grid:      #e6e4dc;
     --tip-bg:    #1c2430;
     --tip-ink:   #fffdf9;
+    --lor:       #c0182b;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
@@ -42,6 +43,7 @@
       --grid:      #262d34;
       --tip-bg:    #e8ebee;
       --tip-ink:   #14181c;
+      --lor:       #ff5348;
     }
   }
   :root[data-theme="dark"] {
@@ -64,6 +66,7 @@
     --grid:      #262d34;
     --tip-bg:    #e8ebee;
     --tip-ink:   #14181c;
+    --lor:       #ff5348;
   }
   :root[data-theme="light"] {
     --bg:        #f2f1ec;
@@ -85,6 +88,7 @@
     --grid:      #e6e4dc;
     --tip-bg:    #1c2430;
     --tip-ink:   #fffdf9;
+    --lor:       #c0182b;
   }
 
   * { box-sizing: border-box; }
@@ -445,7 +449,7 @@
         <div class="pillar"><span class="pillar-n">3</span><span class="pillar-k">Retorno</span><span class="pillar-d">rendimiento de la posición colocada.</span></div>
       </div>
 
-      <p class="f-body" style="max-width:62ch; margin-top:1.4rem">Y la decisión de <b>cuánto</b> y a <b>qué plazo</b> invertir sigue una premisa concreta: una expectativa de los requerimientos de liquidez del Sistema Financiero, es decir, sus retiros netos. Esa expectativa es exactamente lo que buscamos anticipar con la serie que identificamos arriba.</p>
+      <p class="f-body" style="max-width:62ch; margin-top:1.4rem">La decisión de <b>cuánto</b> y a <b>qué plazo</b> invertir sigue una premisa concreta: una expectativa de los requerimientos de liquidez del Sistema Financiero, es decir, sus retiros netos. En consecuencia, esa expectativa es exactamente lo que buscamos anticipar con la serie que identificamos arriba.</p>
     </section>
 
     <!-- ── Por qué proyectar el flujo acumulado ── -->
@@ -505,21 +509,21 @@
       <div class="finding">
         <span class="f-tag">el máximo drawdown desde el origen</span>
         <p class="f-title">Y el acumulado al vencimiento tampoco basta: lo que manda es la caída máxima del camino</p>
-        <p class="f-body">Aquí el ejemplo se corrige a sí mismo. Un depósito de 1.100 MM que vence el día 3 <b>igual falla</b>: el día 2 el sistema ya acumulaba –800 y no había con qué cubrirlo. El acumulado al horizonte da el <b>monto</b> correcto, pero no el <b>plazo</b>.</p>
-        <p class="f-body" style="margin-top:.7rem">La regla que realmente se deduce es más exigente: la escalera de vencimientos tiene que dominar la trayectoria acumulada <b>en cada fecha</b>, no solo al final. Eso define el objeto que hay que proyectar — el <b>máximo drawdown desde el origen</b>: qué tan abajo del punto de partida llegó a estar el acumulado en algún momento del plazo.</p>
-        <p class="f-body" style="margin-top:.7rem">Importa que se mida <b>desde hoy</b> y no desde el pico de la trayectoria. Los depósitos que entran en el camino financian retiros posteriores: si el acumulado sube a +450 y luego cae a –100, hubo una caída de 550 desde el pico, pero solo <b>100</b> tuvieron que estar puestos de antemano. Medido desde el origen, el número es directamente la caja que hay que tener lista.</p>
-        <p class="f-body" style="margin-top:.7rem">Leído a distintos plazos, deja de ser un número y pasa a ser una <b>curva</b>: cuánta liquidez exige cubrir 5 días, 20 días, 3 meses. Es lo que fija monto y plazo a la vez.</p>
+        <p class="f-body">Volviendo al ejemplo anterior, un depósito de 1.100 MM que vence el día 3 <b>igual falla</b>: el día 2 el sistema ya acumulaba –800 y no había con qué cubrirlo. Si bien el acumulado al horizonte da el <b>monto</b> correcto, no el mismo caso con el <b>plazo</b>.</p>
+        <p class="f-body" style="margin-top:.7rem">Por ende, la regla que realmente se deduce es más exigente: la escalera de vencimientos tiene que dominar la trayectoria acumulada <b>en cada fecha</b>, no solo al final. De esta manera, eso define el objeto que hay que proyectar — el <b>máximo drawdown desde el origen</b>: qué tan abajo del punto de partida llegó a estar el acumulado en algún momento del plazo.</p>
+        <p class="f-body" style="margin-top:.7rem">Cabe resaltar que importa que se mida <b>desde hoy</b> y no desde el pico de la trayectoria. Así, los depósitos que entran en el camino financian retiros posteriores: si el acumulado sube a +450 y luego cae a –100, hubo una caída de 550 desde el pico, pero solo <b>100</b> tuvieron que estar puestos de antemano. Medido desde el origen, el número es directamente la caja que hay que tener lista.</p>
+        <p class="f-body" style="margin-top:.7rem">Finalmente, leído a distintos plazos, deja de ser un número y pasa a ser una <b>curva</b>: cuánta liquidez exige cubrir 5 días, 20 días, 3 meses. La curva de liquidez requerida es lo que fija monto y plazo a la vez.</p>
 
         <div class="chart-wrap">
           <svg class="chart" viewBox="0 0 660 200" role="img" aria-label="Liquidez requerida por fecha frente a la que entrega un solo vencimiento a 3 días: falta cobertura el día 2">
-            <rect x="407" y="73.3" width="173" height="86.7" fill="var(--s-retiro)" opacity=".12"/>
+            <rect x="407" y="73.3" width="173" height="86.7" fill="var(--lor)" opacity=".12"/>
             <line x1="60" y1="160" x2="638" y2="160" stroke="var(--line)" stroke-width="1"/>
 
-            <path d="M60,160 L407,160 L407,73.3 L580,73.3 L580,40.8 L638,40.8" fill="none" stroke="var(--s-retiro)" stroke-width="2.5" stroke-linejoin="round"/>
+            <path d="M60,160 L407,160 L407,73.3 L580,73.3 L580,40.8 L638,40.8" fill="none" stroke="var(--lor)" stroke-width="2.5" stroke-linejoin="round"/>
             <path d="M60,160 L580,160 L580,40.8 L638,40.8" fill="none" stroke="var(--s-dep)" stroke-width="2.5" stroke-dasharray="6 3" stroke-linejoin="round"/>
 
-            <text x="415" y="66" font-size="11" font-weight="700" fill="var(--s-retiro)">800 requeridos</text>
-            <text x="493" y="120" text-anchor="middle" font-size="11" font-weight="700" fill="var(--s-retiro)">faltan 800</text>
+            <text x="415" y="66" font-size="11" font-weight="700" fill="var(--lor)">800 requeridos</text>
+            <text x="493" y="120" text-anchor="middle" font-size="11" font-weight="700" fill="var(--lor)">faltan 800</text>
             <text x="493" y="134" text-anchor="middle" font-size="10" fill="var(--ink-faint)">el día 2</text>
             <text x="588" y="34" font-size="11" font-weight="700" fill="var(--ink)">1.100</text>
 
@@ -530,7 +534,7 @@
           </svg>
         </div>
         <div class="legend">
-          <span><span class="swatch" style="background:var(--s-retiro)"></span>liquidez requerida por fecha</span>
+          <span><span class="swatch" style="background:var(--lor)"></span>liquidez requerida por fecha</span>
           <span><span class="swatch dash" style="color:var(--s-dep)"></span>lo que entrega un solo vencimiento a 3 días</span>
         </div>
       </div>
@@ -550,15 +554,15 @@
     <!-- ── El producto ── -->
     <section id="producto">
       <div class="sec-head"><h2>Liquidez operativa requerida</h2><span class="n">el producto</span></div>
-      <p class="f-body" style="max-width:62ch">Con visión perfecta esto es aritmética. Sin ella, el entregable no puede ser un estimado puntual: la función de costo es marcadamente asimétrica —quedarse corto obliga a romper una posición o salir a fondearse; quedarse largo cuesta unos pocos puntos básicos de carry—, así que la decisión se toma contra un <b>percentil</b> de la caída, no contra su media.</p>
-      <p class="f-body" style="max-width:62ch; margin-top:.8rem">Eso da un entregable con un nombre propio: la <b>liquidez operativa requerida</b> a cada plazo. No es un límite de riesgo que restringe — es la referencia contra la cual se asignan los fondos: dice cuánto <em>no</em> hay que amarrar, y por diferencia, cuánto sí puede irse a tramos más largos.</p>
+      <p class="f-body" style="max-width:62ch">Con visión perfecta esto es aritmética. Sin ella, el entregable no puede ser un estimado puntual: la función de costo es marcadamente asimétrica —quedarse corto obliga a romper una posición o fondearse de un portafolio de mayor plazo. Por otro lado, quedarse largo cuesta unos pocos puntos básicos de carry—, así que la decisión se toma contra un <b>percentil</b> de la caída, no contra su media.</p>
+      <p class="f-body" style="max-width:62ch; margin-top:.8rem">Entonces, el contexto precautorio nos provee un entregable con un nombre propio: la <b>liquidez operativa requerida</b> a cada plazo. No es un límite de riesgo que restringe — es la referencia contra la cual se asignan los fondos: dice cuánto <em>no</em> hay que amarrar, y por diferencia, cuánto sí puede irse a tramos más largos.</p>
 
       <dl class="spec">
         <dt>Entregable</dt><dd><b>Liquidez operativa requerida</b> a distintos plazos, hasta <b>3 meses</b>: el máximo flujo de salida acumulado a un percentil dado. En la industria se le conoce como <em>maximum cumulative outflow</em> (MCO).</dd>
         <dt>Variable objetivo</dt><dd>El <b>flujo neto diario</b> del Sistema Financiero — no el acumulado. El acumulado y su caída máxima se derivan después.</dd>
         <dt>Metodología</dt><dd>Del modelo del flujo neto se <b>simulan trayectorias</b> que respetan la correlación serial; se acumula cada una, se toma su caída máxima desde el origen, y el percentil se calcula <b>sobre esa distribución</b>.</dd>
         <dt>Insumos</dt><dd>Los tres hallazgos <em>son</em> la especificación de features: día hábil del mes, distancia al cierre, marca de cierre trimestral, y desagregación por banco con BBVA aparte.</dd>
-        <dt>Uso</dt><dd>Herramienta de <b>asignación</b>: fija cuánto y a qué plazo puede colocarse en cada tramo de los dos portafolios de corto plazo, sin bajar de la liquidez que el plazo exige.</dd>
+        <dt>Uso</dt><dd>Herramienta de <b>asignación</b>: referencia del entorno de liquidez para fijar cuánto y a qué plazo puede colocarse en cada tramo de los dos portafolios de corto plazo, sin bajar de la liquidez que el plazo exige.</dd>
       </dl>
 
       <div class="chart-wrap">
@@ -574,8 +578,8 @@
             <path d="M62.0,102.6 L71.3,100.5 L80.6,98.2 L89.9,95.9 L99.2,93.7 L108.5,91.7 L117.7,90.0 L127.0,88.2 L136.3,86.3 L145.6,84.3 L154.9,81.7 L164.2,79.2 L173.5,80.0 L182.8,80.5 L192.1,81.2 L201.4,81.7 L210.6,83.7 L219.9,87.2 L229.2,93.7 L238.5,104.1 L247.8,121.1 L257.1,118.3 L266.4,116.0 L275.7,113.9 L285.0,111.9 L294.3,110.0 L303.5,108.1 L312.8,105.9 L322.1,103.1 L331.4,100.3 L340.7,97.5 L350.0,95.0 L359.3,92.9 L368.6,93.8 L377.9,94.2 L387.2,94.7 L396.5,95.3 L405.7,97.0 L415.0,100.1 L424.3,106.1 L433.6,116.6 L442.9,133.5 L452.2,131.5 L461.5,129.6 L470.8,127.6 L480.1,125.2 L489.4,122.9 L498.6,120.0 L507.9,117.4 L517.2,115.0 L526.5,112.5 L535.8,110.3 L545.1,108.4 L554.4,106.2 L563.7,106.8 L573.0,107.4 L582.3,107.6 L591.5,108.2 L600.8,111.3 L610.1,116.6 L619.4,127.0 L628.7,145.2 L638.0,174.4 L638.0,141.4 L628.7,112.5 L619.4,94.9 L610.1,84.8 L600.8,79.6 L591.5,76.9 L582.3,76.6 L573.0,76.2 L563.7,76.1 L554.4,75.7 L545.1,78.2 L535.8,80.6 L526.5,82.9 L517.2,85.2 L507.9,87.9 L498.6,90.9 L489.4,93.9 L480.1,96.9 L470.8,99.8 L461.5,102.3 L452.2,104.5 L442.9,107.1 L433.6,91.0 L424.3,81.1 L415.0,75.3 L405.7,72.6 L396.5,71.1 L387.2,70.9 L377.9,70.8 L368.6,70.6 L359.3,70.2 L350.0,72.5 L340.7,75.2 L331.4,78.3 L322.1,81.3 L312.8,84.4 L303.5,87.1 L294.3,89.5 L285.0,91.7 L275.7,94.3 L266.4,97.2 L257.1,100.1 L247.8,103.1 L238.5,87.2 L229.2,77.4 L219.9,72.1 L210.6,69.3 L201.4,67.9 L192.1,67.8 L182.8,67.8 L173.5,67.7 L164.2,67.4 L154.9,70.6 L145.6,73.6 L136.3,76.4 L127.0,79.0 L117.7,81.6 L108.5,84.3 L99.2,87.2 L89.9,90.4 L80.6,93.8 L71.3,97.3 L62.0,100.9 Z" fill="var(--s-retiro)" opacity="0.33"/>
             <path d="M62.0,102.1 L71.3,99.7 L80.6,97.1 L89.9,94.4 L99.2,92.0 L108.5,89.8 L117.7,87.8 L127.0,85.8 L136.3,83.9 L145.6,81.4 L154.9,78.7 L164.2,75.9 L173.5,76.7 L182.8,77.2 L192.1,77.6 L201.4,78.2 L210.6,80.2 L219.9,83.3 L229.2,89.2 L238.5,99.7 L247.8,116.3 L257.1,113.6 L266.4,111.1 L275.7,108.7 L285.0,106.8 L294.3,105.0 L303.5,102.8 L312.8,100.4 L322.1,97.6 L331.4,94.9 L340.7,92.1 L350.0,89.4 L359.3,87.1 L368.6,87.6 L377.9,88.0 L387.2,88.4 L396.5,88.9 L405.7,90.9 L415.0,94.0 L424.3,99.9 L433.6,110.1 L442.9,127.0 L452.2,124.9 L461.5,122.7 L470.8,120.8 L480.1,118.0 L489.4,115.2 L498.6,112.4 L507.9,109.6 L517.2,106.8 L526.5,104.9 L535.8,102.7 L545.1,100.6 L554.4,98.3 L563.7,99.0 L573.0,99.3 L582.3,99.5 L591.5,100.0 L600.8,103.1 L610.1,108.7 L619.4,118.8 L628.7,137.0 L638.0,165.6 L638.0,149.9 L628.7,121.2 L619.4,103.2 L610.1,93.3 L600.8,88.1 L591.5,85.3 L582.3,84.6 L573.0,84.5 L563.7,84.5 L554.4,84.1 L545.1,86.2 L535.8,88.2 L526.5,90.6 L517.2,92.8 L507.9,95.4 L498.6,98.2 L489.4,101.4 L480.1,104.3 L470.8,107.0 L461.5,109.3 L452.2,111.6 L442.9,113.8 L433.6,97.4 L424.3,87.3 L415.0,81.7 L405.7,79.0 L396.5,77.5 L387.2,77.1 L377.9,76.9 L368.6,76.5 L359.3,76.0 L350.0,78.5 L340.7,81.5 L331.4,84.3 L322.1,87.4 L312.8,90.3 L303.5,92.9 L294.3,95.2 L285.0,97.3 L275.7,99.5 L266.4,102.2 L257.1,104.9 L247.8,107.9 L238.5,91.3 L229.2,81.4 L219.9,76.0 L210.6,73.2 L201.4,71.7 L192.1,71.4 L182.8,71.2 L173.5,71.0 L164.2,70.4 L154.9,73.4 L145.6,76.3 L136.3,79.0 L127.0,81.5 L117.7,83.8 L108.5,86.3 L99.2,88.8 L89.9,91.8 L80.6,94.9 L71.3,98.1 L62.0,101.3 Z" fill="var(--s-retiro)" opacity="0.42"/>
             <path d="M62.0,101.7 L71.3,98.9 L80.6,95.9 L89.9,93.0 L99.2,90.4 L108.5,88.0 L117.7,85.9 L127.0,83.7 L136.3,81.4 L145.6,78.8 L154.9,76.0 L164.2,73.2 L173.5,73.8 L182.8,74.4 L192.1,74.6 L201.4,75.0 L210.6,76.8 L219.9,79.7 L229.2,85.4 L238.5,95.6 L247.8,112.0 L257.1,109.2 L266.4,106.4 L275.7,104.2 L285.0,102.0 L294.3,99.9 L303.5,97.8 L312.8,95.2 L322.1,92.6 L331.4,89.9 L340.7,87.0 L350.0,84.4 L359.3,81.9 L368.6,82.5 L377.9,82.7 L387.2,82.9 L396.5,83.2 L405.7,84.8 L415.0,87.7 L424.3,93.7 L433.6,104.0 L442.9,120.4 L452.2,117.9 L461.5,115.8 L470.8,113.4 L480.1,110.7 L489.4,108.0 L498.6,105.2 L507.9,102.3 L517.2,99.9 L526.5,97.5 L535.8,95.5 L545.1,93.4 L554.4,91.2 L563.7,91.7 L573.0,92.0 L582.3,92.2 L591.5,92.5 L600.8,95.5 L610.1,100.5 L619.4,110.8 L628.7,128.9 L638.0,157.8" fill="none" stroke="var(--ink)" stroke-width="2" stroke-linejoin="round"/>
-            <path d="M62.0,105.4 L71.3,106.1 L80.6,106.6 L89.9,106.8 L99.2,107.0 L108.5,107.1 L117.7,107.3 L127.0,107.3 L136.3,107.3 L145.6,107.3 L154.9,107.3 L164.2,107.3 L173.5,107.6 L182.8,107.9 L192.1,108.3 L201.4,108.5 L210.6,109.6 L219.9,113.4 L229.2,121.4 L238.5,133.7 L247.8,151.1 L257.1,151.3 L266.4,151.6 L275.7,151.7 L285.0,152.0 L294.3,152.0 L303.5,152.0 L312.8,152.0 L322.1,152.0 L331.4,152.0 L340.7,152.0 L350.0,152.0 L359.3,152.0 L368.6,152.1 L377.9,152.1 L387.2,152.1 L396.5,152.1 L405.7,152.2 L415.0,152.7 L424.3,153.9 L433.6,161.4 L442.9,178.3 L452.2,178.8 L461.5,178.9 L470.8,179.1 L480.1,179.2 L489.4,179.2 L498.6,179.2 L507.9,179.2 L517.2,179.2 L526.5,179.2 L535.8,179.2 L545.1,179.2 L554.4,179.2 L563.7,179.5 L573.0,179.5 L582.3,179.5 L591.5,179.5 L600.8,179.7 L610.1,180.5 L619.4,186.2 L628.7,200.6 L638.0,230.7" fill="none" stroke="var(--s-dep)" stroke-width="2.5" stroke-linejoin="round"/>
-            <circle cx="638.0" cy="230.7" r="3.5" fill="var(--s-dep)"/>
+            <path d="M62.0,105.4 L71.3,106.1 L80.6,106.6 L89.9,106.8 L99.2,107.0 L108.5,107.1 L117.7,107.3 L127.0,107.3 L136.3,107.3 L145.6,107.3 L154.9,107.3 L164.2,107.3 L173.5,107.6 L182.8,107.9 L192.1,108.3 L201.4,108.5 L210.6,109.6 L219.9,113.4 L229.2,121.4 L238.5,133.7 L247.8,151.1 L257.1,151.3 L266.4,151.6 L275.7,151.7 L285.0,152.0 L294.3,152.0 L303.5,152.0 L312.8,152.0 L322.1,152.0 L331.4,152.0 L340.7,152.0 L350.0,152.0 L359.3,152.0 L368.6,152.1 L377.9,152.1 L387.2,152.1 L396.5,152.1 L405.7,152.2 L415.0,152.7 L424.3,153.9 L433.6,161.4 L442.9,178.3 L452.2,178.8 L461.5,178.9 L470.8,179.1 L480.1,179.2 L489.4,179.2 L498.6,179.2 L507.9,179.2 L517.2,179.2 L526.5,179.2 L535.8,179.2 L545.1,179.2 L554.4,179.2 L563.7,179.5 L573.0,179.5 L582.3,179.5 L591.5,179.5 L600.8,179.7 L610.1,180.5 L619.4,186.2 L628.7,200.6 L638.0,230.7" fill="none" stroke="var(--lor)" stroke-width="2.5" stroke-linejoin="round"/>
+            <circle cx="638.0" cy="230.7" r="3.5" fill="var(--lor)"/>
             <text x="54" y="174.4" text-anchor="end" font-size="10" fill="var(--ink-faint)">-1.000</text>
             <text x="54" y="107.8" text-anchor="end" font-size="10" fill="var(--ink-faint)">0</text>
             <text x="54" y="41.2" text-anchor="end" font-size="10" fill="var(--ink-faint)">1.000</text>
@@ -583,7 +587,7 @@
             <text x="247.8" y="254" text-anchor="middle" font-size="10" fill="var(--ink-faint)">mes 1</text>
             <text x="442.9" y="254" text-anchor="middle" font-size="10" fill="var(--ink-faint)">mes 2</text>
             <text x="638.0" y="254" text-anchor="end" font-size="10" fill="var(--ink-faint)">mes 3</text>
-            <text x="470.8" y="195.1" text-anchor="middle" font-size="10.5" font-weight="700" fill="var(--s-dep)">liquidez operativa requerida</text>
+            <text x="470.8" y="195.1" text-anchor="middle" font-size="10.5" font-weight="700" fill="var(--lor)">liquidez operativa requerida</text>
             <text x="322.1" y="83.6" text-anchor="middle" font-size="10.5" font-weight="700" fill="var(--ink)">mediana</text>
         </svg>
       </div>
@@ -593,7 +597,7 @@
           bandas de confianza · de 40–60 % en el centro a <b>1–99 %</b> en el extremo
         </span>
         <span><span class="swatch" style="background:var(--ink)"></span>mediana proyectada</span>
-        <span><span class="swatch" style="background:var(--s-dep)"></span>liquidez operativa requerida (percentil 1 %)</span>
+        <span><span class="swatch" style="background:var(--lor)"></span>liquidez operativa requerida (percentil 1 %)</span>
       </div>
       <ul class="hint">
         <li><b>Representación del formato de salida, no un pronóstico</b>: la serie es sintética y sigue la forma que documentan los hallazgos.</li>
