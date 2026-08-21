@@ -616,17 +616,15 @@
       <div class="finding">
         <span class="f-tag">¿por qué importa?</span>
         <p class="f-title">El requerimiento de liquidez no es el mismo según el día del mes desde el que se lo mire</p>
-        <p class="f-body">Un mismo plazo puede exigir liquidez distinta según cuándo empiece. Quien mira el horizonte desde el <b>día hábil 3</b> no enfrenta el mismo requerimiento que quien lo mira desde el <b>día 18</b>, aunque ambos estén cubriendo la misma cantidad de días.</p>
+        <p class="f-body">Quien mira el horizonte desde el <b>día hábil 3</b> no enfrenta el mismo requerimiento que quien lo mira desde el <b>día 18</b>, aunque ambos estén cubriendo la misma cantidad de días. Los indicadores con que se mide hoy son <b>históricos</b> y no distinguen esa diferencia. Lo que proponemos es <b>simulado y prospectivo</b>: proyecta la trayectoria desde el día en que se está parado, de modo que el requerimiento depende de esa posición.</p>
 
-        <p class="f-body" style="margin-top:.9rem">Los indicadores con que se mide hoy son <b>históricos</b>: describen lo que ya ocurrió, sin distinguir desde qué punto del mes se está mirando. Lo que proponemos es <b>simulado y prospectivo</b>, y proyecta la trayectoria hacia adelante desde el día en que se está parado, de modo que el requerimiento que entrega depende de esa posición.</p>
+        <p class="f-body" style="margin-top:.9rem">A eso se suma que durante el mes no solo sale liquidez: <b>también entra</b>. El sistema deposita al abrir el mes, y esos depósitos financian parte del retiro posterior. Hoy esa entrada no se cuenta, y cada retiro se provisiona completo de antemano aunque una porción llegue sola en el camino.</p>
 
-        <p class="f-body" style="margin-top:.9rem">A eso se suma una segunda ganancia. Durante el mes no solo sale liquidez: <b>también entra</b>. El sistema deposita al abrir el mes, y esos depósitos financian parte del retiro posterior. Hoy esa entrada no se cuenta, y se trata cada retiro como si tuviera que estar íntegramente provisionado de antemano, cuando una porción llega sola en el camino.</p>
+        <p class="thesis">Reconocer la trayectoria completa <b>libera requerimiento al inicio del mes y lo endurece cerca del cierre</b>. No es un ajuste uniforme: es una corrección que <b>cambia de signo con el calendario</b>.</p>
 
-        <p class="thesis">Reconocer la trayectoria completa, con lo que entra y lo que sale en el orden en que ocurre, <b>libera requerimiento al inicio del mes y lo endurece cerca del cierre</b>. No es un ajuste uniforme: es una corrección que <b>cambia de signo con el calendario</b>.</p>
+        <p class="f-body" style="margin-top:1.3rem">Además, al construirse sobre percentiles y no sobre un valor puntual, entrega un <b>rango</b> y no una sola cifra. Eso permite trabajar con escenarios y ver en qué momentos del mes el tramo de liquidez queda más expuesto.</p>
 
-        <p class="f-body" style="margin-top:1.3rem">Además, como se construye sobre percentiles y no sobre un valor puntual, no entrega una sola cifra sino un <b>rango</b>. Eso permite trabajar con escenarios, tanto el curso central como los adversos, y ver en qué momentos del mes el tramo de liquidez queda más expuesto, y qué parte de su cobertura depende de que el depósito temprano efectivamente llegue.</p>
-
-        <p class="f-body" style="margin-top:.9rem">Y si esa proyección resulta estable y se repite mes a mes, potencialmente se convierte en algo más: un <b>portafolio de referencia para el tramo de liquidez que no sea el mismo todos los días del mes</b>. En vez de una composición de plazos fija, tendría una composición que acompaña el ciclo, más cargada a los plazos cortos cuando el cierre está próximo, y con espacio para plazos más largos cuando está lejos.</p>
+        <p class="f-body" style="margin-top:.9rem">Y si esa proyección resulta estable y se repite mes a mes, potencialmente se convierte en un <b>portafolio de referencia para el tramo de liquidez que acompañe el ciclo</b>: más cargado a los plazos cortos cuando el cierre está próximo, con espacio para plazos más largos cuando está lejos.</p>
       </div>
 
       <div class="pie">
