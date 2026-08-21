@@ -106,10 +106,10 @@
     <h1>Diccionario de Features</h1>
     <p class="sub">Cómo se construye cada feature activo en <span class="mono">step001_build_feature_matrix.py</span>: fórmula, anclaje temporal y el código que lo genera. Generado para revisar consistencia antes de la próxima corrida de <span class="mono">step005_walk_forward_cv_4.py</span>.</p>
     <div class="meta-row">
-      <span><b>Features activos:</b> <span class="mono">28</span></span>
+      <span><b>Features activos:</b> <span class="mono">25</span></span>
       <span><b>Excluidos en FEATURES_EXCLUIR:</b> <span class="mono">104</span> (101 únicos)</span>
       <span><b>Matriz:</b> <span class="mono">1. Data/Clean/matriz_features.parquet</span></span>
-      <span><b>Última revisión de contenido:</b> sesión 2026-08-21 (tercera pasada) · nueva familia <span class="mono">*_pos_fx</span> de conteo fijo</span>
+      <span><b>Última revisión de contenido:</b> sesión 2026-08-21 (tercera pasada) · ventana deslizante de rezagos en la familia <span class="mono">*_pos</span></span>
     </div>
   </header>
 
@@ -120,7 +120,7 @@
       <li><a href="#excluidos"><span>Excluidos recientemente</span></a></li>
       <li><a href="#g1"><span>Flujo bancario crudo</span><span class="n">4</span></a></li>
       <li><a href="#g2"><span>Calendario crudo/binario</span><span class="n">5</span></a></li>
-      <li><a href="#g3"><span>Posición en el mes</span><span class="n">11</span></a></li>
+      <li><a href="#g3"><span>Posición en el mes</span><span class="n">8</span></a></li>
       <li><a href="#g4"><span>Encaje BBVA</span><span class="n">2</span></a></li>
       <li><a href="#g5"><span>CC+OVN en BCR</span><span class="n">4</span></a></li>
       <li><a href="#g6"><span>Macro / mercado</span><span class="n">2</span></a></li>
@@ -132,10 +132,11 @@
     <div id="hallazgos" class="callout warn">
       <h2>Hallazgos de esta revisión</h2>
       <ul>
-        <li><span class="finding-tag">familia nueva</span> <b class="mono">*_pos_fx</b> — el conteo de rezagos que entra al extremo de la familia <span class="mono">*_pos</span> <b>cae de 4 a 1</b> a medida que crece <span class="mono">h</span> (máscara <span class="mono">h ≤ 21k</span>). La nota de <span class="mono">_build_lag_posicion_mes</span> ya descartaba el problema de <b>sesgo</b> con un argumento correcto: con un modelo por horizonte el conteo es constante dentro de cada modelo, y un corrimiento constante no altera el orden de los cortes de un árbol. Lo que ese argumento no cubre es la <b>varianza</b>: a <span class="mono">h=75</span> el feature es un extremo sobre <b>una sola observación</b> —el valor de un único día de hace ~4 meses— y a <span class="mono">h=5</span> sobre cuatro. Eso no lo arregla tener un modelo por horizonte; el modelo de h largo simplemente recibe un feature más ruidoso. Los rezagos 4-7 son observables para todo <span class="mono">h ≤ 84</span>, así que fijan el conteo en 4 en todo el rango. <b>Para qué sirve:</b> en los heatmaps de permutación la familia adaptativa se apaga a <span class="mono">h</span> alto y hoy no se puede distinguir cuánto de esa caída es señal que decae y cuánto es el feature quedándose sin observaciones. La medición citada en <span class="mono">LAGS_POSICION_MES</span> ("el tramo que solo dispone del rezago 3 rinde igual") compara <b>tramos de h distintos</b>, así que confunde las dos cosas; el par <span class="mono">_fx</span> las separa a <span class="mono">h</span> igual.</li>
-        <li><span class="finding-tag">criterio inconsistente</span> La máscara point-in-time de <span class="mono">_build_lag_posicion_mes</span> es <b class="mono">f_lag &lt;= ft</b>, <b>inclusive</b>. Medido en <span class="mono">aux_verificar_pos_fijo.py</span> con una serie cuyo valor es el ordinal de su propia fecha, la familia adaptativa llega a un excedente de <b>+0 ruedas</b>: en algunas filas el rezago cae exactamente sobre <span class="mono">fecha_t</span> y lee <span class="mono">R</span>/<span class="mono">D</span> de ese mismo día. Pero <span class="mono">R_t0</span> y <span class="mono">D_t0</span> están excluidos de la matriz precisamente por no ser información disponible en el momento de decidir, así que los dos criterios no coinciden. No se cambió: pasar a <span class="mono">&lt;</span> alteraría los valores de toda la familia adaptativa e invalidaría las mediciones de importancia ya hechas. Queda como decisión pendiente. La familia <span class="mono">_fx</span> es inmune por construcción — su excedente medido es <b>−10 ruedas</b>, nunca toca <span class="mono">t</span>.</li>
-        <li><span class="finding-tag">umbral mal supuesto</span> La primera versión del checklist verificaba la contención <span class="mono">max_fx ≥ max_adapt</span> sobre <span class="mono">h ≥ 64</span>, tomando de la docstring que a partir de ahí sobrevive solo el rezago 4. <b>Falló.</b> Medido, a <span class="mono">h=64</span> el juego adaptativo todavía tiene <b>2</b> rezagos (3 y 4), y el 3 no está en {4,5,6,7}. La regla <span class="mono">h ≤ 21k</span> es una aproximación: los meses tienen 19-23 ruedas y el lookup usa aritmética de mes calendario, no de 21 días, así que el <span class="mono">h</span> exacto en que cae cada rezago se corre según el calendario. La condición correcta no es un umbral de <span class="mono">h</span> sino <span class="mono">n_adapt == 1</span>, leída del contador que la función ya devuelve. <b>Vale para cualquier código que dependa de esa regla:</b> el 21k documenta la intención, no el corte real.</li>
-        <li><span class="finding-tag">casi se rompe algo</span> Al limpiar por SHAP baja, <b class="mono">R_conf_t2</b> estaba en la lista de candidatos a excluir junto con <span class="mono">R_conf_t1</span>/<span class="mono">D_conf_t1</span> — misma SHAP baja, mismo aspecto de feature débil. Es insumo estructural de <span class="mono">DESCOMPONER_H2</span> en <span class="mono">step005</span>: excluirlo habría desactivado en silencio (solo un <span class="mono">log.warning</span>) la descomposición del target de h=2, que aprovecha que el retiro a 2 días está casi confirmado por la banca. <b>Regla general:</b> antes de excluir un feature por baja importancia, verificar que no sea insumo de otra parte del pipeline — la importancia se mide dentro de un modelo, no across todo el sistema. Ver la ficha de <span class="mono">R_conf_t2</span> en el grupo 1.</li>
+        <li><span class="finding-tag">bug de construcción</span> El conteo de rezagos que entraba al extremo de la familia <b class="mono">*_pos</b> <b>caía de 4 a 1</b> con el horizonte: la máscara <span class="mono">h ≤ 21k</span> deja los cuatro rezagos hasta h=21 y uno solo desde h~64, y el código tomaba <i>todos</i> los disponibles de una lista de 4. Sobre el <b>sesgo</b> la docstring ya tenía razón y no había nada que arreglar (E[máx de 4] &gt; E[máx de 1], pero con un modelo por horizonte el conteo es constante dentro de cada modelo y un corrimiento constante no altera el orden de los cortes de un árbol). El problema era la <b>varianza</b>: a h largo el feature terminaba siendo el valor de <b>un único día de hace ~4 meses</b>, y a h corto un extremo sobre cuatro. Eso no lo arregla tener un modelo por horizonte; el de h largo simplemente recibía un feature mucho más ruidoso. <b>Consecuencia para la lectura de los heatmaps:</b> la familia se apagaba a h alto y no se podía saber cuánto de esa caída era señal que decae y cuánto el feature quedándose sin observaciones.</li>
+        <li><span class="finding-tag">arreglo</span> <b>Ventana deslizante.</b> <span class="mono">LAGS_POSICION_MES</span> pasa a ser una lista de <b>candidatos</b> (<span class="mono">[1..8]</span>) y entran los <span class="mono">N_REZAGOS_OBJETIVO = 4</span> más recientes que sobrevivan a la máscara. En el bucle es una condición extra: <span class="mono">usable &amp;= (n_lags &lt; n_objetivo)</span>, y como se recorre del más reciente al más viejo, los elegidos son siempre los más nuevos. <b>Conteo fijo y recencia máxima a la vez.</b> Se descartó la alternativa de fijar una lista rígida y lejana (<span class="mono">[4,5,6,7]</span> para todo h): también daba conteo constante, pero pagaba recencia en los horizontes cortos, que era donde no había ningún problema, y como familia paralela habría quedado muy correlacionada con la original, deprimiendo la importancia por permutación de <b>ambas</b>. <b>Propiedad que conviene retener:</b> donde el comportamiento previo ya llegaba a 4 rezagos el resultado es <b>idéntico</b>, así que las mediciones ya hechas en ese tramo siguen valiendo; el cambio solo toca las filas donde antes faltaban rezagos.</li>
+        <li><span class="finding-tag">regla que no es la regla</span> <span class="mono">h ≤ 21k</span> documenta la <i>intención</i>, no el corte real. Medido: a <b>h=64 todavía sobreviven 2 rezagos</b>, no 1. Los meses tienen 19-23 ruedas y el lookup usa aritmética de mes calendario, no de 21 días, así que el h en que cae cada rezago se corre según el calendario. Esto rompió <b>dos veces</b> verificaciones escritas contra la regla en vez de contra el dato. <b>Regla general:</b> cualquier chequeo que dependa de cuántos rezagos hay tiene que leer el contador que <span class="mono">_build_lag_posicion_mes</span> ya devuelve, nunca derivarlo de un umbral de h. El checklist quedó escrito así, condicionando sobre <span class="mono">n_previo == 4</span>.</li>
+        <li><span class="finding-tag">criterio inconsistente</span> La máscara point-in-time es <b class="mono">f_lag &lt;= ft</b>, <b>inclusive</b>. Medido con una serie cuyo valor es el ordinal de su propia fecha, el excedente peor es <b>+0 ruedas</b>: en algunas filas el rezago cae exactamente sobre <span class="mono">fecha_t</span> y lee <span class="mono">R</span>/<span class="mono">D</span> de ese mismo día. Pero <span class="mono">R_t0</span> y <span class="mono">D_t0</span> están excluidos de la matriz precisamente por no ser información disponible al decidir, así que los dos criterios no coinciden. <b>No se cambió:</b> pasar a <span class="mono">&lt;</span> alteraría los valores de toda la familia e invalidaría las mediciones de importancia ya hechas. Queda como decisión pendiente, no como olvido.</li>
+                                <li><span class="finding-tag">casi se rompe algo</span> Al limpiar por SHAP baja, <b class="mono">R_conf_t2</b> estaba en la lista de candidatos a excluir junto con <span class="mono">R_conf_t1</span>/<span class="mono">D_conf_t1</span> — misma SHAP baja, mismo aspecto de feature débil. Es insumo estructural de <span class="mono">DESCOMPONER_H2</span> en <span class="mono">step005</span>: excluirlo habría desactivado en silencio (solo un <span class="mono">log.warning</span>) la descomposición del target de h=2, que aprovecha que el retiro a 2 días está casi confirmado por la banca. <b>Regla general:</b> antes de excluir un feature por baja importancia, verificar que no sea insumo de otra parte del pipeline — la importancia se mide dentro de un modelo, no across todo el sistema. Ver la ficha de <span class="mono">R_conf_t2</span> en el grupo 1.</li>
         <li><span class="finding-tag">bug recurrente</span> Segunda vez en este archivo que una coma faltante en <span class="mono">FEATURES_EXCLUIR</span> concatena dos literales adyacentes en uno solo (Python no necesita el operador <span class="mono">+</span> para unir strings pegados). La primera vez fue <span class="mono">"is_post_elecciones_post_feriado"</span>; esta vez <span class="mono">"elec_cos"</span> sin coma se fusionó con <span class="mono">"capacidad_retiro_th"</span>, y la exclusión de este último no habría tenido efecto. Detectado ANTES de confiar en el commit, comparando cada <span class="mono">ast.Constant</span> de la lista contra su propio segmento de fuente — más de un par de comillas en el segmento delata concatenación. Vale la pena correr ese chequeo después de cualquier edición a esta lista.</li>
         <li><span class="finding-tag">nombre dinámico</span> <b class="mono">R_t-1</b>/<span class="mono">D_t-1</span> no aparecían en ninguna búsqueda por texto literal porque se generan con f-string dentro de un bucle: <span class="mono">for l in todos_lags: resultado[f"R_t-{l}"] = df["R"].shift(l)</span> (línea 1389). Solo se descubrió su existencia real al ver un heatmap de SHAP que los mostraba como filas propias.</li>
         <li><span class="finding-tag">inactivo</span><b class="mono">n_lags_pos</b> no está en <span class="mono">FEATURES_EXCLUIR</span> pero tampoco llega a la matriz: su <span class="mono">add()</span> de documentación vive dentro de <span class="mono">if GUARDAR_N_LAGS_POS:</span> y esa bandera está en <span class="mono">False</span>. El recuento "activo" de este documento (35) ya lo excluye; un chequeo por diferencia simple contra <span class="mono">FEATURES_EXCLUIR</span> daría 36 y sería incorrecto.</li>
@@ -242,15 +243,15 @@
     </section>
 
     <section id="g3" class="group">
-      <h2>3 · Posición en el mes — familia <span class="mono" style="font-size:1.05rem">*_pos</span> <span class="count">11 features</span></h2>
+      <h2>3 · Posición en el mes — familia <span class="mono" style="font-size:1.05rem">*_pos</span> <span class="count">8 features</span></h2>
       <p class="group-note">Anclados en <span class="mono">fecha_th</span>, no en la fecha de origen: para cada horizonte, se busca el día de los meses previos que ocupa la <b>misma posición respecto al cierre de mes</b> que <span class="mono">t+h</span>, y se agrega sobre esos rezagos. Construidos en <span class="mono">_build_lag_posicion_mes()</span> (línea 1918) y <span class="mono">_build_frec_posicion_mes()</span> (línea 2158). La disponibilidad de rezagos depende de <span class="mono">h</span>: un rezago cuya fecha sea posterior a <span class="mono">t</span> se descarta (h ≤ 21k para el rezago k), lo que evita usar el futuro.</p>
-      <p class="group-note" style="margin-top:-.9rem">Tres sufijos conviven en la familia. Sin sufijo: rezagos <b>1-4</b>, ancla de cierre — el conteo que entra al extremo <b>cae con h</b>, de 4 a 1. <span class="mono">_ap</span>: rezagos 1-4, ancla de <b>apertura</b> del mes, para la cola alta. <span class="mono">_fx</span>: rezagos <b>4-7</b>, ancla de cierre, <b>conteo fijo = 4 en todo el rango de h</b> — nuevo esta pasada, ver el hallazgo correspondiente.</p>
+      <p class="group-note" style="margin-top:-.9rem"><b>Ventana deslizante</b> (nuevo esta pasada): <span class="mono">LAGS_POSICION_MES</span> pasó a ser una lista de <b>candidatos</b> (<span class="mono">[1..8]</span>) y de cada fila entran los <span class="mono">N_REZAGOS_OBJETIVO = 4</span> más recientes que hayan sobrevivido a la máscara. Antes entraban <i>todos</i> los disponibles de una lista de 4, así que el conteo caía de 4 a 1 con el horizonte. Ahora el conteo es fijo y la recencia es máxima a cada h: <span class="mono">h=5 → 1,2,3,4</span>, <span class="mono">h=43 → 3,4,5,6</span>, <span class="mono">h=75 → 4,5,6,7</span>. Ver el hallazgo correspondiente.</p>
       <div class="cards">
 
         <article class="feat" id="esc_neto_min_pos">
           <div class="feat-head"><span class="feat-name">esc_neto_min_pos</span><div class="chips"><span class="chip anchor-th">t+h</span></div></div>
-          <p class="feat-desc">Peor flujo neto <span class="mono">D−R</span> (con signo, el más negativo) en la misma posición del mes que t+h, entre los rezagos 1-4 ya observables en t. Predictor natural de la <b>cola BAJA</b>. Complementa a <span class="mono">sigma_22d</span>, que promedia sobre 22 ruedas y borra la variación por posición.</p>
-          <dl class="kv"><dt>Fórmula</dt><dd><span class="mono">min( (D−R)[pos(t+h), mes−k] : k=1..4 disponibles )</span></dd></dl>
+          <p class="feat-desc">Peor flujo neto <span class="mono">D−R</span> (con signo, el más negativo) en la misma posición del mes que t+h, entre los 4 rezagos más recientes ya observables en t. Predictor natural de la <b>cola BAJA</b>. Complementa a <span class="mono">sigma_22d</span>, que promedia sobre 22 ruedas y borra la variación por posición.</p>
+          <dl class="kv"><dt>Fórmula</dt><dd><span class="mono">min( (D−R)[pos(t+h), mes−k] : los 4 k más recientes disponibles )</span></dd></dl>
           <pre><span class="ln">1872</span>def _build_lag_posicion_mes(serie_valores, fechas_th, fechas_t, lags_meses,
 <span class="ln">1873</span>                            peru_bday, referencia="cierre"):
 <span class="ln">...</span>   dcm = (_tmp.groupby("ym")["f"].rank(ascending=False, method="first")
@@ -261,7 +262,7 @@
         <article class="feat" id="esc_neto_max_pos">
           <div class="feat-head"><span class="feat-name">esc_neto_max_pos</span><div class="chips"><span class="chip anchor-th">t+h</span></div></div>
           <p class="feat-desc">El flujo neto más positivo en la misma posición del mes. Predictor natural de la <b>cola ALTA</b>. Separar por signo evita que ambas colas reciban el mismo número — lo que ocurría con un único máximo de valores absolutos.</p>
-          <dl class="kv"><dt>Fórmula</dt><dd><span class="mono">max( (D−R)[pos(t+h), mes−k] : k=1..4 disponibles )</span></dd></dl>
+          <dl class="kv"><dt>Fórmula</dt><dd><span class="mono">max( (D−R)[pos(t+h), mes−k] : los 4 k más recientes disponibles )</span></dd></dl>
           <pre><span class="ln">1872</span>def _build_lag_posicion_mes(serie_valores=D−R, ..., referencia="cierre")</pre>
           <p class="code-cap">Misma función que esc_neto_min_pos, signo positivo del extremo.</p>
         </article>
@@ -269,20 +270,20 @@
         <article class="feat" id="esc_retiro_pos">
           <div class="feat-head"><span class="feat-name">esc_retiro_pos</span><div class="chips"><span class="chip anchor-th">t+h</span></div></div>
           <p class="feat-desc">Ídem sobre <span class="mono">R</span> solo (no el neto). Dirige la cola BAJA. En la permutación del modelo aparece por encima de la versión neta: descomponer el flujo en sus componentes aporta señal propia.</p>
-          <dl class="kv"><dt>Fórmula</dt><dd><span class="mono">max( |R[pos(t+h), mes−k]| : k=1..4 disponibles )</span></dd></dl>
+          <dl class="kv"><dt>Fórmula</dt><dd><span class="mono">max( |R[pos(t+h), mes−k]| : los 4 k más recientes disponibles )</span></dd></dl>
           <pre><span class="ln">1872</span>_build_lag_posicion_mes(serie_valores=R, ...)</pre>
         </article>
 
         <article class="feat" id="acum_neto_min_pos">
           <div class="feat-head"><span class="feat-name">acum_neto_min_pos</span><div class="chips"><span class="chip anchor-th">t+h</span></div></div>
           <p class="feat-desc">Flujo neto <b>acumulado dentro del mes</b> hasta el día con la misma posición que t+h, el más negativo de los 4 meses previos. A diferencia de esc_neto_min_pos (extremo de un solo día) es una cantidad de trayectoria: cuánto se había construido a esa altura del ciclo. Anclado en la fecha de origen esta señal no era relevante (ver <span class="mono">flujo_neto_acum_mes</span>, excluido).</p>
-          <dl class="kv"><dt>Fórmula</dt><dd><span class="mono">min( acum_mes(D−R)[pos(t+h), mes−k] : k=1..4 )</span></dd></dl>
+          <dl class="kv"><dt>Fórmula</dt><dd><span class="mono">min( acum_mes(D−R)[pos(t+h), mes−k] : los 4 k más recientes )</span></dd></dl>
         </article>
 
         <article class="feat" id="acum_neto_max_pos">
           <div class="feat-head"><span class="feat-name">acum_neto_max_pos</span><div class="chips"><span class="chip anchor-th">t+h</span></div></div>
           <p class="feat-desc">Ídem, el acumulado más positivo.</p>
-          <dl class="kv"><dt>Fórmula</dt><dd><span class="mono">max( acum_mes(D−R)[pos(t+h), mes−k] : k=1..4 )</span></dd></dl>
+          <dl class="kv"><dt>Fórmula</dt><dd><span class="mono">max( acum_mes(D−R)[pos(t+h), mes−k] : los 4 k más recientes )</span></dd></dl>
         </article>
 
         <article class="feat" id="frec_flujo_pos">
@@ -309,36 +310,6 @@
           <p class="feat-desc">Igual que <span class="mono">esc_deposito_pos</span> pero con <span class="mono">referencia="inicio"</span>. Era el candidato más directo a la hipótesis de reversión, porque es sobre <span class="mono">D</span> específicamente — y se confirmó: en importancia por permutación superó notablemente a la versión anclada al cierre, que se excluyó (ver <a href="#excluidos">Excluidos recientemente</a>). Mecánicamente consistente: los depósitos fuertes ocurren a inicios de mes, así que anclar la búsqueda al cierre desalineaba la posición contra el día donde realmente ocurre el depósito grande.</p>
           <pre><span class="ln">2656</span>df["esc_deposito_pos_ap"] = _mx_ap.values</pre>
           <p class="code-cap"><span class="mono">step001_build_feature_matrix.py:2642-2656</span></p>
-        </article>
-
-        <article class="feat" id="esc_neto_min_pos_fx">
-          <div class="feat-head"><span class="feat-name">esc_neto_min_pos_fx</span><div class="chips"><span class="chip anchor-th">t+h</span><span class="chip" style="background:var(--accent-soft);color:var(--accent-ink);border-color:transparent">nuevo, a medir</span></div></div>
-          <p class="feat-desc">Espejo exacto de <span class="mono">esc_neto_min_pos</span> salvo por el juego de rezagos: <b>4-7</b> en vez de 1-4. Misma serie, misma ancla, misma función. Como el rezago 4 exige <span class="mono">h ≤ 84</span> y los demás son aún más laxos, los cuatro entran para todo horizonte del rango: el extremo se toma siempre sobre <b>4 observaciones</b>, no sobre un número que decrece con <span class="mono">h</span>.</p>
-          <dl class="kv"><dt>Fórmula</dt><dd><span class="mono">min( (D−R)[pos(t+h), mes−k] : k=4..7 )</span></dd><dt>Contra su par</dt><dd>una sola diferencia con <span class="mono">esc_neto_min_pos</span>, para que la brecha de importancia a un <span class="mono">h</span> dado mida el efecto del conteo y nada más</dd></dl>
-          <pre><span class="ln">2101</span>LAGS_POSICION_MES_FIJO = [4, 5, 6, 7]
-<span class="ln">2765</span>_mx_fx, _mn_s_fx, _mx_s_fx, _n_fx = _build_lag_posicion_mes(
-<span class="ln">2766</span>    _ser, df["fecha_th"], df["fecha_t"], LAGS_POSICION_MES_FIJO,
-<span class="ln">2767</span>    peru_bday, referencia=ANCLA_POSICION_MES.get(_nom, "cierre"),
-<span class="ln">2768</span>)
-<span class="ln">2772</span>df["esc_neto_min_pos_fx"] = _mn_s_fx.values</pre>
-          <p class="code-cap"><span class="mono">step001_build_feature_matrix.py:2069-2115</span> (constantes y motivación) · <span class="mono">2755-2801</span> (construcción). Verificado en <span class="mono">aux_verificar_pos_fijo.py --sintetico</span>.</p>
-        </article>
-
-        <article class="feat" id="esc_neto_max_pos_fx">
-          <div class="feat-head"><span class="feat-name">esc_neto_max_pos_fx</span><div class="chips"><span class="chip anchor-th">t+h</span><span class="chip" style="background:var(--accent-soft);color:var(--accent-ink);border-color:transparent">nuevo, a medir</span></div></div>
-          <p class="feat-desc">Ídem, extremo positivo. Par de conteo fijo de <span class="mono">esc_neto_max_pos</span>. Sale de la misma llamada que <span class="mono">esc_neto_min_pos_fx</span> — la función devuelve los dos extremos con signo de una pasada.</p>
-          <dl class="kv"><dt>Fórmula</dt><dd><span class="mono">max( (D−R)[pos(t+h), mes−k] : k=4..7 )</span></dd></dl>
-          <pre><span class="ln">2773</span>df["esc_neto_max_pos_fx"] = _mx_s_fx.values</pre>
-          <p class="code-cap"><span class="mono">step001_build_feature_matrix.py:2773</span></p>
-        </article>
-
-        <article class="feat" id="esc_retiro_pos_fx">
-          <div class="feat-head"><span class="feat-name">esc_retiro_pos_fx</span><div class="chips"><span class="chip anchor-th">t+h</span><span class="chip" style="background:var(--accent-soft);color:var(--accent-ink);border-color:transparent">nuevo, a medir</span></div></div>
-          <p class="feat-desc">Par de conteo fijo de <span class="mono">esc_retiro_pos</span>, sobre <span class="mono">R</span> solo. Se incluyó junto al neto y no las otras dos series porque <span class="mono">esc_retiro_pos</span> es el <span class="mono">*_pos</span> con más importancia propia en q01, por encima de su versión neta. Extenderlo a <span class="mono">deposito</span> y <span class="mono">acum</span> duplicaría el trabajo de permutación de <span class="mono">step005</span> sin hipótesis previa — mismo criterio con el que el bloque <span class="mono">_ap</span> se limitó a 2 de 7 columnas.</p>
-          <dl class="kv"><dt>Fórmula</dt><dd><span class="mono">max( |R[pos(t+h), mes−k]| : k=4..7 )</span></dd><dt>Series con <span class="mono">_fx</span></dt><dd><span class="mono">SERIES_POS_CONTEO_FIJO = ("flujo", "retiro")</span></dd></dl>
-          <pre><span class="ln">2114</span>SERIES_POS_CONTEO_FIJO = ("flujo", "retiro")
-<span class="ln">2777</span>df[f"esc_{_nom}_pos_fx"] = _mx_fx.values</pre>
-          <p class="code-cap"><span class="mono">step001_build_feature_matrix.py:2777</span> — nombre generado con f-string, igual que <span class="mono">R_t-1</span> y <span class="mono">ma_flujo_5d</span>: invisible a una búsqueda por texto literal.</p>
         </article>
 
       </div>
