@@ -452,15 +452,12 @@
       <p class="f-body" style="max-width:62ch; margin-top:1.4rem">La decisión de <b>cuánto</b> y a <b>qué plazo</b> invertir sigue una premisa concreta: una expectativa de los requerimientos de liquidez del Sistema Financiero, es decir, sus retiros netos. En consecuencia, nos interesa caracterizar el <b>escenario extremo intertemporal</b> que pueda servir de referencia para la gestión del riesgo de liquidez de las RIN.</p>
     </section>
 
-    <!-- ── Por qué proyectar el flujo acumulado ── -->
+    <!-- ── Qué queremos construir ── -->
     <section id="proyeccion">
       <div class="sec-head"><h2>¿Qué queremos construir con esto?</h2><span class="n">flujo acumulado</span></div>
-      <p class="f-body" style="max-width:62ch">Esa expectativa de requerimientos de liquidez no puede leerse día por día: el dato que informa la decisión de monto y plazo es el <b>flujo acumulado</b> a lo largo del horizonte que se está cubriendo, no el flujo aislado del día de vencimiento.</p>
 
-      <div class="finding" style="border-top:none; padding-top:0; margin-top:1.4rem">
-        <span class="f-tag">¿por qué acumulado, no diario?</span>
-        <p class="f-title">El día de vencimiento no muestra cuánta caja hizo falta en el camino</p>
-        <p class="f-body">Un caso simple, con visión perfecta de los retiros: el sistema recibe 200 MM el día 1, retira 1.000 MM el día 2 y 300 MM el día 3. Mirado día a día, el día 3 —el vencimiento— pide cubrir apenas 300 MM, y ese sería el tamaño del depósito a colocar. Pero el sistema nunca estuvo en –300; para el día 2 ya acumulaba –800, y al cierre del día 3 el déficit acumulado llega a –1.100.</p>
+      <div class="finding" style="border-top:none; padding-top:0; margin-top:0">
+        <p class="f-body">Esa expectativa no puede leerse día por día. Con visión perfecta de los retiros —el sistema recibe 200 MM el día 1, retira 1.000 el día 2 y 300 el día 3—, mirar solo el día de vencimiento pediría cubrir <b>300 MM</b>. Pero el sistema nunca estuvo en –300: al día 2 ya acumulaba –800, y al cierre del día 3 el déficit acumulado llega a <b>–1.100</b>.</p>
 
         <div class="chart-wrap">
           <svg class="chart" viewBox="0 0 660 240" role="img" aria-label="Ejemplo ilustrativo: flujo de cada día frente al flujo acumulado, del día 0 al día 3">
@@ -499,20 +496,7 @@
         </div>
         <ul class="hint"><li>Ejemplo ilustrativo con visión perfecta de retiros — no son datos observados del sistema.</li></ul>
 
-        <div class="stat">
-          <div><span class="v cool">300 MM</span><span class="k">monto que sugiere mirar solo el flujo del día de vencimiento</span></div>
-          <div><span class="v">1.100 MM</span><span class="k">déficit acumulado real al cierre del día 3</span></div>
-        </div>
-      </div>
-
-      <!-- ── El máximo drawdown desde el origen ── -->
-      <div class="finding">
-        <span class="f-tag">el máximo drawdown desde el origen</span>
-        <p class="f-title">Y el acumulado al vencimiento tampoco basta: lo que manda es la caída máxima del camino</p>
-        <p class="f-body">Volviendo al ejemplo anterior, un depósito de 1.100 MM que vence el día 3 <b>igual falla</b>: el día 2 el sistema ya acumulaba –800 y no había con qué cubrirlo. Si bien el acumulado al horizonte da el <b>monto</b> correcto, no el mismo caso con el <b>plazo</b>.</p>
-        <p class="f-body" style="margin-top:.7rem">Por ende, la regla que realmente se deduce es más exigente: la escalera de vencimientos tiene que dominar la trayectoria acumulada <b>en cada fecha</b>, no solo al final. De esta manera, eso define el objeto que hay que proyectar — el <b>máximo drawdown desde el origen</b>: qué tan abajo del punto de partida llegó a estar el acumulado en algún momento del plazo.</p>
-        <p class="f-body" style="margin-top:.7rem">Cabe resaltar que importa que se mida <b>desde hoy</b> y no desde el pico de la trayectoria. Así, los depósitos que entran en el camino financian retiros posteriores: si el acumulado sube a +450 y luego cae a –100, hubo una caída de 550 desde el pico, pero solo <b>100</b> tuvieron que estar puestos de antemano. Medido desde el origen, el número es directamente la caja que hay que tener lista.</p>
-        <p class="f-body" style="margin-top:.7rem">Finalmente, leído a distintos plazos, deja de ser un número y pasa a ser una <b>curva</b>: cuánta liquidez exige cubrir 5 días, 20 días, 3 meses. La curva de liquidez requerida es lo que fija monto y plazo a la vez.</p>
+        <p class="f-body" style="margin-top:1.6rem">Y el acumulado al vencimiento tampoco basta: un depósito de 1.100 MM que vence el día 3 igual falla, porque el día 2 no había con qué cubrir los –800. La escalera de vencimientos tiene que dominar la trayectoria <b>en cada fecha</b>, no solo al final. Eso define el objeto a proyectar: el <b>máximo drawdown desde el origen</b> — qué tan abajo del punto de partida llegó a estar el acumulado en algún momento del plazo.</p>
 
         <div class="chart-wrap">
           <svg class="chart" viewBox="0 0 660 200" role="img" aria-label="Liquidez requerida por fecha frente a la que entrega un solo vencimiento a 3 días: falta cobertura el día 2">
@@ -537,17 +521,8 @@
           <span><span class="swatch" style="background:var(--lor)"></span>liquidez requerida por fecha</span>
           <span><span class="swatch dash" style="color:var(--s-dep)"></span>lo que entrega un solo vencimiento a 3 días</span>
         </div>
-      </div>
 
-      <!-- ── El signo de la corrección ── -->
-      <div class="finding">
-        <span class="f-tag">un matiz que conviene declarar</span>
-        <p class="f-title">La vista acumulada no siempre pide más liquidez — a veces pide menos (desde un punto de vista prospectivo)</p>
-        <p class="f-body">Conviene no dejar la impresión de que mirar el acumulado implica siempre un requerimiento mayor.</p>
-        <div class="caveat">
-          <span class="caveat-k">el sesgo cambia de signo según el calendario</span>
-          <p>Con el patrón del hallazgo 2 —el sistema deposita al abrir el mes y retira contra el cierre— la trayectoria sube y luego cae, así que sobre un horizonte de <b>mes completo</b> los depósitos tempranos autofinancian parte del retiro final: ahí mirar el día pico <b>sobreestima</b> el requerimiento. La corrección solo va hacia arriba si el horizonte <b>arranca después</b> de que ese colchón ya se drenó. En otras palabras, el hallazgo 2 no es contexto: es lo que determina en qué régimen se está parado.</p>
-        </div>
+        <p class="f-body" style="margin-top:1.6rem">Importa que se mida <b>desde hoy</b> y no desde el pico: los depósitos que entran en el camino financian retiros posteriores, así que solo la caída respecto del punto de partida es caja que hay que tener lista. Y leído a distintos plazos deja de ser un número y pasa a ser una <b>curva</b> —cuánta liquidez exige cubrir 5 días, 20 días, 3 meses—, que es lo que fija monto y plazo a la vez.</p>
       </div>
     </section>
 
