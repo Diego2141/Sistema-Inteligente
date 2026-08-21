@@ -328,7 +328,7 @@
     <!-- ── La variable a modelar ── -->
     <section id="serie">
       <div class="sec-head"><h2>La variable</h2><span class="n">serie diaria</span></div>
-      <p class="f-body" style="max-width:62ch">Antes de los hallazgos, esto es lo que estamos modelando: el flujo diario del sistema entero. Cada barra es un día hábil. Los tres hallazgos que siguen son lecturas de esta misma serie.</p>
+      <p class="f-body" style="max-width:62ch">Antes de los hallazgos, esto es lo que estamos modelando: el flujo diario del sistema entero. En el gráfico, cada barra es un día hábil. Así, los tres hallazgos que siguen son lecturas de esta misma serie.</p>
       <div class="ctl">
         <label for="anioSerie">Año</label>
         <input type="range" id="anioSerie" min="0" max="1" step="1" value="0" aria-describedby="anioSerie-val">
@@ -365,7 +365,7 @@
       <div class="finding">
         <span class="f-tag">hallazgo 2 · cómo</span>
         <p class="f-title">Y se concentra contra el cierre, no se reparte en el mes</p>
-        <p class="f-body">Ese monto no cae parejo a lo largo del mes. El sistema deposita al abrir el mes y retira sobre el final, y en los cierres de trimestre el pico es mucho más pronunciado.</p>
+        <p class="f-body">Ese monto no cae parejo a lo largo del mes. En efecto, el sistema deposita al abrir el mes y retira sobre el final, y en los cierres de trimestre el pico es mucho más pronunciado.</p>
         <div class="seg" role="group" aria-label="Qué meses entran en el gráfico">
           <span class="seg-label">Meses</span>
           <button type="button" class="seg-btn is-on" data-modo="trim" aria-pressed="true">Cierre de trimestre</button>
@@ -429,17 +429,17 @@
         <div class="ask-card">
           <h3>Portafolio de disponibilidad inmediata</h3>
           <p class="ask-plazo">Plazo de inversión: hasta <b>1 semana</b></p>
-          <p style="margin:0; font-size:.87rem; line-height:1.5; color:var(--ink-soft)">Cubre el requerimiento más cercano en el tiempo: la caja que debe estar lista sin fricción. Lo que tiene que mantener disponible es la <b>caída máxima que el flujo acumulado puede alcanzar dentro de esta ventana de una semana</b> — no el flujo del último día.</p>
+          <p style="margin:0; font-size:.87rem; line-height:1.5; color:var(--ink-soft)">Cubre el requerimiento más cercano en el tiempo: la caja que debe estar lista sin fricción. En concreto, lo que tiene que mantener disponible es la <b>caída máxima que el flujo acumulado puede alcanzar dentro de esta ventana de una semana</b> — no el flujo del último día.</p>
         </div>
         <div class="ask-card warm">
           <h3>Portafolio de liquidez</h3>
           <p class="ask-plazo warm">Plazo de inversión: hasta <b>3 meses</b></p>
-          <p style="margin:0; font-size:.87rem; line-height:1.5; color:var(--ink-soft)">Cubre el resto del horizonte de corto plazo, en distintos instrumentos y plazos de money market. Cada tramo se dimensiona con la misma lógica, contra la <b>caída máxima acumulada de su propio plazo</b>; y como esa caída solo puede profundizarse al alargar el horizonte, un tramo más largo nunca exige menos que uno más corto.</p>
+          <p style="margin:0; font-size:.87rem; line-height:1.5; color:var(--ink-soft)">Cubre el resto del horizonte de corto plazo, en distintos instrumentos y plazos de money market. Aquí, cada tramo se dimensiona con la misma lógica, contra la <b>caída máxima acumulada de su propio plazo</b>; y como esa caída solo puede profundizarse al alargar el horizonte, un tramo más largo nunca exige menos que uno más corto.</p>
         </div>
       </div>
 
       <p class="f-body" style="max-width:62ch; margin-top:1.8rem">Antes de proponer qué construir, vale la pena situar el proyecto: no buscamos prescribir la gestión de liquidez de las RIN, sino darle a quien la ejerce una referencia más clara del entorno de riesgo en el que decide.</p>
-      <p class="f-body" style="max-width:62ch; margin-top:1.4rem">La gestión de las RIN sigue tres pilares. El proyecto apunta directamente al segundo — liquidez — en los tramos de corto plazo:</p>
+      <p class="f-body" style="max-width:62ch; margin-top:1.4rem">La gestión de las RIN sigue tres pilares. De ellos, el proyecto apunta directamente al segundo — liquidez — en los tramos de corto plazo:</p>
 
       <div class="pillars">
         <div class="pillar"><span class="pillar-n">1</span><span class="pillar-k">Seguridad</span><span class="pillar-d">determinada por el universo de inversión: contrapartes aprobadas.</span></div>
@@ -455,7 +455,7 @@
       <div class="sec-head"><h2>¿Qué queremos construir con esto?</h2><span class="n">flujo acumulado</span></div>
 
       <div class="finding" style="border-top:none; padding-top:0; margin-top:0">
-        <p class="f-body">Esa expectativa no puede leerse día por día. Con visión perfecta de los retiros —el sistema recibe 200 MM el día 1, retira 1.000 el día 2 y 300 el día 3—, mirar solo el día de vencimiento pediría cubrir <b>300 MM</b>. Pero el sistema nunca estuvo en –300: al día 2 ya acumulaba –800, y al cierre del día 3 el déficit acumulado llega a <b>–1.100</b>.</p>
+        <p class="f-body">Esa expectativa no puede leerse día por día. Por ejemplo, con visión perfecta de los retiros —el sistema recibe 200 MM el día 1, retira 1.000 el día 2 y 300 el día 3—, mirar solo el día de vencimiento pediría cubrir <b>300 MM</b>. Pero el sistema nunca estuvo en –300: al día 2 ya acumulaba –800, y al cierre del día 3 el déficit acumulado llega a <b>–1.100</b>.</p>
 
         <div class="chart-wrap">
           <svg class="chart" viewBox="0 0 660 240" role="img" aria-label="Ejemplo ilustrativo: flujo de cada día frente al flujo acumulado, del día 0 al día 3">
@@ -494,7 +494,7 @@
         </div>
         <ul class="hint"><li>Ejemplo ilustrativo con visión perfecta de retiros — no son datos observados del sistema.</li></ul>
 
-        <p class="f-body" style="margin-top:1.6rem">Y el acumulado al vencimiento tampoco basta: un depósito de 1.100 MM que vence el día 3 igual falla, porque el día 2 no había con qué cubrir los –800. La escalera de vencimientos tiene que dominar la trayectoria <b>en cada fecha</b>, no solo al final. Eso define el objeto a proyectar: el <b>máximo drawdown desde el origen</b> — qué tan abajo del punto de partida llegó a estar el acumulado en algún momento del plazo.</p>
+        <p class="f-body" style="margin-top:1.6rem">Y el acumulado al vencimiento tampoco basta: un depósito de 1.100 MM que vence el día 3 igual falla, porque el día 2 no había con qué cubrir los –800. Por ende, la escalera de vencimientos tiene que dominar la trayectoria <b>en cada fecha</b>, no solo al final. Eso define el objeto a proyectar: el <b>máximo drawdown desde el origen</b> — qué tan abajo del punto de partida llegó a estar el acumulado en algún momento del plazo.</p>
 
         <div class="chart-wrap">
           <svg class="chart" viewBox="0 0 660 200" role="img" aria-label="Liquidez requerida por fecha frente a la que entrega un solo vencimiento a 3 días: falta cobertura el día 2">
@@ -520,7 +520,7 @@
           <span><span class="swatch dash" style="color:var(--s-dep)"></span>lo que entrega un solo vencimiento a 3 días</span>
         </div>
 
-        <p class="f-body" style="margin-top:1.6rem">Importa que se mida <b>desde hoy</b> y no desde el pico: los depósitos que entran en el camino financian retiros posteriores, así que solo la caída respecto del punto de partida es caja que hay que tener lista. Y leído a distintos plazos deja de ser un número y pasa a ser una <b>curva</b> —cuánta liquidez exige cubrir 5 días, 20 días, 3 meses—, que es lo que fija monto y plazo a la vez.</p>
+        <p class="f-body" style="margin-top:1.6rem">Ahora bien, importa que se mida <b>desde hoy</b> y no desde el pico: los depósitos que entran en el camino financian retiros posteriores, así que solo la caída respecto del punto de partida es caja que hay que tener lista. Y leído a distintos plazos deja de ser un número y pasa a ser una <b>curva</b> —cuánta liquidez exige cubrir 5 días, 20 días, 3 meses—, que es lo que fija monto y plazo a la vez.</p>
       </div>
     </section>
 
@@ -532,8 +532,8 @@
 
       <dl class="spec">
         <dt>Entregable</dt><dd><b>Liquidez operativa requerida</b> a distintos plazos, hasta <b>3 meses</b>: el máximo flujo de salida acumulado a un percentil dado. En la industria se le conoce como <em>maximum cumulative outflow</em> (MCO).</dd>
-        <dt>Variable objetivo</dt><dd>El <b>flujo neto diario</b> del Sistema Financiero — no el acumulado. El acumulado y su caída máxima se derivan después.</dd>
-        <dt>Metodología</dt><dd>El flujo neto se modela con <b>machine learning</b>; de ese modelo se simulan trayectorias que respetan la <b>correlación serial</b>. Cada una se acumula, se toma su caída máxima desde el origen, y el percentil se calcula <b>sobre esa distribución</b>.</dd>
+        <dt>Variable objetivo</dt><dd>El <b>flujo neto diario</b> del Sistema Financiero — no el acumulado. El acumulado y su caída máxima, en cambio, se derivan después.</dd>
+        <dt>Metodología</dt><dd>El flujo neto se modela con <b>machine learning</b>; de ese modelo se simulan trayectorias que respetan la <b>correlación serial</b>. Luego, cada una se acumula, se toma su caída máxima desde el origen, y el percentil se calcula <b>sobre esa distribución</b>.</dd>
         <dt>Insumos</dt><dd>Los tres hallazgos <em>son</em> la especificación de features: día hábil del mes, distancia al cierre, marca de cierre trimestral, y desagregación por banco con BBVA aparte.</dd>
         <dt>Uso</dt><dd>Herramienta de <b>riesgo</b>: mide la exposición del tramo de corto plazo al escenario extremo intertemporal, fija el piso de liquidez que cada plazo exige y deja ver en qué momentos del mes la composición vigente de los dos portafolios queda por debajo de ese piso.</dd>
       </dl>
@@ -580,7 +580,7 @@
         <li>Flujo acumulado en MM USD desde hoy; bajo cero significa que el sistema retiró más de lo que depositó.</li>
         <li>La punteada azul corre sobre el <b>borde inferior del abanico</b> — es el mismo percentil 1 % del acumulado — y está dibujada encima para que se vea dónde la roja se despega de ella.</li>
         <li>La curva roja <b>no</b> es el borde del abanico: se calcula path por path —caída máxima de cada trayectoria— y recién ahí se toma el percentil, por eso corre por debajo de la banda.</li>
-        <li>Ahí está la lectura clave: cuando el acumulado se hunde, la punteada azul y la roja <b>bajan juntas</b> —el mínimo del camino es el punto en el que se está—; pero cuando el acumulado se recupera, la punteada sube y la roja <b>se queda plana</b>. El requerimiento no se deshace porque la trayectoria mejore.</li>
+        <li>Ahí está la lectura clave: cuando el acumulado se hunde, la punteada azul y la roja <b>bajan juntas</b> —el mínimo del camino es el punto en el que se está—; pero cuando el acumulado se recupera, la punteada sube y la roja <b>se queda plana</b>. Dicho de otro modo, el requerimiento no se deshace porque la trayectoria mejore.</li>
         <li>Es monótona por construcción: un plazo más largo solo puede encontrar una caída más profunda, nunca una menor.</li>
         <li>El mes 3 cierra trimestre — de ahí la caída más pronunciada del tramo final.</li>
       </ul>
@@ -589,9 +589,9 @@
       <div class="finding">
         <span class="f-tag">¿por qué importa?</span>
         <p class="f-title">El requerimiento de liquidez no es el mismo según el día del mes desde el que se lo mire</p>
-        <p class="f-body">Quien mira el horizonte desde el <b>día hábil 3</b> no enfrenta el mismo requerimiento que quien lo mira desde el <b>día 18</b>, aunque ambos estén cubriendo la misma cantidad de días. Los indicadores con que se mide hoy son <b>históricos</b> y no distinguen esa diferencia. Lo que proponemos es <b>simulado y prospectivo</b>: proyecta la trayectoria desde el día en que se está parado, de modo que el requerimiento depende de esa posición.</p>
+        <p class="f-body">Quien mira el horizonte desde el <b>día hábil 3</b> no enfrenta el mismo requerimiento que quien lo mira desde el <b>día 18</b>, aunque ambos estén cubriendo la misma cantidad de días. Sin embargo, los indicadores con que se mide hoy son <b>históricos</b> y no distinguen esa diferencia. En cambio, lo que proponemos es <b>simulado y prospectivo</b>: proyecta la trayectoria desde el día en que se está parado, de modo que el requerimiento depende de esa posición.</p>
 
-        <p class="f-body" style="margin-top:.9rem">A eso se suma que durante el mes no solo sale liquidez: <b>también entra</b>. El sistema deposita al abrir el mes, y esos depósitos financian parte del retiro posterior. Hoy esa entrada no se cuenta, y cada retiro se provisiona completo de antemano aunque una porción llegue sola en el camino.</p>
+        <p class="f-body" style="margin-top:.9rem">A eso se suma que durante el mes no solo sale liquidez: <b>también entra</b>. En efecto, el sistema deposita al abrir el mes, y esos depósitos financian parte del retiro posterior. Sin embargo, hoy esa entrada no se cuenta, y cada retiro se provisiona completo de antemano aunque una porción llegue sola en el camino.</p>
 
         <p class="thesis">Reconocer la trayectoria completa <b>libera requerimiento al inicio del mes y lo endurece cerca del cierre</b>. No es un ajuste uniforme: es una corrección que <b>cambia de signo con el calendario</b>.</p>
 
@@ -601,7 +601,7 @@
       </div>
 
       <div class="pie">
-        <p><b>Alcance.</b> Lo que se proyecta aquí es el requerimiento de liquidez originado en los retiros netos del Sistema Financiero. Los flujos del sector público quedan <b>fuera</b>, por ser gestionados en un portafolio distinto. Sí queda pendiente la <b>intervención cambiaria</b>: es un componente de la necesidad de liquidez que esta serie no captura, y que tendría que sumarse aparte al dimensionar la escalera de vencimientos.</p>
+        <p><b>Alcance.</b> Lo que se proyecta aquí es el requerimiento de liquidez originado en los retiros netos del Sistema Financiero. En cambio, los flujos del sector público quedan <b>fuera</b>, por ser gestionados en un portafolio distinto. Sí queda pendiente la <b>intervención cambiaria</b>: es un componente de la necesidad de liquidez que esta serie no captura, y que tendría que sumarse aparte al dimensionar la escalera de vencimientos.</p>
       </div>
     </section>
 
@@ -636,7 +636,7 @@
     </div>
 
     <footer class="pie">
-      <p><b>Cómo está medido.</b> El <b>cierre</b> es el último día hábil del mes y aparece como día 0 en los gráficos; los demás días se cuentan hacia atrás en días hábiles, no calendario. La <b>ventana de cierre</b> son los <b>últimos 5 días hábiles</b> del mes, y es la misma definición en los tres hallazgos.</p>
+      <p><b>Cómo está medido.</b> El <b>cierre</b> es el último día hábil del mes y aparece como día 0 en los gráficos; los demás días se cuentan hacia atrás en días hábiles, no calendario. Por su parte, la <b>ventana de cierre</b> son los <b>últimos 5 días hábiles</b> del mes, y es la misma definición en los tres hallazgos.</p>
     </footer>
 
   </div>
