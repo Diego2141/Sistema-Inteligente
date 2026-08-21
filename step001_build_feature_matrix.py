@@ -2066,6 +2066,54 @@ LAGS_POSICION_MES = [1, 2, 3, 4]
 # FEATURES_EXCLUIR.
 GUARDAR_N_LAGS_POS = False
 
+# ── Rezagos de CONTEO FIJO ───────────────────────────────────────────────────
+# Con LAGS_POSICION_MES = [1,2,3,4] la máscara h <= 21k hace que el número de
+# rezagos que entra al extremo caiga de 4 (h<=21) a 1 (h>=64). El extremo de 4
+# observaciones y el de 1 no son el mismo estadístico.
+#
+# Sobre el SESGO la nota de _build_lag_posicion_mes ya tiene razón: E[máx de 4] >
+# E[máx de 1], pero con un modelo por horizonte el conteo es constante dentro de
+# cada modelo y un corrimiento constante no altera el orden que usa un árbol.
+#
+# Lo que ese argumento no cubre es la VARIANZA. A h largo el feature es un extremo
+# sobre UNA sola observación, es decir el valor de un único día de hace ~4 meses;
+# a h corto es el extremo sobre 4. El segundo estima mucho mejor "cuál es el
+# extremo típico de esta posición del mes". Eso no se corrige solo por tener un
+# modelo por horizonte: el modelo de h=75 simplemente recibe un feature más ruidoso
+# que el de h=5.
+#
+# La medición citada en LAGS_POSICION_MES ("el tramo que solo dispone del rezago 3
+# rinde igual que el que dispone de los tres") compara TRAMOS DE h DISTINTOS, así
+# que confunde el efecto del conteo con el del horizonte. Los rezagos 4-7 son
+# observables para todo h <= 84, o sea conteo 4 en todo el rango de horizontes:
+# fijando el conteo, la comparación contra la familia adaptativa aísla una cosa de
+# la otra a h IGUAL.
+#
+# Sirve además para leer los heatmaps de importancia: la familia adaptativa se
+# apaga a h alto, y hoy no se puede distinguir cuánto de esa caída es señal que
+# decae y cuánto es el feature quedándose con una observación. Si la versión _fx
+# mantiene importancia donde la adaptativa se apaga, era lo segundo.
+#
+# Costo: 7 meses de calentamiento en vez de 4, y rezagos más lejanos en el tiempo.
+# El margen de la máscara es h <= 84 para el rezago 4; si algún día el horizonte
+# máximo pasa de ~80 hay que correr la base hacia arriba (5-8) o el conteo vuelve
+# a caer en el extremo del rango.
+LAGS_POSICION_MES_FIJO = [4, 5, 6, 7]
+
+# Sufijos de la familia de posición del mes:
+#   (sin sufijo) rezagos 1-4, ancla de cierre      -> conteo variable con h
+#   _ap          rezagos 1-4, ancla de apertura    -> cola alta
+#   _fx          rezagos 4-7, ancla de cierre      -> conteo fijo = 4
+#
+# Solo flujo y retiro: son las dos series con más importancia propia en los
+# heatmaps de permutación (esc_neto_min/max_pos en las dos colas, esc_retiro_pos
+# por encima de la versión neta en q01). Extenderlo a deposito y acum duplicaría
+# el trabajo de permutación en step005 sin una hipótesis previa que lo justifique
+# — el mismo criterio con el que el bloque de ancla de apertura se limitó a 2 de
+# las 7 columnas.
+SERIES_POS_CONTEO_FIJO = ("flujo", "retiro")
+GENERAR_POS_CONTEO_FIJO = True
+
 # Resguardo de frescura para capacidad_retiro_th: por encima de este número de
 # días calendario entre fecha_t y la fecha REPORTADA del último dato de
 # bbva_encaje.xlsx, merge_asof(backward) estaría proyectando desde un insumo
@@ -2704,6 +2752,55 @@ def build_feature_matrix(
         logger.info(f"    Rezagos ancla apertura: cobertura {_cob_ap:.1%} "
                     f"(esperado ≈ cobertura de esc_deposito_pos arriba)")
 
+        # ── Rezagos de CONTEO FIJO (misma ancla, rezagos 4-7) ───────────────
+        # Espejo exacto de la familia adaptativa salvo por el conjunto de
+        # rezagos: misma serie, misma referencia, misma función. Es a propósito
+        # — con una sola cosa distinta, la diferencia de importancia entre
+        # esc_neto_min_pos y esc_neto_min_pos_fx a un h dado mide el efecto del
+        # conteo y nada más. Ver la nota de LAGS_POSICION_MES_FIJO.
+        if GENERAR_POS_CONTEO_FIJO:
+            _n_lags_fx = None
+            for _nom, _ser in (("flujo",  _serie_flujo),
+                               ("retiro", _serie_retiro)):
+                if _nom not in SERIES_POS_CONTEO_FIJO:
+                    continue
+                _mx_fx, _mn_s_fx, _mx_s_fx, _n_fx = _build_lag_posicion_mes(
+                    _ser, df["fecha_th"], df["fecha_t"], LAGS_POSICION_MES_FIJO,
+                    peru_bday, referencia=ANCLA_POSICION_MES.get(_nom, "cierre"),
+                )
+                if _nom == "flujo":
+                    df["esc_neto_min_pos_fx"] = _mn_s_fx.values
+                    df["esc_neto_max_pos_fx"] = _mx_s_fx.values
+                    _n_lags_fx = _n_fx.values
+                else:
+                    # R es no negativo: su |·| es un no-op y el extremo con signo
+                    # coincide con el máximo, igual que en el bloque adaptativo.
+                    df[f"esc_{_nom}_pos_fx"] = _mx_fx.values
+
+            if _n_lags_fx is not None:
+                # El conteo constante ES la premisa del bloque, así que se
+                # verifica en vez de asumirse. Si aparece un conteo menor al
+                # esperado, el horizonte máximo se pasó del margen h <= 84 del
+                # rezago 4 y el feature dejó de ser de conteo fijo justo en el
+                # tramo donde se lo quería usar.
+                _n_obj = len(LAGS_POSICION_MES_FIJO)
+                _rep_fx = ", ".join(
+                    f"{k}:{(_n_lags_fx == k).mean():.0%}"
+                    for k in range(_n_obj + 1) if (_n_lags_fx == k).any())
+                _cob_fx = df["esc_neto_min_pos_fx"].notna().mean()
+                logger.info(f"    Rezagos conteo fijo: cobertura {_cob_fx:.1%} "
+                            f"(lags {LAGS_POSICION_MES_FIJO}) "
+                            f"| n_lags -> {_rep_fx}")
+                _frac_lleno = float((_n_lags_fx == _n_obj).mean())
+                if _frac_lleno < 0.99:
+                    logger.warning(
+                        f"    conteo fijo: solo {_frac_lleno:.1%} de las filas "
+                        f"llegó a {_n_obj} rezagos. Con el calentamiento de "
+                        f"{max(LAGS_POSICION_MES_FIJO)} meses se espera ~100% "
+                        f"fuera del arranque de la muestra; si el faltante no "
+                        f"está al inicio, revisar el horizonte máximo contra el "
+                        f"margen h <= 84 del rezago 4.")
+
         if GUARDAR_N_LAGS_POS:
             df["n_lags_pos"] = _n_lags
     else:
@@ -2716,6 +2813,15 @@ def build_feature_matrix(
         df["acum_neto_max_pos"] = np.nan
         df["esc_neto_max_pos_ap"]  = np.nan
         df["esc_deposito_pos_ap"]  = np.nan
+        # El juego de columnas _fx tiene que coincidir exactamente con el que
+        # crea la rama de arriba, si no la matriz cambia de forma según haya o no
+        # datos bancarios y el consumidor de step005 se rompe de manera opaca.
+        if GENERAR_POS_CONTEO_FIJO:
+            if "flujo" in SERIES_POS_CONTEO_FIJO:
+                df["esc_neto_min_pos_fx"] = np.nan
+                df["esc_neto_max_pos_fx"] = np.nan
+            if "retiro" in SERIES_POS_CONTEO_FIJO:
+                df["esc_retiro_pos_fx"]   = np.nan
         if GUARDAR_N_LAGS_POS:
             df["n_lags_pos"] = 0
 
