@@ -1085,6 +1085,13 @@ def resolver_ccovn_lados(banco, nombre_sistema, reporte_particion):
     fuera de la partición activa no tiene "el otro lado" definido.
     """
     if banco == nombre_sistema:
+        # Con partición activa, la contraparte natural de SISTEMA es el FOCO.
+        # No es cosmético: v1 le daba al modelo de SISTEMA la columna
+        # bbva_share_lag1, que es la señal de concentración del hallazgo 3. Sin
+        # esta línea, SISTEMA se queda con share_propio == 1 por construcción y
+        # pierde esa señal en el camino al renombre relativo.
+        if reporte_particion and reporte_particion.get("activa"):
+            return "sistema", "foco"
         return "sistema", None
     if reporte_particion and reporte_particion.get("activa"):
         f_nom = reporte_particion["nombre_foco"]
@@ -1098,6 +1105,45 @@ def resolver_ccovn_lados(banco, nombre_sistema, reporte_particion):
         if set(reporte_particion.get("bancos_resto", [])) == {banco}:
             return f"banco_{banco}", "foco"
     return f"banco_{banco}", None
+
+
+CCOVN_COMUNES = ("ccovn_sistema_lag1", "var_ccovn_sistema_lag1",
+                 "ccovn_vs_dia_mes_lag1", "residuo_ccovn_lag1")
+
+
+def armar_sub_ccovn(ccovn_features, clave_propio, clave_contraparte):
+    """
+    Sub-DataFrame de CCOVN con los roles relativos ya resueltos.
+
+    Se asigna columna por columna en vez de hacer un select + rename porque
+    cuando la entidad ES el sistema, clave_propio vale "sistema" y la fuente del
+    rol "propio" coincide con una de las comunes. Con select + rename esa
+    columna entraba dos veces y el rename convertia AMBAS copias, dejando
+    ccovn_propio_lag1 duplicada (df["ccovn_propio_lag1"] devolvia un DataFrame y
+    la division posterior reventaba) y ccovn_sistema_lag1 desaparecida, para ser
+    rellenada con NaN mas abajo sin aviso. Copiando por separado, una misma
+    fuente alimenta los dos roles sin colisionar.
+    """
+    renombre = {
+        f"ccovn_{clave_propio}_lag1":     "ccovn_propio_lag1",
+        f"var_ccovn_{clave_propio}_lag1": "var_ccovn_propio_lag1",
+    }
+    if clave_contraparte is not None:
+        renombre[f"ccovn_{clave_contraparte}_lag1"]     = "ccovn_contraparte_lag1"
+        renombre[f"var_ccovn_{clave_contraparte}_lag1"] = "var_ccovn_contraparte_lag1"
+
+    sub = pd.DataFrame(index=ccovn_features.index)
+    for origen, destino in renombre.items():
+        if origen in ccovn_features.columns:
+            sub[destino] = ccovn_features[origen]
+    for c in CCOVN_COMUNES:
+        if c in ccovn_features.columns:
+            sub[c] = ccovn_features[c]
+
+    dups = sub.columns[sub.columns.duplicated()].tolist()
+    if dups:
+        raise AssertionError(f"armar_sub_ccovn produjo columnas duplicadas: {dups}")
+    return sub
 
 
 def agrupar_bancos(df_bancarios, umbral_pct, bancos_otros, nombre_otros,
@@ -3403,21 +3449,11 @@ def build_feature_matrix(
                            "ccovn_propio_lag1", "var_ccovn_propio_lag1",
                            "share_propio_lag1", "var_ccovn_propio_exceso_lag1",
                            "ccovn_contraparte_lag1", "var_ccovn_contraparte_lag1",
+                           "share_contraparte_lag1",
                            "ccovn_vs_dia_mes_lag1", "residuo_ccovn_lag1"]
     if ccovn_features is not None and not ccovn_features.empty:
         clave_p, clave_c = resolver_ccovn_lados(banco, nombre_sistema, reporte_particion)
-        _renombre = {
-            f"ccovn_{clave_p}_lag1":     "ccovn_propio_lag1",
-            f"var_ccovn_{clave_p}_lag1": "var_ccovn_propio_lag1",
-        }
-        if clave_c is not None:
-            _renombre[f"ccovn_{clave_c}_lag1"]     = "ccovn_contraparte_lag1"
-            _renombre[f"var_ccovn_{clave_c}_lag1"] = "var_ccovn_contraparte_lag1"
-        _comunes = [c for c in ("ccovn_sistema_lag1", "var_ccovn_sistema_lag1",
-                                "ccovn_vs_dia_mes_lag1", "residuo_ccovn_lag1")
-                    if c in ccovn_features.columns]
-        _cols_traer = [c for c in _renombre if c in ccovn_features.columns] + _comunes
-        _sub = ccovn_features[_cols_traer].rename(columns=_renombre)
+        _sub = armar_sub_ccovn(ccovn_features, clave_p, clave_c)
         df = df.merge(_sub, left_on="fecha_t", right_index=True, how="left")
 
         for _c in _ccovn_cols_finales:
@@ -3430,13 +3466,24 @@ def build_feature_matrix(
         # en build_ccovn_features: shift(1) distribuye sobre razón y producto, así
         # que operar sobre columnas YA rezagadas da lo mismo que rezagar el
         # resultado. Ver la nota de build_ccovn_features.
-        df["share_propio_lag1"] = (
-            df["ccovn_propio_lag1"] / df["ccovn_sistema_lag1"].replace(0, np.nan)
-        )
+        _sis_nz = df["ccovn_sistema_lag1"].replace(0, np.nan)
+        df["share_propio_lag1"]      = df["ccovn_propio_lag1"] / _sis_nz
+        df["share_contraparte_lag1"] = df["ccovn_contraparte_lag1"] / _sis_nz
         df["var_ccovn_propio_exceso_lag1"] = (
             df["var_ccovn_propio_lag1"]
             - df["share_propio_lag1"] * df["var_ccovn_sistema_lag1"]
         )
+
+        # Cuando la entidad ES el sistema, "propio" y "sistema" son la misma
+        # serie: share_propio da 1 y el exceso da 0, en todas las filas. Un
+        # feature constante no aporta un corte y encima ensucia los heatmaps de
+        # importancia, donde aparece como una fila más compitiendo por espacio.
+        # Se anulan a proposito en vez de dejarlos entrar como constantes. La
+        # señal de concentración para SISTEMA viaja por share_contraparte_lag1,
+        # que es el FOCO sobre el total (el bbva_share_lag1 de v1).
+        if clave_p == "sistema":
+            df["share_propio_lag1"] = np.nan
+            df["var_ccovn_propio_exceso_lag1"] = np.nan
         logger.info(f"  {banco}: ccovn propio='{clave_p}' contraparte="
                     f"'{clave_c or '—'}' ({len(_cols_traer)} cols traídas)")
     else:

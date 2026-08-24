@@ -192,8 +192,65 @@ def modo_sintetico():
     check("columnas_derivadas solo trae SISTEMA",
           mod.columnas_derivadas(rep_none) == {"SISTEMA"})
 
-    # ── 9. Partición inexistente ────────────────────────────────────────────
-    print("\n9. Nombre de partición inválido")
+    # ── 9. Roles relativos de CCOVN ─────────────────────────────────────────
+    # Regresión del bug de la colisión propio/sistema: para la entidad SISTEMA,
+    # clave_propio vale "sistema", o sea que la fuente del rol "propio" es LA
+    # MISMA columna que una de las comunes. La version con select + rename
+    # duplicaba ccovn_propio_lag1 (df["..."] devolvia un DataFrame y la division
+    # posterior reventaba con TypeError) y ademas hacia desaparecer
+    # ccovn_sistema_lag1, que quedaba en NaN sin ningun aviso.
+    #
+    # Se ejercita armar_sub_ccovn(), la funcion de produccion, no una copia.
+    print("\n9. Roles relativos de CCOVN (propio / contraparte)")
+    _, rep_b = reportes["bbva"]
+    idx = pd.bdate_range("2024-01-01", periods=60)
+    ccovn = pd.DataFrame({
+        "ccovn_sistema_lag1":     np.arange(60.) + 100,
+        "var_ccovn_sistema_lag1": np.ones(60),
+        "ccovn_foco_lag1":        np.arange(60.) * 0 + 40,
+        "var_ccovn_foco_lag1":    np.ones(60) * 0.4,
+        "ccovn_resto_lag1":       np.arange(60.) + 60,
+        "var_ccovn_resto_lag1":   np.ones(60) * 0.6,
+        "ccovn_vs_dia_mes_lag1":  np.zeros(60),
+        "residuo_ccovn_lag1":     np.zeros(60),
+    }, index=idx)
+
+    esperado = {"SISTEMA": ("sistema", "foco"),
+                "FOCO_BBVA": ("foco", "resto"),
+                "RESTO_BBVA": ("resto", "foco")}
+    for entidad, (cp_esp, cc_esp) in esperado.items():
+        cp, cc = mod.resolver_ccovn_lados(entidad, "SISTEMA", rep_b)
+        check(f"{entidad}: roles = ({cp_esp}, {cc_esp})", (cp, cc) == (cp_esp, cc_esp),
+              f"obtenido = ({cp}, {cc})")
+
+        sub = mod.armar_sub_ccovn(ccovn, cp, cc)   # lanza si hay duplicados
+        check(f"{entidad}: sin columnas duplicadas en _sub",
+              not sub.columns.duplicated().any())
+        check(f"{entidad}: ccovn_sistema_lag1 sobrevive",
+              "ccovn_sistema_lag1" in sub.columns,
+              "si falta, el bucle de relleno la dejaria en NaN sin avisar")
+        check(f"{entidad}: propio y contraparte presentes",
+              {"ccovn_propio_lag1", "ccovn_contraparte_lag1"} <= set(sub.columns))
+
+    # La contraparte de SISTEMA es el foco, que es lo que restituye la señal de
+    # concentración que en v1 viajaba como bbva_share_lag1.
+    sub_sis = mod.armar_sub_ccovn(ccovn, *mod.resolver_ccovn_lados("SISTEMA", "SISTEMA", rep_b))
+    share_c = (sub_sis["ccovn_contraparte_lag1"] / sub_sis["ccovn_sistema_lag1"]).iloc[0]
+    check("SISTEMA: share_contraparte es el foco sobre el total",
+          abs(share_c - 40 / 100) < 1e-9, f"{share_c:.3f} (esperado 0.400)")
+    check("SISTEMA: propio == sistema (share_propio seria constante 1)",
+          bool((sub_sis["ccovn_propio_lag1"] == sub_sis["ccovn_sistema_lag1"]).all()),
+          "por eso produccion lo anula en vez de emitir una constante")
+
+    # Sin partición no hay contraparte, y el armado tiene que seguir cerrando.
+    cp0, cc0 = mod.resolver_ccovn_lados("SISTEMA", "SISTEMA", {"activa": None})
+    sub0 = mod.armar_sub_ccovn(ccovn, cp0, cc0)
+    check("sin partición: SISTEMA no tiene contraparte", cc0 is None)
+    check("sin partición: _sub igual queda sin duplicados",
+          not sub0.columns.duplicated().any() and "ccovn_sistema_lag1" in sub0.columns)
+
+    # ── 10. Partición inexistente ───────────────────────────────────────────
+    print("\n10. Nombre de partición inválido")
     try:
         mod.aplicar_particion(df, "no_existe")
         check("una partición desconocida aborta", False, "no lanzó excepción")
