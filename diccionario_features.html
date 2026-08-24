@@ -106,10 +106,10 @@
     <h1>Diccionario de Features</h1>
     <p class="sub">Cómo se construye cada feature activo en <span class="mono">step001_build_feature_matrix.py</span>: fórmula, anclaje temporal y el código que lo genera. Generado para revisar consistencia antes de la próxima corrida de <span class="mono">step005_walk_forward_cv_4.py</span>.</p>
     <div class="meta-row">
-      <span><b>Features activos:</b> <span class="mono">25</span></span>
+      <span><b>Features activos:</b> <span class="mono">27</span></span>
       <span><b>Excluidos en FEATURES_EXCLUIR:</b> <span class="mono">104</span> (101 únicos)</span>
       <span><b>Matriz:</b> <span class="mono">1. Data/Clean/matriz_features.parquet</span></span>
-      <span><b>Última revisión de contenido:</b> sesión 2026-08-21 (tercera pasada) · ventana deslizante de rezagos en la familia <span class="mono">*_pos</span></span>
+      <span><b>Última revisión de contenido:</b> sesión 2026-08-24 (cuarta pasada) · CC+OVN resuelto por partición (propio/contraparte), step001 v2</span>
     </div>
   </header>
 
@@ -122,7 +122,7 @@
       <li><a href="#g2"><span>Calendario crudo/binario</span><span class="n">5</span></a></li>
       <li><a href="#g3"><span>Posición en el mes</span><span class="n">8</span></a></li>
       <li><a href="#g4"><span>Encaje BBVA</span><span class="n">2</span></a></li>
-      <li><a href="#g5"><span>CC+OVN en BCR</span><span class="n">4</span></a></li>
+      <li><a href="#g5"><span>CC+OVN en BCR</span><span class="n">6</span></a></li>
       <li><a href="#g6"><span>Macro / mercado</span><span class="n">2</span></a></li>
     </ol>
   </nav>
@@ -132,6 +132,8 @@
     <div id="hallazgos" class="callout warn">
       <h2>Hallazgos de esta revisión</h2>
       <ul>
+        <li><span class="finding-tag">rediseño</span> Las features CC+OVN dejan de ser fijas a BBVA. <span class="mono">ccovn_bbva_lag1</span> y <span class="mono">var_ccovn_bbva_lag1</span> se renombran a <b class="mono">ccovn_propio_lag1</b>/<b class="mono">var_ccovn_propio_lag1</b> — mismo estado activo, solo cambia qué banco describen según la entidad que se está modelando (<span class="mono">resolver_ccovn_lados()</span>). Se agregan <b class="mono">ccovn_contraparte_lag1</b>/<b class="mono">var_ccovn_contraparte_lag1</b>, nuevas y activas: el saldo del otro lado de la partición, que en v1 no tenía cómo expresarse. <span class="mono">bbva_share_lag1</span> y <span class="mono">var_ccovn_bbva_exceso_lag1</span> se renombran a <span class="mono">share_propio_lag1</span>/<span class="mono">var_ccovn_propio_exceso_lag1</span> pero <b>siguen excluidos</b> — se verificó su estado antes de tocar la lista, para no reactivar en silencio algo que estaba desactivado a propósito. Ver el grupo 5.</li>
+        <li><span class="finding-tag">bug de construcción</span> <span class="mono">_normalizar_banco()</span> —la función que decide si un banco pertenece al foco de una partición, y ahora también si un header de <span class="mono">Saldos_CCOVN.xlsx</span> corresponde a un banco canónico— quitaba puntuación pero <b>no tildes</b>: <span class="mono">.upper()</span> conserva "É" como carácter distinto de "E", y <span class="mono">ch.isalnum()</span> lo deja pasar igual porque una letra acentuada sigue siendo una letra. Consecuencia medida: "CREDITO" no es subcadena de "CRÉDITO", así que un header real de CCOVN como "Banco de Crédito del Perú" nunca habría emparejado con el banco canónico <span class="mono">CREDITO</span> de Transacciones_BancaLocal. <b>Arreglo:</b> normalización NFKD para separar cada letra de su diacrítico, se descartan los diacríticos (categoría Unicode <span class="mono">Mn</span>), y recién ahí se filtra alfanumérico. Atrapado por <span class="mono">aux_verificar_ccovn_particion.py</span> con un header deliberadamente en minúsculas y con tilde — y arrastraba una segunda falla en cascada: con CREDITO sin emparejar, <span class="mono">ccovn_foco + ccovn_resto</span> no reconstruía <span class="mono">ccovn_sistema</span>.</li>
         <li><span class="finding-tag">bug de construcción</span> El conteo de rezagos que entraba al extremo de la familia <b class="mono">*_pos</b> <b>caía de 4 a 1</b> con el horizonte: la máscara <span class="mono">h ≤ 21k</span> deja los cuatro rezagos hasta h=21 y uno solo desde h~64, y el código tomaba <i>todos</i> los disponibles de una lista de 4. Sobre el <b>sesgo</b> la docstring ya tenía razón y no había nada que arreglar (E[máx de 4] &gt; E[máx de 1], pero con un modelo por horizonte el conteo es constante dentro de cada modelo y un corrimiento constante no altera el orden de los cortes de un árbol). El problema era la <b>varianza</b>: a h largo el feature terminaba siendo el valor de <b>un único día de hace ~4 meses</b>, y a h corto un extremo sobre cuatro. Eso no lo arregla tener un modelo por horizonte; el de h largo simplemente recibía un feature mucho más ruidoso. <b>Consecuencia para la lectura de los heatmaps:</b> la familia se apagaba a h alto y no se podía saber cuánto de esa caída era señal que decae y cuánto el feature quedándose sin observaciones.</li>
         <li><span class="finding-tag">arreglo</span> <b>Ventana deslizante.</b> <span class="mono">LAGS_POSICION_MES</span> pasa a ser una lista de <b>candidatos</b> (<span class="mono">[1..8]</span>) y entran los <span class="mono">N_REZAGOS_OBJETIVO = 4</span> más recientes que sobrevivan a la máscara. En el bucle es una condición extra: <span class="mono">usable &amp;= (n_lags &lt; n_objetivo)</span>, y como se recorre del más reciente al más viejo, los elegidos son siempre los más nuevos. <b>Conteo fijo y recencia máxima a la vez.</b> Se descartó la alternativa de fijar una lista rígida y lejana (<span class="mono">[4,5,6,7]</span> para todo h): también daba conteo constante, pero pagaba recencia en los horizontes cortos, que era donde no había ningún problema, y como familia paralela habría quedado muy correlacionada con la original, deprimiendo la importancia por permutación de <b>ambas</b>. <b>Propiedad que conviene retener:</b> donde el comportamiento previo ya llegaba a 4 rezagos el resultado es <b>idéntico</b>, así que las mediciones ya hechas en ese tramo siguen valiendo; el cambio solo toca las filas donde antes faltaban rezagos.</li>
         <li><span class="finding-tag">regla que no es la regla</span> <span class="mono">h ≤ 21k</span> documenta la <i>intención</i>, no el corte real. Medido: a <b>h=64 todavía sobreviven 2 rezagos</b>, no 1. Los meses tienen 19-23 ruedas y el lookup usa aritmética de mes calendario, no de 21 días, así que el h en que cae cada rezago se corre según el calendario. Esto rompió <b>dos veces</b> verificaciones escritas contra la regla en vez de contra el dato. <b>Regla general:</b> cualquier chequeo que dependa de cuántos rezagos hay tiene que leer el contador que <span class="mono">_build_lag_posicion_mes</span> ya devuelve, nunca derivarlo de un umbral de h. El checklist quedó escrito así, condicionando sobre <span class="mono">n_previo == 4</span>.</li>
@@ -336,33 +338,47 @@
     </section>
 
     <section id="g5" class="group">
-      <h2>5 · CC+OVN en BCR <span class="count">4 features</span></h2>
+      <h2>5 · CC+OVN en BCR <span class="count">6 features</span></h2>
       <p class="group-note">Saldo de cuenta corriente + overnight en el Banco Central, fuente <span class="mono">Saldos_CCOVN.xlsx</span>, disponible desde 2010. Anclado en <span class="mono">t</span>, rezago 1 día.</p>
+      <p class="group-note" style="margin-top:-.9rem"><b>v2 — resuelto por entidad, no fijo a BBVA.</b> Antes <span class="mono">ccovn_bbva_lag1</span> era literalmente el saldo de BBVA para <i>todas</i> las entidades por igual, sin importar qué banco se estuviera modelando. Ahora <span class="mono">build_ccovn_features()</span> genera <span class="mono">ccovn_&lt;clave&gt;_lag1</span> genéricamente para cada clave del CCOVN ancho (<span class="mono">sistema</span>, <span class="mono">foco</span>, <span class="mono">resto</span>, <span class="mono">banco_&lt;X&gt;</span>), y <span class="mono">resolver_ccovn_lados()</span> elige, por banco, cuál es su <b>propio</b> saldo y —si es un lado de la partición activa— el de su <b>contraparte</b>. Mismo criterio de composición exacta que <span class="mono">destinos_encaje_bbva()</span>: un banco individual solo hereda contraparte si su composición coincide EXACTO con un lado (ej. BBVA cuando <span class="mono">particion_activa="bbva"</span>). Los headers de <span class="mono">Saldos_CCOVN.xlsx</span> se emparejan contra los bancos canónicos de Transacciones_BancaLocal por subcadena normalizada (sin tildes, sin mayúsculas) — no exigen igualdad exacta de texto.</p>
       <div class="cards">
 
         <article class="feat" id="ccovn_sistema_lag1">
           <div class="feat-head"><span class="feat-name">ccovn_sistema_lag1</span><div class="chips"><span class="chip anchor-t">t</span><span class="chip">lag 1</span></div></div>
-          <p class="feat-desc">Saldo total CC+OVN del sistema en el BCR en t−1 (USD).</p>
-          <pre><span class="ln">1788</span>resultado["ccovn_sistema_lag1"] = sis.shift(1)</pre>
+          <p class="feat-desc">Saldo total CC+OVN del sistema en el BCR en t−1 (USD). Igual para todas las entidades — no depende de la partición.</p>
+          <pre><span class="ln">2168</span>for clave in df_bd.columns:
+    resultado[f"ccovn_{clave}_lag1"] = serie.shift(1)</pre>
         </article>
 
-        <article class="feat" id="ccovn_bbva_lag1">
-          <div class="feat-head"><span class="feat-name">ccovn_bbva_lag1</span><div class="chips"><span class="chip anchor-t">t</span><span class="chip">lag 1</span></div></div>
-          <p class="feat-desc">Saldo CC+OVN de BBVA en el BCR en t−1 (USD).</p>
-          <pre><span class="ln">1789</span>resultado["ccovn_bbva_lag1"] = bbv.shift(1)</pre>
+        <article class="feat" id="ccovn_propio_lag1">
+          <div class="feat-head"><span class="feat-name">ccovn_propio_lag1</span><div class="chips"><span class="chip anchor-t">t</span><span class="chip">lag 1</span><span class="chip" style="background:var(--accent-soft);color:var(--accent-ink);border-color:transparent">renombrado en v2</span></div></div>
+          <p class="feat-desc">Saldo CC+OVN <b>propio</b> de la entidad modelada en t−1 (USD). Antes <span class="mono">ccovn_bbva_lag1</span>. Para <span class="mono">SISTEMA</span> coincide con <span class="mono">ccovn_sistema_lag1</span>; para <span class="mono">FOCO_BBVA</span> es BBVA; para <span class="mono">RESTO_BBVA</span> es el resto del sistema; para un banco individual fuera de la partición activa (ej. <span class="mono">CREDITO</span> con <span class="mono">particion_activa="bbva"</span>) es su propio saldo, sin heredar el del grupo al que pertenece.</p>
+          <pre><span class="ln">3389</span>clave_p, clave_c = resolver_ccovn_lados(banco, nombre_sistema, reporte_particion)</pre>
+          <p class="code-cap"><span class="mono">step001_build_feature_matrix_v2.py:3363-3417</span> (merge + resolución) · <span class="mono">step001_build_feature_matrix_v2.py:1058-1075</span> (<span class="mono">resolver_ccovn_lados</span>)</p>
         </article>
 
         <article class="feat" id="var_ccovn_sistema_lag1">
           <div class="feat-head"><span class="feat-name">var_ccovn_sistema_lag1</span><div class="chips"><span class="chip anchor-t">t</span><span class="chip">lag 1</span></div></div>
           <p class="feat-desc">Variación diaria del saldo CC+OVN del sistema en t−1.</p>
-          <pre><span class="ln">1791</span>resultado["var_ccovn_sistema_lag1"] = sis.diff().shift(1)</pre>
+          <pre><span class="ln">2169</span>resultado[f"var_ccovn_{clave}_lag1"] = serie.diff().shift(1)</pre>
         </article>
 
-        <article class="feat" id="var_ccovn_bbva_lag1">
-          <div class="feat-head"><span class="feat-name">var_ccovn_bbva_lag1</span><div class="chips"><span class="chip anchor-t">t</span><span class="chip">lag 1</span></div></div>
-          <p class="feat-desc">Variación diaria del saldo CC+OVN de BBVA en t−1.</p>
-          <pre><span class="ln">1792</span>resultado["var_ccovn_bbva_lag1"] = bbv.diff().shift(1)</pre>
-          <p class="code-cap"><span class="mono">step001_build_feature_matrix.py:1744-1792</span></p>
+        <article class="feat" id="var_ccovn_propio_lag1">
+          <div class="feat-head"><span class="feat-name">var_ccovn_propio_lag1</span><div class="chips"><span class="chip anchor-t">t</span><span class="chip">lag 1</span><span class="chip" style="background:var(--accent-soft);color:var(--accent-ink);border-color:transparent">renombrado en v2</span></div></div>
+          <p class="feat-desc">Variación diaria del saldo propio en t−1. Antes <span class="mono">var_ccovn_bbva_lag1</span>.</p>
+        </article>
+
+        <article class="feat" id="ccovn_contraparte_lag1">
+          <div class="feat-head"><span class="feat-name">ccovn_contraparte_lag1</span><div class="chips"><span class="chip anchor-t">t</span><span class="chip">lag 1</span><span class="chip" style="background:var(--accent-soft);color:var(--accent-ink);border-color:transparent">nuevo en v2</span></div></div>
+          <p class="feat-desc">Saldo CC+OVN del <b>otro lado</b> de la partición activa en t−1 (USD). No existía en v1, que no tenía noción de "el resto". <span class="mono">NaN</span> para <span class="mono">SISTEMA</span> y para bancos individuales fuera de la partición activa (ej. <span class="mono">CREDITO</span> con <span class="mono">particion_activa="bbva"</span> — pertenece al resto pero no ES el resto). Con <span class="mono">FOCO_BBVA</span> vale el saldo de <span class="mono">RESTO_BBVA</span> y viceversa: es donde viviría, si existe, la compensación entre BBVA y el resto de la banca que documenta el hallazgo 3 del one-pager.</p>
+          <dl class="kv"><dt>Identidad</dt><dd><span class="mono">ccovn_propio_lag1(FOCO) + ccovn_contraparte_lag1(FOCO) == ccovn_sistema_lag1</span>, verificada en <span class="mono">aux_verificar_ccovn_particion.py</span></dd></dl>
+        </article>
+
+        <article class="feat" id="var_ccovn_contraparte_lag1">
+          <div class="feat-head"><span class="feat-name">var_ccovn_contraparte_lag1</span><div class="chips"><span class="chip anchor-t">t</span><span class="chip">lag 1</span><span class="chip" style="background:var(--accent-soft);color:var(--accent-ink);border-color:transparent">nuevo en v2</span></div></div>
+          <p class="feat-desc">Variación diaria del saldo de la contraparte en t−1. Mismas condiciones de disponibilidad que <span class="mono">ccovn_contraparte_lag1</span>.</p>
+          <pre><span class="ln">3395</span>_renombre[f"var_ccovn_{clave_c}_lag1"] = "var_ccovn_contraparte_lag1"</pre>
+          <p class="code-cap"><span class="mono">step001_build_feature_matrix_v2.py:3363-3417</span></p>
         </article>
 
       </div>

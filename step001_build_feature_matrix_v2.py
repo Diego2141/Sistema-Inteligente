@@ -44,6 +44,7 @@ tomar cuantiles.
 """
 
 import os
+import unicodedata
 import time
 import logging
 import warnings
@@ -242,13 +243,22 @@ FEATURES_EXCLUIR = [
     "ratio_ovn_total_lag1",
     
 
-# 5. Stocks y comportamiento de liquidez del sistema y del BBVA
+# 5. Stocks y comportamiento de liquidez del sistema y de la entidad modelada
+#    v2: ccovn_bbva_lag1/var_ccovn_bbva_lag1 se renombraron a
+#    ccovn_propio_lag1/var_ccovn_propio_lag1 (dejan de ser "el saldo de BBVA
+#    para todos" y pasan a ser "el saldo propio de la entidad que se modela",
+#    resuelto por resolver_ccovn_lados). bbva_share_lag1 y
+#    var_ccovn_bbva_exceso_lag1 se renombran igual pero SIGUEN EXCLUIDOS —
+#    solo cambia el nombre para que coincida con la nueva semántica, el estado
+#    activo/excluido de cada feature no cambió con esta revisión.
     #"ccovn_sistema_lag1",
-    #"ccovn_bbva_lag1",
+    #"ccovn_propio_lag1",
     #"var_ccovn_sistema_lag1",
-    #"var_ccovn_bbva_lag1",
-    "bbva_share_lag1",
-    "var_ccovn_bbva_exceso_lag1",
+    #"var_ccovn_propio_lag1",
+    #"ccovn_contraparte_lag1",       # nuevo en v2, activo — ver el hallazgo
+    #"var_ccovn_contraparte_lag1",   # correspondiente en el diccionario
+    "share_propio_lag1",
+    "var_ccovn_propio_exceso_lag1",
     "ccovn_vs_dia_mes_lag1",
     "residuo_ccovn_lag1",
 
@@ -759,9 +769,17 @@ def load_ccovn_data(params):
       - Col A: Fecha (d-m-yyyy)
       - Cols B…: un banco por columna (valores numéricos en USD)
 
-    Retorna DataFrame con columnas:
-      ccovn_sistema : suma de todos los bancos (USD)
-      ccovn_bbva    : columna que contiene el keyword "bbva" (case-insensitive)
+    v2: a diferencia de v1, NO colapsa a solo sistema/bbva. Retorna todas las
+    columnas por banco tal cual están en el Excel (numéricas, sin normalizar el
+    nombre todavía), más 'sistema' = suma de todas. La normalización y el
+    emparejamiento contra los bancos canónicos de Transacciones_BancaLocal.xlsx
+    ocurre después, en armar_ccovn_ancho() — separar los dos pasos permite que
+    esta función siga sin conocer bancos_canonicos, que en build_full_matrix
+    recién se conoce tras agrupar_bancos().
+
+    bbva_keyword queda sin uso (la extracción de "la columna BBVA" ahora es un
+    caso particular del emparejamiento genérico por partición), pero el
+    parámetro se conserva en PARAMS para no romper configuraciones existentes.
 
     Indexado por fecha, o DataFrame vacío si el archivo no está disponible.
     """
@@ -785,13 +803,8 @@ def load_ccovn_data(params):
         for c in cols_bancos:
             raw[c] = pd.to_numeric(raw[c], errors="coerce")
 
-        keyword = params.get("bbva_keyword", "bbva")
-        cols_bbva = [c for c in cols_bancos if keyword in str(c).lower()]
-        col_bbva  = cols_bbva[0] if cols_bbva else None
-
-        df_out = pd.DataFrame()
-        df_out["ccovn_sistema"] = raw[cols_bancos].sum(axis=1, skipna=True).values
-        df_out["ccovn_bbva"]    = raw[col_bbva].values if col_bbva else np.nan
+        df_out = raw[cols_bancos].copy()
+        df_out["sistema"] = raw[cols_bancos].sum(axis=1, skipna=True)
         df_out.index = pd.DatetimeIndex(raw[col_fecha].values)
         df_out.index.name = "fecha"
         df_out = df_out.sort_index()
@@ -799,7 +812,7 @@ def load_ccovn_data(params):
         logger.info(
             f"  Saldos_CCOVN cargado: {len(df_out):,} filas | "
             f"{df_out.index.min().date()} → {df_out.index.max().date()} | "
-            f"col_bbva='{col_bbva}'"
+            f"{len(cols_bancos)} columnas de banco: {cols_bancos}"
         )
         return df_out
 
@@ -854,8 +867,24 @@ PARTICIONES = {
 
 
 def _normalizar_banco(nombre):
-    """Mayúsculas sin espacios ni puntuación, para comparar por subcadena."""
-    return "".join(ch for ch in str(nombre).upper() if ch.isalnum())
+    """
+    Mayúsculas, sin tildes, sin espacios ni puntuación, para comparar por
+    subcadena.
+
+    Quitar tildes es necesario y no cosmético: "CREDITO" (nombre canónico de
+    Transacciones_BancaLocal) no es subcadena de "CRÉDITO" con tilde (headers
+    de Saldos_CCOVN.xlsx u otras fuentes pueden traer el nombre completo con
+    acentos, ej. "Banco de Crédito del Perú") porque .upper() preserva la Í/É/Ó
+    acentuada como carácter distinto de la letra sin acento — ch.isalnum() la
+    deja pasar igual, así que el filtro anterior no la sacaba. Se usa
+    normalización NFKD para separar cada letra de su diacrítico y luego se
+    descartan los diacríticos (categoría Unicode Mn), antes de filtrar alnum.
+    """
+    sin_tildes = "".join(
+        ch for ch in unicodedata.normalize("NFKD", str(nombre))
+        if unicodedata.category(ch) != "Mn"
+    )
+    return "".join(ch for ch in sin_tildes.upper() if ch.isalnum())
 
 
 def _es_del_foco(banco, claves):
@@ -954,6 +983,121 @@ def columnas_derivadas(reporte_particion, nombre_sistema="SISTEMA"):
         derivadas.add(reporte_particion["nombre_foco"])
         derivadas.add(reporte_particion["nombre_resto"])
     return derivadas
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CCOVN por partición (v2)
+# ─────────────────────────────────────────────────────────────────────────────
+def _mapear_bancos_ccovn(cols_ccovn, bancos_canonicos):
+    """
+    Empareja cada banco CANÓNICO (nombres que salen de Transacciones_BancaLocal,
+    ej. "BBVA", "CREDITO") con la columna de Saldos_CCOVN.xlsx cuyo nombre lo
+    contiene o lo contienen, normalizado.
+
+    Los dos archivos no tienen por qué compartir la misma grafía de encabezado
+    ("CREDITO" contra "Banco de Crédito", por ejemplo), así que no se busca
+    igualdad exacta — igual que la clasificación de la partición, que ya usa
+    coincidencia por subcadena para el mismo problema.
+
+    Retorna {banco_canonico: columna_ccovn_o_None}. Un banco sin match queda en
+    None y su columna derivada será NaN — degradación explícita, no un error
+    silencioso, porque el llamador reporta los faltantes.
+    """
+    normal_cols = {c: _normalizar_banco(c) for c in cols_ccovn}
+    mapeo = {}
+    for b in bancos_canonicos:
+        nb = _normalizar_banco(b)
+        candidatos = [c for c, nc in normal_cols.items() if nb in nc or nc in nb]
+        if len(candidatos) > 1:
+            # Ambigüedad (varias columnas contienen la clave): la más corta es
+            # la menos probable candidata a coincidencia espuria por casualidad.
+            candidatos.sort(key=len)
+        mapeo[b] = candidatos[0] if candidatos else None
+    return mapeo
+
+
+def armar_ccovn_ancho(df_ccovn_raw, bancos_canonicos, reporte_particion):
+    """
+    Convierte el CCOVN crudo (una columna por header de Excel) en un DataFrame
+    ancho con columnas 'sistema', 'banco_<X>' por cada banco canónico emparejado,
+    y 'foco'/'resto' si hay partición activa.
+
+    'sistema' es la suma de TODAS las columnas del Excel, emparejadas o no — no
+    depende del matching, es la misma cifra que v1 ya reportaba.
+
+    'foco'/'resto' SÍ dependen del matching: son la suma de las columnas
+    emparejadas a los bancos que la partición clasificó de cada lado, según
+    aplicar_particion() sobre Transacciones_BancaLocal. Si un banco del foco no
+    tiene columna en Saldos_CCOVN.xlsx, ccovn_foco queda subestimado para esa
+    fecha en la parte de ese banco — se reporta la cobertura para que quede
+    visible cuánto del foco realmente sostiene la cifra.
+
+    Retorna (df_ancho, reporte_matching).
+    """
+    if df_ccovn_raw.empty:
+        return pd.DataFrame(), {"cols_ccovn": [], "mapeo": {}, "sin_match": list(bancos_canonicos)}
+
+    cols_raw = [c for c in df_ccovn_raw.columns if c != "sistema"]
+    mapeo = _mapear_bancos_ccovn(cols_raw, bancos_canonicos)
+    sin_match = sorted(b for b, c in mapeo.items() if c is None)
+
+    ancho = pd.DataFrame(index=df_ccovn_raw.index)
+    ancho["sistema"] = df_ccovn_raw["sistema"]
+    for b, col in mapeo.items():
+        ancho[f"banco_{b}"] = df_ccovn_raw[col] if col is not None else np.nan
+
+    reporte = {"cols_ccovn": cols_raw, "mapeo": mapeo, "sin_match": sin_match}
+    if sin_match:
+        logger.warning(f"  CCOVN: sin columna emparejada para {sin_match} — "
+                       f"su 'propio' quedará en NaN, y si son parte del foco o "
+                       f"resto de la partición activa, subestiman esa suma.")
+
+    if reporte_particion and reporte_particion.get("activa"):
+        f_bancos = reporte_particion["bancos_foco"]
+        r_bancos = reporte_particion["bancos_resto"]
+        cols_f = [mapeo[b] for b in f_bancos if mapeo.get(b) is not None]
+        cols_r = [mapeo[b] for b in r_bancos if mapeo.get(b) is not None]
+        ancho["foco"]  = df_ccovn_raw[cols_f].sum(axis=1) if cols_f else np.nan
+        ancho["resto"] = df_ccovn_raw[cols_r].sum(axis=1) if cols_r else np.nan
+        cob_f = len(cols_f) / max(len(f_bancos), 1)
+        cob_r = len(cols_r) / max(len(r_bancos), 1)
+        reporte["cobertura_foco"], reporte["cobertura_resto"] = cob_f, cob_r
+        logger.info(f"  CCOVN partición '{reporte_particion['activa']}': "
+                    f"cobertura foco {cob_f:.0%} ({len(cols_f)}/{len(f_bancos)}), "
+                    f"resto {cob_r:.0%} ({len(cols_r)}/{len(r_bancos)})")
+
+    return ancho, reporte
+
+
+def resolver_ccovn_lados(banco, nombre_sistema, reporte_particion):
+    """
+    Claves (dentro del df ancho de armar_ccovn_ancho / de las columnas
+    ccovn_<clave>_lag1 que produce build_ccovn_features) que corresponden al
+    saldo PROPIO de esta entidad y, si aplica, al de su CONTRAPARTE.
+
+    Misma lógica de composición exacta que destinos_encaje_bbva(): un banco
+    individual solo hereda el rol de un lado de la partición si su composición
+    coincide EXACTO con ese lado (no "contiene"), para no atribuirle a un banco
+    suelto el saldo de un grupo de varios.
+
+    Devuelve (clave_propio, clave_contraparte). clave_contraparte es None cuando
+    no hay una contraparte natural: SISTEMA es el total, y un banco individual
+    fuera de la partición activa no tiene "el otro lado" definido.
+    """
+    if banco == nombre_sistema:
+        return "sistema", None
+    if reporte_particion and reporte_particion.get("activa"):
+        f_nom = reporte_particion["nombre_foco"]
+        r_nom = reporte_particion["nombre_resto"]
+        if banco == f_nom:
+            return "foco", "resto"
+        if banco == r_nom:
+            return "resto", "foco"
+        if set(reporte_particion.get("bancos_foco", [])) == {banco}:
+            return f"banco_{banco}", "resto"
+        if set(reporte_particion.get("bancos_resto", [])) == {banco}:
+            return f"banco_{banco}", "foco"
+    return f"banco_{banco}", None
 
 
 def agrupar_bancos(df_bancarios, umbral_pct, bancos_otros, nombre_otros,
@@ -1981,8 +2125,18 @@ def load_bbva_encaje_features(params):
 # 5d. Features CC+OVN en BCR (Saldos_CCOVN.xlsx, rezago 1 día)
 def build_ccovn_features(df_ccovn, peru_bday, flujo_sistema=None):
     """
-    Deriva features de saldos CC+OVN en el BCR a partir de Saldos_CCOVN.xlsx.
-    Todas las variables usan información de t-1 (shift(1)) → sin leakage.
+    Deriva features de saldos CC+OVN en el BCR a partir del df ANCHO que produce
+    armar_ccovn_ancho() (columnas 'sistema', 'banco_<X>', y 'foco'/'resto' si hay
+    partición activa). Todas las variables usan información de t-1 (shift(1)) →
+    sin leakage.
+
+    v2: GENÉRICA sobre cualquier columna del df ancho, no solo sistema/bbva. Para
+    cada columna 'clave' produce ccovn_<clave>_lag1 y var_ccovn_<clave>_lag1. Esto
+    es lo que permite que el mismo cálculo sirva para 'sistema', 'foco', 'resto' y
+    cada 'banco_<X>' sin repetir código por caso. La selección de qué clave usar
+    como "propio" y cuál como "contraparte" para una entidad dada ocurre DESPUÉS,
+    en build_feature_matrix vía resolver_ccovn_lados() — esta función no conoce
+    qué banco se está modelando.
 
     Reindexación a freq="B" (lunes-viernes) antes de diff():
       - Los feriados peruanos (sin datos) se forward-fill desde el día previo.
@@ -1994,23 +2148,29 @@ def build_ccovn_features(df_ccovn, peru_bday, flujo_sistema=None):
         matriz donde sí existen filas de fecha_t.
 
     Parámetros:
+      df_ccovn      : salida de armar_ccovn_ancho() — columnas 'sistema',
+                      'banco_<X>' por banco emparejado, 'foco'/'resto' opcional.
       flujo_sistema : pd.Series opcional (D-R del sistema, indexada por fecha).
                       Si se provee, se calcula residuo_ccovn_lag1.
 
-    Features generadas (todas con sufijo _lag1):
-      ccovn_sistema_lag1        : saldo total del sistema en el BCR en t-1 (USD)
-      ccovn_bbva_lag1           : saldo BBVA en el BCR en t-1 (USD)
-      var_ccovn_sistema_lag1    : variación entre días hábiles consecutivos del sistema en t-1
-      var_ccovn_bbva_lag1       : variación entre días hábiles consecutivos de BBVA en t-1
-      bbva_share_lag1           : ccovn_bbva / ccovn_sistema en t-1
-      var_ccovn_bbva_exceso_lag1: Δsaldo_bbva - bbva_share×Δsaldo_sistema en t-1
-                                  (componente idiosincrático de BBVA, ortogonal al sistema)
-      ccovn_vs_dia_mes_lag1     : saldo_sistema(t-1) - media_historica[rango_dia_habil_mes]
-                                  (desviación respecto al nivel estacional esperado para ese
-                                  puesto del mes: elimina estacionalidad intramonth)
-      residuo_ccovn_lag1        : Δsaldo_sistema(t-1) - flujo_neto_sistema(t-1)
-                                  (error de la identidad Δsaldo≈flujo; solo si flujo_sistema
-                                  no es None)
+    Features generadas:
+      ccovn_<clave>_lag1, var_ccovn_<clave>_lag1   por cada clave del df ancho
+      ccovn_vs_dia_mes_lag1  : saldo_sistema(t-1) - media_historica[rango_dia_habil_mes]
+                               (desviación respecto al nivel estacional esperado para ese
+                               puesto del mes: elimina estacionalidad intramonth). Basada
+                               en 'sistema', ajena a la partición.
+      residuo_ccovn_lag1     : Δsaldo_sistema(t-1) - flujo_neto_sistema(t-1)
+                               (error de la identidad Δsaldo≈flujo; solo si flujo_sistema
+                               no es None). Basada en 'sistema'.
+
+    share_propio_lag1 y var_ccovn_propio_exceso_lag1 (el share y el componente
+    idiosincrático que v1 llamaba bbva_share_lag1 / var_ccovn_bbva_exceso_lag1)
+    YA NO se calculan acá: dependen de "propio", que no existe hasta que se
+    resuelve por banco. Se recomponen en build_feature_matrix a partir de
+    columnas ya rezagadas — shift(1) distribuye sobre razón y producto, así que
+    ccovn_propio_lag1/ccovn_sistema_lag1 y
+    var_ccovn_propio_lag1 − share_propio_lag1×var_ccovn_sistema_lag1
+    dan exactamente lo mismo que calcularlos antes de rezagar.
 
     Retorna DataFrame indexado por días lun-vie (freq="B").
     """
@@ -2027,26 +2187,14 @@ def build_ccovn_features(df_ccovn, peru_bday, flujo_sistema=None):
     )
     df_bd = df_ccovn.reindex(idx_bd).ffill()
 
-    sis = df_bd["ccovn_sistema"]
-    bbv = df_bd.get("ccovn_bbva", pd.Series(np.nan, index=df_bd.index))
+    sis = df_bd["sistema"]
 
     resultado = pd.DataFrame(index=df_bd.index)
-    resultado["ccovn_sistema_lag1"]     = sis.shift(1)
-    resultado["ccovn_bbva_lag1"]        = bbv.shift(1)
-    # diff() sobre idx_bd → variación entre días lun-vie consecutivos (correcto)
-    resultado["var_ccovn_sistema_lag1"] = sis.diff().shift(1)
-    resultado["var_ccovn_bbva_lag1"]    = bbv.diff().shift(1)
-    share = bbv / sis.replace(0, np.nan)
-    resultado["bbva_share_lag1"]        = share.shift(1)
-
-    # ── var_ccovn_bbva_exceso_lag1 ───────────────────────────────────────────
-    # Componente idiosincrático de BBVA en la variación diaria del saldo:
-    #   exceso = Δsaldo_bbva - bbva_share × Δsaldo_sistema
-    # Mide cuánto se apartó BBVA del comportamiento proporcional al sistema.
-    # Ortogonal a la variación sistémica → señal específica del banco.
-    resultado["var_ccovn_bbva_exceso_lag1"] = (
-        bbv.diff() - share * sis.diff()
-    ).shift(1)
+    for clave in df_bd.columns:
+        serie = df_bd[clave]
+        resultado[f"ccovn_{clave}_lag1"]     = serie.shift(1)
+        # diff() sobre idx_bd → variación entre días lun-vie consecutivos (correcto)
+        resultado[f"var_ccovn_{clave}_lag1"] = serie.diff().shift(1)
 
     # ── ccovn_vs_dia_mes_lag1 ────────────────────────────────────────────────
     # Desviación del saldo del sistema respecto a su media histórica para ese
@@ -2089,7 +2237,8 @@ def build_ccovn_features(df_ccovn, peru_bday, flujo_sistema=None):
                     "residuo_ccovn_lag1 omitido")
 
     n_val = resultado["ccovn_sistema_lag1"].notna().sum()
-    logger.info(f"  build_ccovn_features: {n_val:,} filas válidas en ccovn_sistema_lag1")
+    logger.info(f"  build_ccovn_features: {n_val:,} filas válidas en ccovn_sistema_lag1 "
+                f"| claves generadas: {list(df_bd.columns)}")
     return resultado
 
 
@@ -2700,7 +2849,9 @@ def build_feature_matrix(
     bancos_con_encaje=None,      # v2: nombres que reciben las features de encaje
     recibe_encaje_bbva=True,     # v2: si esta entidad recibe el bloque 8b
     bbva_encaje_feat=None,       # pd.DataFrame(index=fecha_t) avance/exceso desde aux_encaje_2
-    ccovn_features=None,         # pd.DataFrame(index=fecha_t) con saldos CC+OVN para todos los bancos
+    ccovn_features=None,         # pd.DataFrame(index=fecha_t), salida de build_ccovn_features (genérica por clave)
+    reporte_particion=None,      # v2: salida de aplicar_particion(), para resolver propio/contraparte de ccovn
+    nombre_sistema="SISTEMA",    # v2: nombre de la entidad sistema, para resolver_ccovn_lados()
     dias_no_habiles_adicionales=None,  # lista de Timestamps (auto-detectados + manual PARAMS)
 ):
     """
@@ -3235,14 +3386,62 @@ def build_feature_matrix(
     if "capacidad_retiro_th" not in df.columns:
         df["capacidad_retiro_th"] = np.nan
 
-    # ── 9. Features CC+OVN en BCR (Saldos_CCOVN.xlsx, todos los bancos) ──────
-    # ccovn_features está indexado por fecha y contiene valores del día t-1.
-    # ccovn_sistema_lag1 aplica a todos los bancos.
-    # ccovn_bbva_lag1 aplica a todos (es una variable sistémica disponible para
-    # cualquier banco que quiera observar el comportamiento de BBVA).
+    # ── 9. Features CC+OVN en BCR (Saldos_CCOVN.xlsx) ────────────────────────
+    # ccovn_features está indexado por fecha y contiene valores del día t-1,
+    # generados genéricamente por clave (sistema, foco, resto, banco_<X>).
+    #
+    # v1 le daba a TODAS las entidades la misma columna ccovn_bbva_lag1: era
+    # literalmente el saldo de BBVA, sin importar qué banco se estuviera
+    # modelando. Con particiones activas eso deja de tener sentido — el saldo
+    # "propio" de FOCO_BBVA no es el mismo objeto que el "propio" de RESTO_BBVA.
+    #
+    # v2 resuelve, por banco, cuál es su propio saldo y —cuando la entidad es un
+    # lado de la partición activa— el de su contraparte (resolver_ccovn_lados).
+    # Nace ahí la señal nueva que no existía antes: el saldo del OTRO lado, que
+    # es donde viviría una compensación entre BBVA y el resto de la banca.
+    _ccovn_cols_finales = ["ccovn_sistema_lag1", "var_ccovn_sistema_lag1",
+                           "ccovn_propio_lag1", "var_ccovn_propio_lag1",
+                           "share_propio_lag1", "var_ccovn_propio_exceso_lag1",
+                           "ccovn_contraparte_lag1", "var_ccovn_contraparte_lag1",
+                           "ccovn_vs_dia_mes_lag1", "residuo_ccovn_lag1"]
     if ccovn_features is not None and not ccovn_features.empty:
-        df = df.merge(ccovn_features, left_on="fecha_t", right_index=True, how="left")
-        logger.info(f"  {banco}: features ccovn incorporadas ({len(ccovn_features.columns)} cols)")
+        clave_p, clave_c = resolver_ccovn_lados(banco, nombre_sistema, reporte_particion)
+        _renombre = {
+            f"ccovn_{clave_p}_lag1":     "ccovn_propio_lag1",
+            f"var_ccovn_{clave_p}_lag1": "var_ccovn_propio_lag1",
+        }
+        if clave_c is not None:
+            _renombre[f"ccovn_{clave_c}_lag1"]     = "ccovn_contraparte_lag1"
+            _renombre[f"var_ccovn_{clave_c}_lag1"] = "var_ccovn_contraparte_lag1"
+        _comunes = [c for c in ("ccovn_sistema_lag1", "var_ccovn_sistema_lag1",
+                                "ccovn_vs_dia_mes_lag1", "residuo_ccovn_lag1")
+                    if c in ccovn_features.columns]
+        _cols_traer = [c for c in _renombre if c in ccovn_features.columns] + _comunes
+        _sub = ccovn_features[_cols_traer].rename(columns=_renombre)
+        df = df.merge(_sub, left_on="fecha_t", right_index=True, how="left")
+
+        for _c in _ccovn_cols_finales:
+            # ccovn_vs_dia_mes_lag1 y residuo_ccovn_lag1 también pueden faltar:
+            # el segundo solo se calcula si flujo_sistema estaba disponible.
+            if _c not in df.columns:
+                df[_c] = np.nan
+
+        # share_propio_lag1 y var_ccovn_propio_exceso_lag1 se recomponen acá, no
+        # en build_ccovn_features: shift(1) distribuye sobre razón y producto, así
+        # que operar sobre columnas YA rezagadas da lo mismo que rezagar el
+        # resultado. Ver la nota de build_ccovn_features.
+        df["share_propio_lag1"] = (
+            df["ccovn_propio_lag1"] / df["ccovn_sistema_lag1"].replace(0, np.nan)
+        )
+        df["var_ccovn_propio_exceso_lag1"] = (
+            df["var_ccovn_propio_lag1"]
+            - df["share_propio_lag1"] * df["var_ccovn_sistema_lag1"]
+        )
+        logger.info(f"  {banco}: ccovn propio='{clave_p}' contraparte="
+                    f"'{clave_c or '—'}' ({len(_cols_traer)} cols traídas)")
+    else:
+        for _c in _ccovn_cols_finales:
+            df[_c] = np.nan
 
     # ── Reducir a float32 antes de reordenar ────────────────────────────────
     # Mitad de memoria y evita el OOM en la consolidación interna de pandas
@@ -3567,9 +3766,9 @@ def build_full_matrix(
     # (generado por aux_encaje_2.py con días calendario — más preciso que EncajeD.xlsx)
     bbva_encaje_feat = load_bbva_encaje_features(params)
 
-    # Pre-calcular features CC+OVN (todos los bancos; sistémico + BBVA).
-    # flujo_neto_sistema = D_SISTEMA - R_SISTEMA, necesario para residuo_ccovn_lag1.
-    df_ccovn   = load_ccovn_data(params)
+    # Pre-calcular features CC+OVN. flujo_neto_sistema = D_SISTEMA - R_SISTEMA,
+    # necesario para residuo_ccovn_lag1.
+    df_ccovn_raw = load_ccovn_data(params)
     flujo_neto_sistema = pd.Series(dtype=float)
     if not df_bancarios.empty:
         _r = f"{NOMBRE_SISTEMA}_R"
@@ -3583,7 +3782,20 @@ def build_full_matrix(
                     _sis_clean = _sis_clean.drop(index=_to_drop_sis)
             _sis_clean = _sis_clean.dropna()
             flujo_neto_sistema = _sis_clean[_d] - _sis_clean[_r]
-    ccovn_feat = build_ccovn_features(df_ccovn, peru_bday,
+
+    # v2: universo de bancos a emparejar contra Saldos_CCOVN.xlsx. Unión de los
+    # bancos individuales que quedan modelados tras agrupar_bancos() (lista_bancos,
+    # sin Otros_bancos) y los bancos de la partición activa (bancos_foco/resto,
+    # que son PRE-agrupación — pueden incluir un banco que ya cayó dentro de
+    # Otros_bancos, y aun así hace falta para sumar ccovn_foco/ccovn_resto).
+    _bancos_canonicos_ccovn = set(lista_bancos) - {params.get("nombre_otros", "Otros_bancos")}
+    if reporte_particion and reporte_particion.get("activa"):
+        _bancos_canonicos_ccovn |= set(reporte_particion.get("bancos_foco", []))
+        _bancos_canonicos_ccovn |= set(reporte_particion.get("bancos_resto", []))
+
+    df_ccovn_ancho, _rep_match_ccovn = armar_ccovn_ancho(
+        df_ccovn_raw, sorted(_bancos_canonicos_ccovn), reporte_particion)
+    ccovn_feat = build_ccovn_features(df_ccovn_ancho, peru_bday,
                                       flujo_sistema=flujo_neto_sistema)
 
     # Pre-computar HMM expanding SOLO para SISTEMA (régimen sistémico, no por banco)
@@ -3625,7 +3837,9 @@ def build_full_matrix(
             bancos_con_encaje=_bancos_con_encaje,
             recibe_encaje_bbva=(banco in _destinos_enc_bbva),
             bbva_encaje_feat=bbva_encaje_feat,  # avance/exceso desde aux_encaje_2 (días calendario)
-            ccovn_features=ccovn_feat,      # saldos CC+OVN en BCR (aplican a todos los bancos)
+            ccovn_features=ccovn_feat,      # saldos CC+OVN en BCR, resueltos a propio/contraparte por banco
+            reporte_particion=reporte_particion,
+            nombre_sistema=NOMBRE_SISTEMA,
             dias_no_habiles_adicionales=sorted(_dias_extra_set) if _dias_extra_set else None,
         )
         if df_banco_mat.empty:
@@ -3922,30 +4136,52 @@ def build_data_dictionary(params):
     add("ratio_ovn_total_lag1",  f"aux_encaje_2 / {_benc}", "overnight(t-1)/encaje_ovn(t-1): alto = banco aún no inició retiro (fondos en overnight sin mover).", 1, "t")
 
     # ── Features CC+OVN en BCR (Saldos_CCOVN.xlsx, rezago 1 día) ─────────────
+    # v2: "propio"/"contraparte" se resuelven por entidad, no son columnas
+    # fijas de BBVA. Ver resolver_ccovn_lados() — SISTEMA no tiene contraparte;
+    # FOCO_x y RESTO_x son contraparte mutua; un banco individual solo hereda
+    # contraparte si su composición coincide EXACTO con un lado de la partición
+    # activa (ej. BBVA cuando particion_activa="bbva").
     add("ccovn_sistema_lag1",     "Saldos_CCOVN",
-        "Saldo total CC+OVN del sistema en el BCR en t-1 (USD). Disponible desde 2010.",
+        "Saldo total CC+OVN del sistema en el BCR en t-1 (USD). Disponible desde 2010. "
+        "Igual para todas las entidades — no depende de la partición.",
         1, "t")
-    add("ccovn_bbva_lag1",        "Saldos_CCOVN",
-        "Saldo CC+OVN de BBVA en el BCR en t-1 (USD). Disponible desde 2010.",
+    add("ccovn_propio_lag1",      "Saldos_CCOVN",
+        "Saldo CC+OVN propio de la entidad modelada en t-1 (USD). Antes "
+        "ccovn_bbva_lag1: era el saldo de BBVA para TODAS las entidades por "
+        "igual. Ahora es el saldo de quien se está modelando — para SISTEMA "
+        "coincide con ccovn_sistema_lag1, para FOCO_BBVA es BBVA, para "
+        "RESTO_BBVA es el resto del sistema.",
         1, "t")
     add("var_ccovn_sistema_lag1", "Saldos_CCOVN",
         "Variación diaria del saldo CC+OVN del sistema en t-1 (USD).",
         1, "t")
-    add("var_ccovn_bbva_lag1",    "Saldos_CCOVN",
-        "Variación diaria del saldo CC+OVN de BBVA en t-1 (USD).",
+    add("var_ccovn_propio_lag1",  "Saldos_CCOVN",
+        "Variación diaria del saldo CC+OVN propio en t-1 (USD). Antes var_ccovn_bbva_lag1.",
         1, "t")
-    add("bbva_share_lag1",        "Saldos_CCOVN",
-        "ccovn_bbva(t-1) / ccovn_sistema(t-1): participación de BBVA en el sistema en t-1.",
+    add("ccovn_contraparte_lag1", "Saldos_CCOVN",
+        "Saldo CC+OVN del OTRO lado de la partición activa en t-1 (USD). Nuevo "
+        "en v2 — no existía en v1, que no tenía noción de 'el resto'. NaN para "
+        "SISTEMA y para bancos individuales fuera de la partición activa.",
         1, "t")
-    add("var_ccovn_bbva_exceso_lag1", "Saldos_CCOVN",
-        "Δsaldo_bbva(t-1) − bbva_share(t-1)×Δsaldo_sistema(t-1): componente "
-        "idiosincrático de BBVA en la variación diaria del saldo. "
-        "Ortogonal a la variación sistémica.",
+    add("var_ccovn_contraparte_lag1", "Saldos_CCOVN",
+        "Variación diaria del saldo de la contraparte en t-1 (USD). Nuevo en v2.",
+        1, "t")
+    add("share_propio_lag1",        "Saldos_CCOVN",
+        "ccovn_propio(t-1) / ccovn_sistema(t-1): participación de la entidad "
+        "modelada en el sistema en t-1. Antes bbva_share_lag1 — mismo estado "
+        "(excluido), solo cambió el nombre.",
+        1, "t")
+    add("var_ccovn_propio_exceso_lag1", "Saldos_CCOVN",
+        "Δsaldo_propio(t-1) − share_propio(t-1)×Δsaldo_sistema(t-1): componente "
+        "idiosincrático de la entidad modelada en la variación diaria del "
+        "saldo. Ortogonal a la variación sistémica. Antes "
+        "var_ccovn_bbva_exceso_lag1 — mismo estado (excluido), solo cambió el nombre.",
         1, "t")
     add("ccovn_vs_dia_mes_lag1",  "Saldos_CCOVN",
         "saldo_sistema(t-1) − media_historica[rango_dia_habil_del_mes]: "
         "desviación del saldo respecto al nivel estacional esperado para ese "
-        "puesto del mes hábil. Elimina la estacionalidad intramonth.",
+        "puesto del mes hábil. Elimina la estacionalidad intramonth. "
+        "Basada en el sistema, ajena a la partición.",
         1, "t")
     add("residuo_ccovn_lag1",     "Saldos_CCOVN + Datos bancarios",
         "Δsaldo_sistema(t-1) − flujo_neto_sistema(t-1): error de la identidad "
