@@ -3621,8 +3621,22 @@ def build_feature_matrix(
                     f"{df.shape[1]} columnas finales")
 
     # ── Reordenar columnas ───────────────────────────────────────────────────
+    # Las identidad van primero, en orden fijo; el resto va ORDENADO ALFABÉTICA-
+    # MENTE, no en orden de inserción.
+    #
+    # No es cosmético. En orden de inserción, la posición de cada columna depende
+    # del CAMINO de ejecución: una entidad sin contraparte de partición no recibe
+    # ccovn_contraparte_lag1 en el merge y la termina creando el relleno de NaN,
+    # que la deja al final, mientras que otra con contraparte la recibe en el
+    # medio. Mismo juego de columnas, distinto orden, y el ParquetWriter aborta
+    # al castear contra el esquema del primer banco escrito.
+    #
+    # Ordenar alfabéticamente hace el esquema función únicamente del CONJUNTO de
+    # columnas, que es lo que las ramas ya se encargan de mantener igual. Cierra
+    # la clase entera de bug en vez de este caso puntual: cualquier rama futura
+    # que cree una columna en otro momento sigue produciendo el mismo esquema.
     cols_id    = [c for c in ["fecha_t", "banco", "h", "log_h", "fecha_th"] if c in df.columns]
-    cols_resto = [c for c in df.columns if c not in set(cols_id)]
+    cols_resto = sorted(c for c in df.columns if c not in set(cols_id))
     df = df[cols_id + cols_resto]
 
     # Reporte NaN
@@ -4027,17 +4041,29 @@ def build_full_matrix(
         if table.schema.names != schema_ref.names:
             _falta = [c for c in schema_ref.names if c not in table.schema.names]
             _sobra = [c for c in table.schema.names if c not in schema_ref.names]
-            _orden = (not _falta and not _sobra)
-            raise ValueError(
-                f"El esquema de '{banco}' no coincide con el del primer banco "
-                f"escrito ({lista_bancos_full[0]}).\n"
-                f"  Faltan en {banco}: {_falta or 'ninguna'}\n"
-                f"  Sobran en {banco}: {_sobra or 'ninguna'}\n"
-                + ("  Mismas columnas, distinto ORDEN.\n" if _orden else "")
-                + "  Toda entidad tiene que producir el mismo juego de columnas: "
-                  "las ramas condicionales de features (encaje, ccovn, partición) "
-                  "deben materializar en NaN lo que no aplica, y no crear los "
-                  "insumos intermedios que otra rama descarta.")
+            if _falta or _sobra:
+                # Diferencia REAL de conjunto: una rama condicional no
+                # materializó lo que no aplica, o creó un intermedio que otra
+                # descarta. No se puede arreglar acá sin inventar datos.
+                raise ValueError(
+                    f"El esquema de '{banco}' no coincide con el del primer "
+                    f"banco escrito ({lista_bancos_full[0]}).\n"
+                    f"  Faltan en {banco}: {_falta or 'ninguna'}\n"
+                    f"  Sobran en {banco}: {_sobra or 'ninguna'}\n"
+                    "  Toda entidad tiene que producir el mismo juego de "
+                    "columnas: las ramas condicionales de features (encaje, "
+                    "ccovn, partición) deben materializar en NaN lo que no "
+                    "aplica, y no crear los insumos intermedios que otra rama "
+                    "descarta.")
+            # Mismo conjunto, distinto orden: es benigno y se realinea. El
+            # ordenamiento alfabético de build_feature_matrix ya debería
+            # impedirlo, así que además se avisa: si aparece, algo se reordenó
+            # después de esa función y conviene saberlo.
+            logger.warning(f"  {banco}: mismas columnas en distinto orden que "
+                           f"{lista_bancos_full[0]}; se realinea al esquema de "
+                           f"referencia. Revisar si algo reordena después de "
+                           f"build_feature_matrix().")
+            table = table.select(schema_ref.names)
         table = table.cast(schema_ref)
         pq_writer.write_table(table)
         total_filas += len(df_banco_mat)

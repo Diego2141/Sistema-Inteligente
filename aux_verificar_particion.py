@@ -374,8 +374,110 @@ def modo_sintetico():
           not (set(mod.BBVA_INTERMEDIAS) & set(mod.BBVA_FEAT_FINALES)),
           f"intermedias descartadas: {list(mod.BBVA_INTERMEDIAS)}")
 
-    # ── 12. Partición inexistente ───────────────────────────────────────────
-    print("\n12. Nombre de partición inválido")
+    # ── 12. Orden de columnas determinista ──────────────────────────────────
+    # El esquema del Parquet tiene que depender solo del CONJUNTO de columnas,
+    # nunca del camino de ejecución. Antes dependía del orden de inserción: una
+    # entidad sin contraparte de partición recibía ccovn_contraparte_lag1 del
+    # relleno de NaN (al final) en vez del merge (en el medio), y el
+    # ParquetWriter abortaba con "mismas columnas, distinto orden".
+    print("\n12. El orden final de columnas no depende del orden de inserción")
+    ID = ["fecha_t", "banco", "h", "log_h", "fecha_th"]
+    FEATS = ["ccovn_contraparte_lag1", "avance_mes_lag1", "esc_retiro_pos",
+             "ccovn_propio_lag1", "target", "dias_al_cierre_mes"]
+
+    def _orden_final(cols):
+        """Réplica del reordenamiento de build_feature_matrix."""
+        cid = [c for c in ID if c in cols]
+        return cid + sorted(c for c in cols if c not in set(cid))
+
+    import random as _random
+    base = ID[:3] + FEATS
+    ordenes = [base, list(reversed(base)), _random.Random(0).sample(base, len(base))]
+    resultados = [_orden_final(o) for o in ordenes]
+    check("tres órdenes de inserción distintos dan el mismo esquema",
+          all(r == resultados[0] for r in resultados),
+          f"{len(resultados[0])} columnas, idénticas en los tres casos")
+    check("las columnas identidad quedan primero y en orden fijo",
+          resultados[0][:3] == ID[:3], f"{resultados[0][:3]}")
+    check("el resto queda alfabético",
+          resultados[0][3:] == sorted(resultados[0][3:]))
+
+    # ── 13. Auditoría de asignaciones condicionales ─────────────────────────
+    # Guardia prospectiva: toda columna que se asigne SOLO dentro de una rama
+    # condicional necesita una materialización que garantice su existencia en el
+    # camino contrario. Si no la tiene, alguna entidad va a salir con un juego de
+    # columnas distinto y el ParquetWriter va a abortar recién en producción.
+    #
+    # Las conocidas-seguras se listan con su motivo. Cualquier columna NUEVA que
+    # aparezca sin cobertura sale acá, en el checklist, y no en la corrida.
+    print("\n13. Columnas asignadas condicionalmente sin materialización")
+    import ast
+    src = RUTA_V2.read_text(encoding="utf-8")
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.FunctionDef) and n.name == "build_feature_matrix")
+
+    def _cols_df(nodo):
+        """
+        Columnas que una rama INTRODUCE en df, por asignación o por merge.
+
+        Contar solo las asignaciones literales da falsos positivos: 'target' se
+        crea con df.merge(df_banco[["target"]], ...) en una rama y con
+        df["target"] = np.nan en la otra, así que aparecía como asimétrico
+        cuando las dos ramas sí lo producen. Se extraen también los nombres
+        literales que viajan dentro de un merge.
+        """
+        out = set()
+        for n in ast.walk(nodo):
+            if isinstance(n, ast.Assign):
+                for t in n.targets:
+                    if (isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name)
+                            and t.value.id == "df" and isinstance(t.slice, ast.Constant)
+                            and isinstance(t.slice.value, str)):
+                        out.add(t.slice.value)
+            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                    and n.func.attr == "merge"):
+                for sub in ast.walk(n):
+                    if isinstance(sub, ast.List):
+                        out |= {e.value for e in sub.elts
+                                if isinstance(e, ast.Constant) and isinstance(e.value, str)}
+        return out
+
+    condicionales = set()
+    for n in ast.walk(fn):
+        if isinstance(n, ast.If):
+            a = set().union(*[_cols_df(x) for x in n.body]) if n.body else set()
+            b = set().union(*[_cols_df(x) for x in n.orelse]) if n.orelse else set()
+            condicionales |= (a - b) | (b - a)
+
+    # Cubiertas por un guard literal `if "X" not in df.columns`
+    con_guard = {m for m in condicionales if f'"{m}" not in df.columns' in src}
+    # Cubiertas por un bucle de materialización sobre una lista de columnas
+    EN_LISTA_MATERIALIZADA = {
+        "esc_neto_min_pos", "esc_neto_max_pos", "esc_retiro_pos", "esc_deposito_pos",
+        "acum_neto_min_pos", "acum_neto_max_pos", "frec_flujo_pos",
+        "esc_neto_max_pos_ap", "esc_deposito_pos_ap",      # rama sin datos bancarios
+        "share_propio_lag1", "var_ccovn_propio_exceso_lag1",  # _ccovn_cols_finales
+        "ccovn_propio_lag1", "var_ccovn_propio_lag1",
+        "ccovn_contraparte_lag1", "var_ccovn_contraparte_lag1",
+        "share_contraparte_lag1", "ccovn_sistema_lag1",
+        "var_ccovn_sistema_lag1", "ccovn_vs_dia_mes_lag1", "residuo_ccovn_lag1",
+        "hmm_estado",
+    }
+    # Dependen de una constante de módulo, igual para toda entidad de la corrida
+    POR_CONSTANTE = {"n_lags_pos"}          # GUARDAR_N_LAGS_POS
+    INTERNAS = {"_fecha_reportada_bbva"}    # se descarta antes del final
+
+    sin_cubrir = condicionales - con_guard - EN_LISTA_MATERIALIZADA \
+        - POR_CONSTANTE - INTERNAS
+    print(f"   condicionales: {len(condicionales)} | con guard: {len(con_guard)} | "
+          f"en lista: {len(condicionales & EN_LISTA_MATERIALIZADA)} | "
+          f"por constante: {len(condicionales & POR_CONSTANTE)}")
+    check("toda columna condicional tiene materialización", not sin_cubrir,
+          f"SIN CUBRIR: {sorted(sin_cubrir)}" if sin_cubrir
+          else "ninguna quedaría ausente en una entidad y presente en otra")
+
+    # ── 14. Partición inexistente ───────────────────────────────────────────
+    print("\n14. Nombre de partición inválido")
     try:
         mod.aplicar_particion(df, "no_existe")
         check("una partición desconocida aborta", False, "no lanzó excepción")
