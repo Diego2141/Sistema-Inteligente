@@ -2,11 +2,91 @@
 
 **Sesión:** 2026-08-24
 **Branch:** `claude/build-feature-matrix-HDMPg`
-**HEAD al cerrar:** `0de732e` (+ un commit pendiente con el fix del checklist CCOVN, ver "En progreso")
-**Working tree:** limpio salvo `aux_verificar_ccovn_particion.py` (fix aplicado, sin commitear)
+**HEAD al cerrar:** ver `git log -1` (último commit de la sesión: handoff + alineación de `FAMILIAS_PERM`)
+**Working tree:** limpio, todo pusheado a `origin`
 
 > No existía `HANDOFF_TEMPLATE.md` en el repo. Este archivo usa la estructura
 > pedida en la instrucción.
+
+---
+
+## 0. Contexto del proyecto (leer primero si venís sin contexto)
+
+**Qué es.** Sistema de predicción de liquidez en moneda extranjera del BCRP
+(banco central peruano). Se modela el **flujo neto diario** `D − R` (depósitos
+menos retiros) del sistema bancario contra sus cuentas en el BCRP, con
+**regresión cuantílica XGBoost, un modelo por horizonte**, h = 2..75 días
+hábiles, τ ∈ {0.01, 0.05, 0.40, 0.50, 0.60, 0.95, 0.99}.
+
+**Para qué.** El destino es la **liquidez operativa requerida**: cuánta caja
+tiene que poder producir el tramo corto del portafolio de las RIN a cada plazo.
+El objeto formal es el **MCO** (*maximum cumulative outflow*): la caída
+acumulada máxima **desde el origen** a un percentil dado. No el flujo del día de
+vencimiento, no el acumulado al horizonte: el punto más hondo del camino.
+
+**Los tres hallazgos** que sostienen todo el diseño de features:
+
+1. **Cuánto** — el cierre pasó de estar equilibrado (2010-2012) a una salida
+   neta sostenida. Cambio de régimen alrededor de 2018-19, no intensificación.
+2. **Cómo** — no se reparte parejo en el mes: el sistema **deposita al abrir** y
+   **retira contra el cierre**, con pico más pronunciado en cierre de trimestre.
+   *Es el hallazgo que justifica toda la familia `*_pos` y las dos anclas.*
+3. **Quién** — **BBVA concentra ~94%** del neto del sistema en la ventana de
+   cierre (2025), cinco años seguidos sobre 75% desde 2022. El segundo es
+   Citibank con 9%. *Es lo que motiva las particiones.*
+
+**Ventana de cierre** = últimos 5 días hábiles del mes. Misma definición en los
+tres hallazgos.
+
+**Las dos colas se anclan a extremos opuestos del mes**, y aparece en los
+heatmaps sin que nadie lo impusiera: `dias_al_cierre_mes` domina q01 (retiros),
+`dias_desde_cierre_mes` domina q99 (depósitos). De ahí el sufijo `_ap`
+(ancla apertura) para las features orientadas a la cola alta.
+
+### Pipeline
+
+```
+step001_build_feature_matrix[_v2].py   matriz de features -> Parquet
+        |
+step005_walk_forward_cv_4.py           XGBoost por horizonte + walk-forward CV
+        |                              (de acá salen los heatmaps Block PERM)
+        +--> aux_fanchart_cv4_direct.py    fan charts
+        +--> step006_simulacion_paths_v2.py  simulación de trayectorias
+        +--> step006_cqr_calibration.py      calibración conforme
+```
+
+Hay muchas versiones de cada step en el repo. **Las vigentes son
+`step001_..._v2.py` (o v1 si no se usa partición) y `step005_walk_forward_cv_4.py`.**
+
+### Rutas (Windows, unidad de red H:)
+
+```
+BASE = H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\
+  1. Data\Raw\Transacciones_BancaLocal.xlsx    flujos D/R por banco (fuente principal)
+  1. Data\Raw\Saldos_CCOVN.xlsx                saldos CC+OVN en BCR, 86 columnas
+  1. Data\Raw\EncajeD.xlsx                     encaje diario
+  2. Output\encaje_bbva\bbva_encaje_features_modelo.xlsx
+  1. Data\Clean\matriz_features.parquet        SALIDA de step001, ENTRADA de step005
+```
+
+### Entorno
+
+- **Se corre desde Spyder con `runfile()`**, sin argumentos de línea de comandos.
+  Los scripts de verificación caen al autotest sintético si no reciben args.
+- `step001` **pide credenciales de proxy en el import** si `BCRP_PROXY` no está
+  en el entorno. Los checklists la declaran con un centinela para saltarlo.
+- Las corridas de step001 tardan minutos (descarga series externas + procesa
+  ~4.300 fechas × 74 horizontes × 9 entidades).
+
+### Artifacts publicados (deliverables vivos)
+
+- **One-pager de la reunión** — `onepager_encaje.html` en el repo →
+  https://claude.ai/code/artifact/322e9f5b-c7e4-4fca-b3a7-b2e142d077a5
+- **Diccionario de features** — `diccionario_features.html` en el repo →
+  https://claude.ai/code/artifact/b8e796f5-693e-48f5-b473-99c4b65722cc
+
+Para actualizarlos hay que republicar **con la misma URL**, si no se crea un
+artifact nuevo y el link compartido queda viejo.
 
 ---
 
@@ -42,10 +122,9 @@ cierre, así que el modelo agregado termina ajustando ese banco más ruido.
 
 ### En progreso
 
-- **Fix sin commitear:** `aux_verificar_ccovn_particion.py` tenía la aserción
-  `check("SISTEMA: sin contraparte", cc is None)`, que quedó desactualizada
-  cuando SISTEMA pasó a recibir `foco` como contraparte. Ya está corregida y el
-  checklist pasa, pero **falta commitear**. Es lo primero a hacer (ver §6).
+Nada a medio hacer en el código. Todo lo tocado está commiteado y pusheado, y
+los tres checklists pasan. Lo que falta es **ejecutar**, no escribir: ver
+"Bloqueado" abajo y §6.
 
 ### Bloqueado / no terminado
 
@@ -54,7 +133,8 @@ cierre, así que el modelo agregado termina ajustando ese banco más ruido.
   pero **la última corrida del usuario fue antes del último fix**, así que
   todavía no hay confirmación de que v2 termine y escriba el Parquet.
 - **Recombinación FOCO+RESTO → total:** no implementada. Es el paso conceptual
-  siguiente y tiene una trampa importante documentada en §4.
+  siguiente y tiene una trampa importante documentada en §8 ("Qué NO hacer"),
+  que además **ya está presente en el código del fan chart**.
 - **Diagnóstico de correlación foco/resto:** propuesto, no implementado. Es el
   número que decide si vale la pena la recombinación.
 
@@ -353,7 +433,49 @@ así que solo agrega candidatos de corte inútiles.
 
 ---
 
-## 9. Pendientes menores anotados
+## 9. Hilo paralelo: el one-pager de la reunión
+
+Buena parte de la sesión fue redactar el one-pager para la reunión con el
+**equipo de Operaciones Monetarias**. Está publicado y en el repo
+(`onepager_encaje.html`). Estado: **terminado y publicado**, salvo la sección
+que se estuvo iterando.
+
+**Reencuadre pedido por el jefe, ya aplicado.** El proyecto NO debe presentarse
+como una herramienta para la gestión de la mesa de liquidez, porque eso obliga a
+trabajar en conjunto con esa área. Se enfoca en **identificar riesgos** y en
+aportar a un **mejor portafolio de referencia**.
+
+**Sección "Por qué importa" — versión final aprobada** (está en el artifact
+publicado). Argumento, en orden:
+
+1. El requerimiento no es el mismo según el día del mes desde el que se lo mire.
+   Día hábil 3 contra día 18, mismo plazo, requerimiento distinto.
+2. Los indicadores actuales son **históricos**; lo propuesto es **simulado y
+   prospectivo**.
+3. Segunda ganancia: durante el mes **también entra** liquidez, y hoy esa
+   entrada no se cuenta.
+4. Recuadro: reconocer la trayectoria completa **libera requerimiento al inicio
+   del mes y lo endurece cerca del cierre**; el error cambia de signo con el
+   calendario.
+5. Al construirse sobre **percentiles**, entrega un rango y permite escenarios.
+6. Si el patrón resulta estable, potencialmente se convierte en un **portafolio
+   de referencia** cuya composición de plazos acompaña el ciclo del mes.
+
+**Preferencias de redacción del usuario, que aplican a todo el documento:**
+- **Sin guiones largos (—).** Prefiere comas.
+- Las notas de tablas y gráficos van como **bullets**, no como párrafo.
+- No mencionar explícitamente que se llama "sistema inteligente".
+- No nombrar el indicador vigente (LaR) en el documento; describirlo
+  genéricamente como "los indicadores con que se mide hoy".
+
+**Dato de contexto que no está en el documento:** el indicador vigente es
+**LaR sobre ventanas acumuladas históricas**. Las tres brechas identificadas
+contra él: no distingue el punto del mes, mide el punto final de la ventana y no
+el más hondo del camino, y mezcla los dos regímenes de la muestra.
+
+---
+
+## 10. Pendientes menores anotados
 
 - `BONY` y `FEDERAL` no existen en `Saldos_CCOVN.xlsx`. Degradan a NaN, que es
   correcto: no son globales y el resto se calcula por diferencia. Documentado,
