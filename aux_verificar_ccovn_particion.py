@@ -154,9 +154,17 @@ def modo_sintetico():
     print("2. SISTEMA")
     cp, cc, propio, contra = _resolver_y_extraer(NOMBRE_SISTEMA)
     check("SISTEMA: clave propio == 'sistema'", cp == "sistema")
-    check("SISTEMA: sin contraparte", cc is None)
+    # Con partición activa la contraparte de SISTEMA es el FOCO, y NO None.
+    # Esta aserción decía lo contrario: se escribió antes de descubrir que sin
+    # contraparte, SISTEMA se quedaba con share_propio == 1 por construcción y
+    # perdía la señal de concentración que en v1 viajaba como bbva_share_lag1
+    # (la variable del hallazgo 3). Quedó desactualizada tras ese cambio.
+    check("SISTEMA: contraparte == 'foco' (restituye la concentración)",
+          cc == "foco", f"obtenido {cc!r}")
     check("SISTEMA: propio == ccovn_sistema_lag1",
           propio.equals(ccovn_feat["ccovn_sistema_lag1"]))
+    check("SISTEMA: contraparte == ccovn_foco_lag1",
+          contra is not None and contra.equals(ccovn_feat["ccovn_foco_lag1"]))
 
     # ── 3. FOCO / RESTO ──────────────────────────────────────────────────────
     print("\n3. FOCO_BBVA / RESTO_BBVA")
