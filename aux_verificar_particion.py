@@ -351,8 +351,31 @@ def modo_sintetico():
           not (sin_match & set(ESPERADO_GLOBALES)),
           f"faltantes = {sorted(sin_match)}, ninguno compone un FOCO")
 
-    # ── 11. Partición inexistente ───────────────────────────────────────────
-    print("\n11. Nombre de partición inválido")
+    # ── 11. Paridad de esquema entre las ramas del bloque de encaje ─────────
+    # Regresión del ValueError del ParquetWriter. El bloque 8b/8c tiene dos
+    # ramas: la que hace el merge crea las 8 columnas y despues descarta las 3
+    # intermedias en 8c, y la que omite el bloque (por politica) crea columnas en
+    # NaN. Si la segunda crea tambien las intermedias, esa entidad termina con 3
+    # columnas de mas y el cast contra el esquema del primer banco escrito
+    # aborta, con un mensaje de pyarrow que no dice cuales sobran.
+    #
+    # Es una invariante entre constantes, asi que se verifica sin correr la
+    # pipeline: ambas ramas tienen que converger a BBVA_FEAT_FINALES.
+    print("\n11. Paridad de esquema entre las ramas del bloque de encaje")
+    check("BBVA_INTERMEDIAS es subconjunto de BBVA_FEAT_COLS",
+          set(mod.BBVA_INTERMEDIAS) <= set(mod.BBVA_FEAT_COLS),
+          "si no, el drop de 8c no aplica y las ramas divergen")
+    rama_omite  = [c for c in mod.BBVA_FEAT_COLS if c not in mod.BBVA_INTERMEDIAS]
+    rama_merge  = [c for c in mod.BBVA_FEAT_COLS if c not in mod.BBVA_INTERMEDIAS]
+    check("ambas ramas convergen al mismo juego de columnas",
+          rama_omite == rama_merge == mod.BBVA_FEAT_FINALES,
+          f"{len(mod.BBVA_FEAT_FINALES)} columnas finales: {mod.BBVA_FEAT_FINALES}")
+    check("las intermedias NO llegan a la matriz",
+          not (set(mod.BBVA_INTERMEDIAS) & set(mod.BBVA_FEAT_FINALES)),
+          f"intermedias descartadas: {list(mod.BBVA_INTERMEDIAS)}")
+
+    # ── 12. Partición inexistente ───────────────────────────────────────────
+    print("\n12. Nombre de partición inválido")
     try:
         mod.aplicar_particion(df, "no_existe")
         check("una partición desconocida aborta", False, "no lanzó excepción")

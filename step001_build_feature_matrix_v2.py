@@ -2624,6 +2624,30 @@ UMBRAL_STALENESS_ENCAJE_DIAS = 10
 # porque el estadístico es una proporción y necesita denominador; además con
 # k hasta 12 la máscara h <= 21k cubre los 74 horizontes.
 # ─────────────────────────────────────────────────────────────────────────────
+# Columnas del bloque de encaje de BBVA (8b/8c)
+# ─────────────────────────────────────────────────────────────────────────────
+# BBVA_FEAT_COLS son las que se traen del Excel. BBVA_INTERMEDIAS son insumos de
+# proyección de capacidad_retiro_th: se calculan, se consumen y se descartan, así
+# que NO forman parte del esquema final.
+#
+# Están a nivel de módulo, y no dentro de build_feature_matrix, porque la
+# invariante que las relaciona es lo que mantiene alineadas las dos ramas del
+# bloque: la que hace el merge las crea y tira las intermedias; la que omite el
+# bloque no debe crear las intermedias. Si divergen, la matriz de un banco tiene
+# columnas que la de otro no y el ParquetWriter aborta al castear contra el
+# esquema del primero. Acá el checklist puede verificarlo.
+BBVA_FEAT_COLS = ["avance_mes_lag1", "exceso_abs_lag1", "exceso_dia_lag1",
+                  "encaje_ovn_lag1", "ratio_ovn_total_lag1",
+                  "encaje_diario_lag1", "ExigibleTotalMes_est_lag1",
+                  "EncajeAcumMes_lag1"]
+BBVA_INTERMEDIAS = ("encaje_diario_lag1", "ExigibleTotalMes_est_lag1",
+                    "EncajeAcumMes_lag1")
+
+# Lo que efectivamente llega a la matriz desde este bloque.
+BBVA_FEAT_FINALES = [c for c in BBVA_FEAT_COLS if c not in BBVA_INTERMEDIAS]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Destino de las features de encaje de BBVA (bloques 8 y 8b)
 # ─────────────────────────────────────────────────────────────────────────────
 # avance_mes_lag1, exceso_abs_lag1 y companhia describen la posicion de encaje de
@@ -3374,16 +3398,18 @@ def build_feature_matrix(
     # recibe_encaje_bbva lo resuelve destinos_encaje_bbva() en build_full_matrix.
     # bbva_encaje_feat está en días calendario con lag1 ya computado en aux_encaje_2.
     # merge_asof alinea al calendario hábil de cada entidad.
-    _bbva_feat_cols = ["avance_mes_lag1", "exceso_abs_lag1", "exceso_dia_lag1",
-                       "encaje_ovn_lag1", "ratio_ovn_total_lag1",
-                       "encaje_diario_lag1", "ExigibleTotalMes_est_lag1",
-                       "EncajeAcumMes_lag1"]
+    _bbva_feat_cols = BBVA_FEAT_COLS
     if bbva_encaje_feat is not None and not bbva_encaje_feat.empty \
             and not recibe_encaje_bbva:
         logger.info(f"  {banco}: features de encaje de {banco_encaje} OMITIDAS "
                     f"(política {POLITICA_ENCAJE_BBVA})")
+        # Solo las que sobreviven al bloque 8c en la otra rama. Crear también las
+        # intermedias dejaba a esta entidad con 3 columnas de más frente a las
+        # que sí pasan por 8c, y el cast contra el schema del primer banco
+        # fallaba con un mensaje de pyarrow que no dice cuáles sobran.
         for _c in _bbva_feat_cols:
-            df[_c] = np.nan
+            if _c not in BBVA_INTERMEDIAS:
+                df[_c] = np.nan
     elif bbva_encaje_feat is not None and not bbva_encaje_feat.empty:
         # Construir lookup: fecha_t_única → valor del Excel más reciente ≤ fecha_t.
         # merge_asof sobre fechas únicas evita ambigüedades con múltiples h por fecha.
@@ -3514,8 +3540,7 @@ def build_feature_matrix(
         # encaje_diario_lag1 y encaje_ovn_lag1 quedan también fuera —el
         # segundo ya estaba excluido antes de esta sesión— porque lo que
         # aportan a la matriz es capacidad_retiro_th, ya calculada.
-        df = df.drop(columns=["ExigibleTotalMes_est_lag1", "EncajeAcumMes_lag1",
-                              "encaje_diario_lag1", "_fecha_reportada_bbva"],
+        df = df.drop(columns=list(BBVA_INTERMEDIAS) + ["_fecha_reportada_bbva"],
                      errors="ignore")
 
     # Si no hubo archivo de encaje, o le faltaban las columnas necesarias, la
@@ -3992,7 +4017,27 @@ def build_full_matrix(
                 ruta_output, schema_ref, compression="snappy"
             )
 
-        # Alinear schema por si hay columnas con tipo diferente en algún banco
+        # Alinear schema por si hay columnas con tipo diferente en algún banco.
+        #
+        # El mensaje nativo de pyarrow para un desajuste de NOMBRES imprime las
+        # dos listas completas sin decir cuál es cuál ni qué difiere, y encima en
+        # el orden (tabla, objetivo), que es al revés de como se lee. Con 30
+        # columnas hay que diffear a ojo. Se compara antes y se reporta la
+        # diferencia en ambos sentidos.
+        if table.schema.names != schema_ref.names:
+            _falta = [c for c in schema_ref.names if c not in table.schema.names]
+            _sobra = [c for c in table.schema.names if c not in schema_ref.names]
+            _orden = (not _falta and not _sobra)
+            raise ValueError(
+                f"El esquema de '{banco}' no coincide con el del primer banco "
+                f"escrito ({lista_bancos_full[0]}).\n"
+                f"  Faltan en {banco}: {_falta or 'ninguna'}\n"
+                f"  Sobran en {banco}: {_sobra or 'ninguna'}\n"
+                + ("  Mismas columnas, distinto ORDEN.\n" if _orden else "")
+                + "  Toda entidad tiene que producir el mismo juego de columnas: "
+                  "las ramas condicionales de features (encaje, ccovn, partición) "
+                  "deben materializar en NaN lo que no aplica, y no crear los "
+                  "insumos intermedios que otra rama descarta.")
         table = table.cast(schema_ref)
         pq_writer.write_table(table)
         total_filas += len(df_banco_mat)
