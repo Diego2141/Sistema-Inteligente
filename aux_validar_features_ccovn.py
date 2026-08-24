@@ -38,18 +38,32 @@ DIR_OUTPUT.mkdir(parents=True, exist_ok=True)
 
 BANCO_REF = "SISTEMA"   # banco sobre el que se calcula (usa datos sistémicos)
 
+# Cada entrada es una lista de ALTERNATIVAS para el mismo concepto: primero el
+# nombre de v1, después el de v2. step001 v2 renombró las columnas CCOVN de
+# naming absoluto (ccovn_bbva_lag1) a relativo (ccovn_propio_lag1 /
+# ccovn_contraparte_lag1), así que los nombres de v1 no existen en una matriz
+# generada con v2. Se toma la primera alternativa que esté presente Y no sea
+# todo-NaN; si ninguna aparece, se avisa en vez de omitirla en silencio.
+#
+# Sobre la entidad SISTEMA, el equivalente de bbva_share_lag1 es
+# share_contraparte_lag1 (el FOCO sobre el total), NO share_propio_lag1: v2 anula
+# ese a NaN a propósito cuando la entidad es el sistema, porque ahí "propio" y
+# "sistema" son la misma serie y el share daría 1 constante.
+
 # Features a validar — se omiten automáticamente si no están en la matriz
 FEATURES_NUEVOS = [
-    "var_ccovn_bbva_exceso_lag1",
-    "ccovn_vs_dia_mes_lag1",
-    "residuo_ccovn_lag1",
+    ["var_ccovn_bbva_exceso_lag1", "var_ccovn_propio_exceso_lag1"],
+    ["ccovn_vs_dia_mes_lag1"],
+    ["residuo_ccovn_lag1"],
 ]
 
-# Features existentes de ccovn usados como base de comparación en ΔR²
+# Features existentes de ccovn usados como base de comparación en ΔR².
+# Que falte uno acá NO es cosmético: empobrece el baseline y por lo tanto
+# INFLA delta_r2_vs_base de todos los features nuevos.
 FEATURES_BASE_CCOVN = [
-    "ccovn_sistema_lag1",
-    "var_ccovn_sistema_lag1",
-    "bbva_share_lag1",
+    ["ccovn_sistema_lag1"],
+    ["var_ccovn_sistema_lag1"],
+    ["bbva_share_lag1", "share_contraparte_lag1"],
 ]
 
 H_BUCKETS = {
@@ -174,14 +188,51 @@ print(f"  Filas cargadas: {len(df_full):,}  |  h=[{df_full['h'].min()}..{df_full
       f"  |  fechas: {df_full['fecha_t'].min().date()} → {df_full['fecha_t'].max().date()}")
 
 # Filtrar features disponibles efectivamente en la matriz
-feats_disp = [f for f in FEATURES_NUEVOS if f in df_full.columns]
-feats_miss = [f for f in FEATURES_NUEVOS if f not in df_full.columns]
-base_disp  = [f for f in FEATURES_BASE_CCOVN if f in df_full.columns]
+def resolver_alternativas(grupos, df):
+    """Resuelve cada grupo de alternativas al primer nombre presente y utilizable.
+
+    Utilizable = está en la matriz y tiene al menos un valor no-NaN. La segunda
+    condición importa: v2 materializa en NaN las columnas que no aplican a una
+    entidad (share_propio_lag1 sobre SISTEMA, por ejemplo), así que "la columna
+    existe" no implica "la columna trae señal". Sin este filtro, una columna
+    todo-NaN entra al baseline como si aportara y el ΔR² queda igual de inflado
+    que si faltara, pero sin aviso.
+
+    Devuelve (resueltos, no_resueltos) donde no_resueltos lista los grupos
+    completos que no pudieron satisfacerse, para poder reportarlos.
+    """
+    resueltos, no_resueltos = [], []
+    for alts in grupos:
+        elegido = None
+        for nombre in alts:
+            if nombre in df.columns and df[nombre].notna().any():
+                elegido = nombre
+                break
+        if elegido is not None:
+            resueltos.append(elegido)
+        else:
+            no_resueltos.append(alts)
+    return resueltos, no_resueltos
+
+
+feats_disp, feats_miss = resolver_alternativas(FEATURES_NUEVOS, df_full)
+base_disp,  base_miss  = resolver_alternativas(FEATURES_BASE_CCOVN, df_full)
+
+def _fmt(alts):
+    return alts[0] if len(alts) == 1 else " | ".join(alts)
 
 if feats_miss:
-    print(f"\n  AVISO: features no encontrados en la matriz (¿regenerar parquet?):")
-    for f in feats_miss:
-        print(f"    · {f}")
+    print("\n  AVISO: features no encontrados en la matriz (¿regenerar parquet?):")
+    for alts in feats_miss:
+        print(f"    · {_fmt(alts)}")
+if base_miss:
+    # Antes esto se filtraba en silencio. Un baseline incompleto no rompe nada
+    # visible: solo hace que delta_r2_vs_base sobreestime el aporte de los
+    # features nuevos, y el número se lee igual de creíble.
+    print("\n  AVISO: features BASE no encontrados. delta_r2_vs_base se mide")
+    print("  contra un baseline INCOMPLETO y por lo tanto SOBREESTIMA el aporte:")
+    for alts in base_miss:
+        print(f"    · {_fmt(alts)}")
 if not feats_disp:
     raise SystemExit("  No hay features nuevos disponibles. Abortando.")
 
