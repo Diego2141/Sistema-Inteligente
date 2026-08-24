@@ -3485,7 +3485,7 @@ def build_feature_matrix(
             df["share_propio_lag1"] = np.nan
             df["var_ccovn_propio_exceso_lag1"] = np.nan
         logger.info(f"  {banco}: ccovn propio='{clave_p}' contraparte="
-                    f"'{clave_c or '—'}' ({len(_cols_traer)} cols traídas)")
+                    f"'{clave_c or '—'}' ({_sub.shape[1]} cols traídas)")
     else:
         for _c in _ccovn_cols_finales:
             df[_c] = np.nan

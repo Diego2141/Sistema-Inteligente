@@ -88,7 +88,39 @@ def _pivot_sintetico(n=600, semilla=0):
     return df
 
 
+def check_nombres_indefinidos():
+    """
+    Chequeo estático de nombres indefinidos sobre step001 v2.
+
+    Existe porque py_compile NO detecta esta clase de error: un refactor que
+    elimina una variable pero deja una referencia viva en una línea de log
+    compila perfecto y revienta con NameError recién a mitad de la corrida, con
+    varios minutos de carga de datos ya gastados. Ya pasó una vez, con
+    _cols_traer sobreviviendo en el logger después de extraer armar_sub_ccovn().
+
+    pyflakes sí lo ve. Si no está instalado se avisa en vez de fallar, para no
+    convertir una dependencia opcional en un bloqueo.
+    """
+    print("0. Nombres indefinidos en step001 v2 (estático)")
+    try:
+        import subprocess
+        r = subprocess.run([sys.executable, "-m", "pyflakes", str(RUTA_V2)],
+                           capture_output=True, text=True)
+    except Exception as e:
+        print(f"   pyflakes no disponible ({e}); se omite")
+        return
+    if "No module named" in (r.stderr or ""):
+        print("   pyflakes no instalado (pip install pyflakes); se omite")
+        return
+    indef = [l for l in r.stdout.splitlines() if "undefined name" in l]
+    check("sin nombres indefinidos", not indef,
+          "; ".join(l.split(":", 1)[-1].strip() for l in indef[:3]) if indef
+          else "py_compile no ve esta clase de error, por eso el chequeo aparte")
+
+
 def modo_sintetico():
+    check_nombres_indefinidos()
+    print()
     mod = _cargar_v2()
     df = _pivot_sintetico()
     bancos = sorted(BANCOS)
