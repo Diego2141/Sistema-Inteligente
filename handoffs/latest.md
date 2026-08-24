@@ -476,7 +476,42 @@ el más hondo del camino, y mezcla los dos regímenes de la muestra.
 
 ---
 
-## 10. Pendientes menores anotados
+## 10. Rutas de salida: decisiones abiertas
+
+**Cambio hecho al final de la sesión:** v2 escribía al MISMO archivo que v1
+(`matriz_features.parquet`), así que cada corrida de v2 pisaba la matriz sin
+partición y ~10 scripts aguas abajo levantaban una matriz distinta de la que
+esperaban, sin aviso. Ahora:
+
+| Script | Escribe a |
+|---|---|
+| `step001_build_feature_matrix.py` (v1) | `matriz_features.parquet` |
+| `step001_build_feature_matrix_v2.py` | `matriz_features_particiones.parquet` |
+
+**Dos cosas quedaron sin resolver, a decidir por el usuario:**
+
+1. **`matriz_features.parquet` está contaminado.** La última corrida de v2, hecha
+   antes del cambio de nombre, lo sobrescribió con la matriz CON particiones. Si
+   `step005` lo lee hoy, levanta esa y no la de v1. Para dejarlo consistente hay
+   que correr v1 una vez y que reescriba su archivo:
+   `runfile('step001_build_feature_matrix.py')`.
+
+2. **`step005_walk_forward_cv_4.py:61` sigue apuntando a `matriz_features.parquet`**
+   (`RUTA_MATRIZ`). Para entrenar sobre las particiones hay que cambiar esa
+   constante **además de** `BANCO` (línea 64). No se tocó porque no estaba
+   decidido si step005 debe entrenar sobre particiones ya o seguir con el
+   agregado.
+
+**Residual del mismo tipo, sin resolver:** correr v2 con
+`particion_activa="globales"` pisa el resultado de `"bbva"`, porque las dos
+escriben al mismo archivo nuevo. Si se van a comparar las dos particiones, hay
+que hacer que el nombre incorpore la partición activa
+(`matriz_features_particiones_bbva.parquet`, etc.). Es un cambio de una línea en
+`PARAMS`, no se hizo por no anticipar la necesidad.
+
+---
+
+## 11. Pendientes menores anotados
 
 - `BONY` y `FEDERAL` no existen en `Saldos_CCOVN.xlsx`. Degradan a NaN, que es
   correcto: no son globales y el resto se calcula por diferencia. Documentado,
