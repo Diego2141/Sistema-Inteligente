@@ -299,12 +299,20 @@ def modo_matriz(ruta):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    g = ap.add_mutually_exclusive_group(required=True)
+    # required=False a propósito: desde Spyder se corre con runfile() sin
+    # argumentos, y un parser que aborta ahí obliga a editar el archivo o a
+    # pasar por la consola. Sin argumentos cae al autotest sintético, que es el
+    # modo que no necesita datos y por lo tanto el sensato por defecto.
+    g = ap.add_mutually_exclusive_group(required=False)
     g.add_argument("--sintetico", action="store_true",
                    help="autotest sobre series construidas (no necesita datos)")
     g.add_argument("--matriz", metavar="RUTA",
                    help="valida una matriz de features ya construida")
     a = ap.parse_args()
+    if not a.sintetico and not a.matriz:
+        a.sintetico = True
+        print("(sin argumentos: corriendo el autotest sintético; "
+              "para validar una matriz usar --matriz RUTA)\n")
 
     print("=" * 74)
     print("CHECKLIST — ventana deslizante de rezagos, familia *_pos")
