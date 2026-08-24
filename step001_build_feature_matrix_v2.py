@@ -221,6 +221,12 @@ FEATURES_EXCLUIR = [
     # TASA_REF_BCRP se excluye esta sesión: plana en gain, perm y SHAP en
     # las 5 corridas de convergencia (q01/q05/q50/q95/q99) — sin señal en
     # ninguna de las tres métricas, en ningún cuantil. A diferencia de la
+    # frec_flujo_pos: excluida en revision de features. No estaba en la lista
+    # —ni comentada—, asi que seguia entrando a la matriz. Ojo con la convencion
+    # de este archivo: una entrada COMENTADA significa feature ACTIVA (no se la
+    # excluye), o sea que comentarla para "sacarla" hace lo contrario.
+    "frec_flujo_pos",
+
     # familia *_pos (SHAP alto, perm bajo por redundancia entre features
     # correlacionadas), acá no hay ni SHAP que la respalde.
     "TASA_REF_BCRP",
@@ -2330,6 +2336,50 @@ UMBRAL_STALENESS_ENCAJE_DIAS = 10
 # Rezagos y ventana del umbral para el feature de RECURRENCIA. Son 12 y no 4
 # porque el estadístico es una proporción y necesita denominador; además con
 # k hasta 12 la máscara h <= 21k cubre los 74 horizontes.
+# ─────────────────────────────────────────────────────────────────────────────
+# Destino de las features de encaje de BBVA (bloques 8 y 8b)
+# ─────────────────────────────────────────────────────────────────────────────
+# avance_mes_lag1, exceso_abs_lag1 y companhia describen la posicion de encaje de
+# UN banco. v1 las repartia a todas las entidades con el argumento de que BBVA es
+# el driver sistemico, lo cual es defendible para SISTEMA pero deja de serlo con
+# particiones activas:
+#
+#   FOCO_BBVA       exacto, el grupo ES BBVA
+#   SISTEMA         aproximado pero razonable, BBVA es ~94% del neto al cierre
+#   RESTO_BBVA      incorrecto, describe un banco que NO esta en el grupo
+#   FOCO_GLOBALES   enganhoso, atribuye el encaje de uno a un grupo de cinco
+#
+#   "exacto"             solo banco_encaje y los grupos cuya composicion es
+#                        exactamente {banco_encaje}
+#   "exacto_y_sistema"   lo anterior mas SISTEMA (por defecto: cumple lo pedido
+#                        para los grupos sin cambiar en silencio el modelo de
+#                        SISTEMA, que es el que corre hoy)
+#   "todos"              comportamiento de v1
+POLITICA_ENCAJE_BBVA = "exacto_y_sistema"
+
+
+def destinos_encaje_bbva(lista_bancos_full, banco_encaje, reporte_particion,
+                         nombre_sistema="SISTEMA", politica=None):
+    """Nombres de entidad que reciben las features de encaje de banco_encaje."""
+    politica = politica or POLITICA_ENCAJE_BBVA
+    if politica == "todos":
+        return set(lista_bancos_full)
+
+    destinos = {banco_encaje}
+    if politica == "exacto_y_sistema":
+        destinos.add(nombre_sistema)
+
+    if reporte_particion and reporte_particion.get("activa"):
+        # Solo si el grupo es EXACTAMENTE el banco de encaje. "Contiene" no
+        # alcanza: FOCO_GLOBALES contiene a BBVA y aun asi atribuirle su encaje
+        # seria inventar un dato para los otros cuatro bancos del grupo.
+        for lado in ("foco", "resto"):
+            miembros = reporte_particion.get(f"bancos_{lado}", [])
+            if set(miembros) == {banco_encaje}:
+                destinos.add(reporte_particion[f"nombre_{lado}"])
+    return destinos & set(lista_bancos_full)
+
+
 LAGS_FRECUENCIA_MES = list(range(1, 13))
 VENTANA_UMBRAL_FREC = 250
 
@@ -2648,6 +2698,7 @@ def build_feature_matrix(
     encaje_features=None,        # pd.DataFrame(index=fecha_t) con features de encaje (BBVA)
     banco_encaje="BBVA",         # banco al que aplican esas features
     bancos_con_encaje=None,      # v2: nombres que reciben las features de encaje
+    recibe_encaje_bbva=True,     # v2: si esta entidad recibe el bloque 8b
     bbva_encaje_feat=None,       # pd.DataFrame(index=fecha_t) avance/exceso desde aux_encaje_2
     ccovn_features=None,         # pd.DataFrame(index=fecha_t) con saldos CC+OVN para todos los bancos
     dias_no_habiles_adicionales=None,  # lista de Timestamps (auto-detectados + manual PARAMS)
@@ -3026,17 +3077,25 @@ def build_feature_matrix(
             for col in encaje_features.columns:
                 df[col] = np.nan
 
-    # ── 8b. Features de avance/exceso encaje BBVA (todos los bancos) ───────────
-    # BBVA es el principal driver del movimiento sistémico en ME; sus features
-    # de encaje son señales sistémicas relevantes para SISTEMA y cualquier otro
-    # banco modelado. Se aplican a todas las entidades sin restricción.
+    # ── 8b. Features de avance/exceso encaje BBVA ─────────────────────────────
+    # v1 las aplicaba a TODAS las entidades. v2 las restringe segun
+    # POLITICA_ENCAJE_BBVA: describen la posicion de encaje de un solo banco, y
+    # con particiones activas repartirlas a un grupo que no lo contiene (o que lo
+    # contiene junto a otros cuatro) es atribuir un dato que no corresponde.
+    # recibe_encaje_bbva lo resuelve destinos_encaje_bbva() en build_full_matrix.
     # bbva_encaje_feat está en días calendario con lag1 ya computado en aux_encaje_2.
     # merge_asof alinea al calendario hábil de cada entidad.
     _bbva_feat_cols = ["avance_mes_lag1", "exceso_abs_lag1", "exceso_dia_lag1",
                        "encaje_ovn_lag1", "ratio_ovn_total_lag1",
                        "encaje_diario_lag1", "ExigibleTotalMes_est_lag1",
                        "EncajeAcumMes_lag1"]
-    if bbva_encaje_feat is not None and not bbva_encaje_feat.empty:
+    if bbva_encaje_feat is not None and not bbva_encaje_feat.empty \
+            and not recibe_encaje_bbva:
+        logger.info(f"  {banco}: features de encaje de {banco_encaje} OMITIDAS "
+                    f"(política {POLITICA_ENCAJE_BBVA})")
+        for _c in _bbva_feat_cols:
+            df[_c] = np.nan
+    elif bbva_encaje_feat is not None and not bbva_encaje_feat.empty:
         # Construir lookup: fecha_t_única → valor del Excel más reciente ≤ fecha_t.
         # merge_asof sobre fechas únicas evita ambigüedades con múltiples h por fecha.
         _ft_norm = pd.to_datetime(df["fecha_t"]).dt.normalize()
@@ -3492,14 +3551,15 @@ def build_full_matrix(
     # nombres, porque el grupo se llama FOCO_* y nunca va a coincidir por texto
     # con "BBVA". Sin esto, el modelo del foco corre sin encaje y la comparación
     # contra el modelo de BBVA mide la falta de features, no la partición.
-    _bancos_con_encaje = {banco_encaje}
-    if reporte_particion and reporte_particion.get("activa"):
-        if banco_encaje in reporte_particion.get("bancos_foco", []):
-            _bancos_con_encaje.add(reporte_particion["nombre_foco"])
-        elif banco_encaje in reporte_particion.get("bancos_resto", []):
-            _bancos_con_encaje.add(reporte_particion["nombre_resto"])
-        logger.info(f"  Features de encaje ({banco_encaje}) para: "
-                    f"{sorted(_bancos_con_encaje)}")
+    # Una sola regla para los dos bloques de encaje. La primera version usaba
+    # "el grupo CONTIENE a banco_encaje", que le daba las features a
+    # FOCO_GLOBALES: cinco bancos recibiendo la posicion de encaje de uno solo.
+    # destinos_encaje_bbva() exige composicion EXACTA.
+    _bancos_con_encaje = destinos_encaje_bbva(
+        lista_bancos_full, banco_encaje, reporte_particion, NOMBRE_SISTEMA)
+    _destinos_enc_bbva = _bancos_con_encaje
+    logger.info(f"  Encaje de {banco_encaje} -> {sorted(_bancos_con_encaje)} "
+                f"(politica {POLITICA_ENCAJE_BBVA})")
     df_encaje = load_encaje_data(params)
     encaje_feat = build_encaje_features(df_encaje, peru_bday)
 
@@ -3563,6 +3623,7 @@ def build_full_matrix(
             encaje_features=encaje_feat,    # features de encaje (solo aplican a banco_encaje)
             banco_encaje=banco_encaje,
             bancos_con_encaje=_bancos_con_encaje,
+            recibe_encaje_bbva=(banco in _destinos_enc_bbva),
             bbva_encaje_feat=bbva_encaje_feat,  # avance/exceso desde aux_encaje_2 (días calendario)
             ccovn_features=ccovn_feat,      # saldos CC+OVN en BCR (aplican a todos los bancos)
             dias_no_habiles_adicionales=sorted(_dias_extra_set) if _dias_extra_set else None,
