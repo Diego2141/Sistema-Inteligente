@@ -94,8 +94,40 @@ Copia de v1 más:
 Detecta grupos en la matriz, una hoja por grupo, más `CONCILIACION`
 (SISTEMA vs FOCO+RESTO por fecha y h), `RESUMEN_ANUAL`, `RESUMEN_GRUPOS`.
 
+### `step005_walk_forward_cv_4.py` — **el entrenamiento XGBoost por horizonte**
+Es el consumidor principal de la matriz: un modelo por horizonte, walk-forward
+CV, y de acá salen los heatmaps de importancia por permutación en bloque
+(`Block PERM (VAL/OOS)`) que guiaron todas las decisiones de features de esta
+sesión.
+
+**Editado en esta sesión** (único cambio): `FAMILIAS_PERM` (línea ~224).
+v2 renombró las columnas CCOVN de naming absoluto (`ccovn_bbva_lag1`) a relativo
+(`ccovn_propio_lag1` / `ccovn_contraparte_lag1`), así que la familia `ccovn_bcr`
+se encogía **de 4 columnas a 2** y las tres nuevas no aparecían en ningún
+heatmap. Degradación silenciosa: la nota de la línea 222 dice que los nombres
+que no coinciden *"se ignoran en tiempo de ejecución, no truenan la corrida"*.
+Ahora la familia lista los nombres de v1 **y** de v2 (9 columnas); los ausentes
+se ignoran, así que sirve contra matrices de cualquiera de las dos versiones.
+
+**Sin resolver:** `BANCO = "SISTEMA"` (línea 64) es una constante. Para entrenar
+`FOCO_BBVA` y `RESTO_BBVA` hay que cambiarla y correr una vez por entidad, o
+parametrizarla. Sin eso, la partición produce las filas en la matriz pero nadie
+las entrena.
+
+### `aux_fanchart_cv4_direct.py` — fan charts
+`BANCO = "SISTEMA"` (línea 111), misma limitación que step005.
+
+**Bug confirmado en el código, no arreglado** — ver §8.
+
 ### `onepager_encaje.html`, `diccionario_features.html`
 Fuentes de los dos artifacts publicados, subidas al repo.
+
+### Consumidores NO revisados en esta sesión
+`step004_train_xgboost_qt*.py`, `step006_simulacion_paths_v2.py`,
+`step006_cqr_calibration.py`, `step007_overlay_sobreencaje.py` y los demás
+`aux_*`. **Ninguno se verificó contra el esquema de v2.** El renombre de CCOVN
+y la exclusión de `frec_flujo_pos` pueden afectarlos igual que a step005.
+Comando para auditarlos antes de usarlos está en §7.
 
 ---
 
@@ -217,6 +249,19 @@ La hoja `CONCILIACION` es el check que decide todo: `SISTEMA == FOCO + RESTO`
 en el target, fila por fila. Si no cierra, los dos modelos no están partiendo el
 mismo objeto que el agregado y compararlos no significa nada.
 
+**Recién después de eso**, entrenar con `step005_walk_forward_cv_4.py`. Ahí hay
+que decidir algo que no está resuelto: `BANCO = "SISTEMA"` (línea 64) es una
+constante, así que para entrenar `FOCO_BBVA` y `RESTO_BBVA` hay que correrlo una
+vez por entidad cambiando esa línea, o parametrizarla. La partición ya produce
+las filas en la matriz, pero sin ese cambio nadie las entrena.
+
+Lo primero a mirar en el heatmap de la corrida nueva: **si el decaimiento en `h`
+de la familia `*_pos` se aplanó**. Es la pregunta que la ventana deslizante
+existe para responder: si se aplana, el decaimiento anterior era artefacto de
+quedarse sin observaciones; si persiste, era señal real y conviene gastar el
+presupuesto de columnas en features de intervalo en vez de en más miembros de
+esa familia.
+
 ---
 
 ## 7. Comandos verificados en esta sesión
@@ -234,6 +279,12 @@ python aux_verificar_particion.py  --matriz "1. Data/Clean/matriz_features.parqu
 # Chequeo estático — 0 undefined en ambos
 python -m pyflakes step001_build_feature_matrix.py
 python -m pyflakes step001_build_feature_matrix_v2.py
+python -m pyflakes step005_walk_forward_cv_4.py
+
+# Auditar qué consumidores aguas abajo referencian columnas que v2 ya no
+# produce. Sirve para step004/006/007 y los aux_*, que NO se revisaron.
+grep -rn "ccovn_bbva_lag1\|var_ccovn_bbva_lag1\|bbva_share_lag1\|frec_flujo_pos" \
+     step0*.py aux_*.py
 
 # Dependencias que hubo que instalar
 pip install pyflakes openpyxl
@@ -254,12 +305,34 @@ aportan). No solo daría un intervalo demasiado ancho: iría en dirección
 contraria al mecanismo que motiva la partición. Hay que simular trayectorias
 conjuntas, sumarlas trayectoria por trayectoria, y recién ahí tomar cuantiles.
 
-**El mismo error, ya detectado en el panel 3 del fan chart.** La mediana
-acumulada deriva a −6.500 mientras el realizado termina cerca de 0. Si ese panel
-acumula los cuantiles diarios, tiene dos errores compuestos: suma de medianas ≠
-mediana de la suma (centro sesgado) y suma de cuantiles ≠ cuantil de la suma
-(banda demasiado ancha). **Verificar antes de construir el MCO encima**, porque
-el MCO hereda la deriva completa.
+**El mismo error ya está EN EL CÓDIGO, confirmado.**
+`aux_fanchart_cv4_direct.py:339-345`:
+
+```python
+cum_q01 = np.cumsum(res["q01"].values / 1e6)
+cum_q50 = np.cumsum(res["q50"].values / 1e6)
+cum_q40 = np.cumsum(res["q40"].values / 1e6)   # ... idem q60, q95, q99
+```
+
+El panel 3 acumula **cada trayectoria de cuantil por separado**. Dos errores
+compuestos:
+
+1. `cumsum(q50)` = suma de medianas ≠ mediana de la suma. Con una distribución
+   asimétrica la mediana diaria es levemente negativa aunque la media sea cero,
+   y ese sesgo se multiplica por 75. **Es la deriva a −6.500 observada** mientras
+   el realizado acumulado termina cerca de 0.
+2. `cumsum(q40)`/`cumsum(q60)` suponen que TODOS los días salen en el mismo
+   percentil — probabilidad ~nula sobre 75 días. La banda es mucho más ancha que
+   el intervalo verdadero del acumulado.
+
+No se puede arreglar desde los cuantiles marginales: hacen falta trayectorias.
+Tres opciones, en orden de esfuerzo: (a) reetiquetar el panel como banda
+comonotónica y advertir que sobreestima, (b) quitar las bandas acumuladas y
+dejar solo el realizado, (c) alimentarlo desde `step006_simulacion_paths_v2.py`,
+que ya existe en el repo y es la fuente correcta.
+
+**Crítico para el producto:** el MCO es un máximo sobre el camino acumulado, así
+que hereda la deriva entera. **Resolver esto antes de construir el MCO encima.**
 
 **No crear una familia paralela de features para comparar contra la original.**
 Dos columnas correlacionadas se reparten la importancia en permutación y las dos

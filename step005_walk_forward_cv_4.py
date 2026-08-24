@@ -226,9 +226,22 @@ FAMILIAS_PERM: dict[str, list[str]] = {
                           "dias_al_cierre_trim"],
     "pos_extremos":      ["esc_neto_min_pos", "esc_neto_max_pos", "esc_retiro_pos",
                           "esc_deposito_pos_ap", "esc_neto_max_pos_ap"],
+    # frec_flujo_pos quedó excluida en la revisión de features de step001 v2;
+    # se deja listada porque un nombre ausente se ignora y así la familia sigue
+    # siendo válida contra matrices viejas.
     "pos_acumulado":     ["acum_neto_min_pos", "acum_neto_max_pos", "frec_flujo_pos"],
-    "ccovn_bcr":         ["ccovn_sistema_lag1", "ccovn_bbva_lag1",
-                          "var_ccovn_sistema_lag1", "var_ccovn_bbva_lag1"],
+    # Convive el naming de v1 (absoluto: *_bbva_*) con el de v2 (relativo:
+    # *_propio_* / *_contraparte_*). step001 v2 resuelve por entidad cuál es el
+    # saldo PROPIO y cuál el de la CONTRAPARTE del otro lado de la partición, así
+    # que ccovn_bbva_lag1 ya no existe en esas matrices. Sin las nuevas, esta
+    # familia se encogía de 4 columnas a 2 y las tres nuevas no aparecían en
+    # ningún heatmap — degradación silenciosa, porque los nombres que no
+    # coinciden se ignoran sin avisar (ver nota de arriba).
+    "ccovn_bcr":         ["ccovn_sistema_lag1", "var_ccovn_sistema_lag1",
+                          "ccovn_bbva_lag1", "var_ccovn_bbva_lag1",
+                          "ccovn_propio_lag1", "var_ccovn_propio_lag1",
+                          "ccovn_contraparte_lag1", "var_ccovn_contraparte_lag1",
+                          "share_contraparte_lag1"],
     "flujo_crudo":       ["sigma_flujo_ratio", "ma_flujo_5d", "ma_flujo_20d", "R_conf_t2"],
     "encaje_bbva":       ["avance_mes_lag1", "exceso_abs_lag1"],
 }
