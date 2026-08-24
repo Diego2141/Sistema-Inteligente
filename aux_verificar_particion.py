@@ -281,8 +281,78 @@ def modo_sintetico():
     check("sin partición: _sub igual queda sin duplicados",
           not sub0.columns.duplicated().any() and "ccovn_sistema_lag1" in sub0.columns)
 
-    # ── 10. Partición inexistente ───────────────────────────────────────────
-    print("\n10. Nombre de partición inválido")
+    # ── 10. Mapeo CCOVN contra los headers REALES del archivo ───────────────
+    # Los 86 headers de Saldos_CCOVN.xlsx, copiados del log de una corrida real.
+    # Es lo que faltaba: la versión anterior contaba cuántos bancos emparejaban
+    # pero no VERIFICABA contra qué, así que CREDITO apuntando a una cooperativa
+    # contaba como éxito y la cobertura del 86% se veía perfectamente sana.
+    print("\n10. Mapeo CCOVN contra los headers reales de Saldos_CCOVN.xlsx")
+    COLS_CCOVN = [
+        'BCP', 'INTERBANK', 'CITIBANK', 'SCOTIABANK', 'BBVA', 'BANCO DE LA NACIÓN',
+        'BANCO DE COMERCIO', 'BANCO FINANCIERO', 'BANCO PICHINCHA', 'BANBIF',
+        'BCO. TRABAJO', 'CREDISCOTIA', 'FINANCIERA SANTANDER CONSUMER',
+        'SANTANDER CONSUMER BANK', 'MIBANCO', 'AGROBANCO', 'FONDO MI VIVIENDA',
+        'BANCO GNB', 'HSBC', 'BANCO FALABELLA', 'BANCO RIPLEY', 'BANCO SANTANDER',
+        'DEUTSCHE', 'BANCO ALFIN', 'BANCO AZTECA', 'BANCO CENCOSUD', 'CAT PERÚ',
+        'CRAC CENCOSUD SCOTIA PERÚ', 'ICBC PERU BANK', 'J.P. MORGAN',
+        'BANK OF CHINA (PERÚ)', 'BANCO BCI PERÚ', 'COFIDE', 'CREDINKA',
+        'SANTANDER FINANCIAMIENTOS', 'FINANCIERA TFC', 'FINANCIERA EDYFICAR',
+        'BCO. COMPARTAMOS', 'FIN. CRED. AREQUIPA', 'FINANCIERA COMPARTAMOS',
+        'FIN. CONFIANZA', 'FINANCIERA QAPAQ', 'FINANCIERA OH!', 'InFinance XP',
+        'AMERIKA FINANCIERA', 'FINANCIERA EFECTIVA', 'MAF PERÚ',
+        'FINANCIERA PROEMPRESA', 'FINANCIERA CONFIANZA', 'FONDO BCRP', 'F.S.D.',
+        'FONDO DE SEGURO DE DEPOSITOS COOPER', 'CAVALI', 'MEF',
+        'CAJA METROPOLITANA', 'CAJA PIURA', 'CAJA TRUJILLO', 'CAJA AREQUIPA',
+        'CAJA SULLANA', 'CAJA CUSCO', 'CAJA DEL SANTA', 'CAJA HUANCAYO',
+        'CAJA ICA', 'CAJA PAITA', 'CAJA MAYNAS', 'CMAC PISCO', 'CAJA TACNA',
+        'CRAC SEÑOR DE LUREN', 'CRAC QUILLABAMBA', 'CAJA RAÍZ',
+        'CRAC NUESTRA GENTE', 'CRAC PROFINANZAS SAA', 'CRAC LOS LIB. DE AYA',
+        'CAJA SIPAN', 'CRAC CAJAMARCA', 'CAJA LOS ANDES', 'CAJA PRYMERA',
+        'CAJA INCASUR', 'CAJA CENTRO', 'COOPERATIVA DE AHORRO Y CREDITO ABA',
+        'COOPERATIVA DE AHORRO Y CREDITO PAC', 'TARJETAS PERUANAS PREPAGO S.A',
+        'GMONEY S.A',
+    ]
+    BANCOS_REALES = ['AZTECA', 'BBVA', 'BCI', 'BIF', 'BKCHPE', 'BONY', 'CITIBANK',
+                     'COFIDE', 'COMERCIO', 'CREDITO', 'DEUTSCHE', 'FEDERAL',
+                     'FINANCIERO', 'GNB', 'HSBC', 'ICBC', 'INTERBANK', 'JPMORGAN',
+                     'MIBANCO', 'NACION', 'PICHINCHA', 'SANTANDER', 'SCOTIABANK']
+    # Los diez globales: los únicos que pueden componer un FOCO, confirmados
+    # contra el archivo. Su mapeo tiene que ser exacto, no aproximado.
+    ESPERADO_GLOBALES = {
+        "BBVA": "BBVA", "CITIBANK": "CITIBANK", "SCOTIABANK": "SCOTIABANK",
+        "SANTANDER": "BANCO SANTANDER", "HSBC": "HSBC", "DEUTSCHE": "DEUTSCHE",
+        "JPMORGAN": "J.P. MORGAN", "BKCHPE": "BANK OF CHINA (PERÚ)",
+        "ICBC": "ICBC PERU BANK", "BCI": "BANCO BCI PERÚ",
+    }
+
+    mapeo = mod._mapear_bancos_ccovn(COLS_CCOVN, BANCOS_REALES)
+    for b, esperado in sorted(ESPERADO_GLOBALES.items()):
+        check(f"global {b} -> {esperado!r}", mapeo.get(b) == esperado,
+              f"obtenido {mapeo.get(b)!r}")
+    check("CREDITO -> 'BCP' (no a una cooperativa)", mapeo.get("CREDITO") == "BCP",
+          f"obtenido {mapeo.get('CREDITO')!r}")
+
+    # Guarda de categorías: ningún banco puede apuntar a una caja, cooperativa,
+    # financiera o fondo. Es la regla que convierte el falso positivo en NaN.
+    malos = {b: c for b, c in mapeo.items() if c and
+             any(k in mod._normalizar_banco(c) for k in mod.CCOVN_NO_BANCOS)}
+    check("ningún banco apunta a caja/cooperativa/financiera/fondo", not malos,
+          str(malos) if malos else "la guarda CCOVN_NO_BANCOS lo impide")
+
+    # BONY y FEDERAL no existen en el archivo: NaN explícito es lo correcto.
+    for b in ("BONY", "FEDERAL"):
+        check(f"{b} sin match (no está en el archivo)", mapeo.get(b) is None,
+              f"obtenido {mapeo.get(b)!r}")
+
+    # Y los tres faltantes no importan para las particiones definidas, porque
+    # ninguno es global y el resto se calcula por diferencia.
+    sin_match = {b for b, c in mapeo.items() if c is None}
+    check("ningún faltante es un banco global",
+          not (sin_match & set(ESPERADO_GLOBALES)),
+          f"faltantes = {sorted(sin_match)}, ninguno compone un FOCO")
+
+    # ── 11. Partición inexistente ───────────────────────────────────────────
+    print("\n11. Nombre de partición inválido")
     try:
         mod.aplicar_particion(df, "no_existe")
         check("una partición desconocida aborta", False, "no lanzó excepción")

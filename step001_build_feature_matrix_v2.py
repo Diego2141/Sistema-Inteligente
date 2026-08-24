@@ -988,6 +988,45 @@ def columnas_derivadas(reporte_particion, nombre_sistema="SISTEMA"):
 # ─────────────────────────────────────────────────────────────────────────────
 # CCOVN por partición (v2)
 # ─────────────────────────────────────────────────────────────────────────────
+# Emparejamiento canónico (Transacciones_BancaLocal) -> columna de
+# Saldos_CCOVN.xlsx, para los casos que la coincidencia por subcadena no puede
+# resolver. Confirmado contra el archivo real.
+#
+# Por qué hace falta una tabla y no alcanza la subcadena:
+#   CREDITO -> "BCP"                   no comparten ninguna subcadena, y la
+#                                      subcadena bidireccional se agarraba de
+#                                      "COOPERATIVA DE AHORRO Y CREDITO ABA",
+#                                      o sea el banco más grande del resto
+#                                      apuntando al saldo de una cooperativa
+#   BKCHPE  -> "BANK OF CHINA (PERÚ)"  el canónico es una abreviatura
+#   JPMORGAN-> "J.P. MORGAN"           los puntos se normalizan, pero se deja
+#                                      explícito por claridad
+#
+# Se listan los 10 bancos globales completos aunque algunos ya emparejaran
+# solos: son los únicos que pueden componer un FOCO, así que su mapeo tiene que
+# ser exacto y auditable de una mirada, no depender de que la heurística acierte.
+ALIAS_CCOVN = {
+    "BBVA":       "BBVA",
+    "CITIBANK":   "CITIBANK",
+    "SCOTIABANK": "SCOTIABANK",
+    "SANTANDER":  "BANCO SANTANDER",
+    "HSBC":       "HSBC",
+    "DEUTSCHE":   "DEUTSCHE",
+    "JPMORGAN":   "J.P. MORGAN",
+    "BKCHPE":     "BANK OF CHINA (PERÚ)",
+    "ICBC":       "ICBC PERU BANK",
+    "BCI":        "BANCO BCI PERÚ",
+    "CREDITO":    "BCP",
+}
+
+# Categorías que NUNCA son un banco de Transacciones_BancaLocal. Un canónico de
+# banco que cae en una de estas es un falso positivo de la subcadena, no un
+# match: es lo que pasó con CREDITO -> COOPERATIVA DE AHORRO Y CREDITO ABA.
+# Mejor NaN visible que un número plausible y equivocado.
+CCOVN_NO_BANCOS = ("COOPERATIVA", "CAJA", "CRAC", "CMAC", "FONDO", "FINANCIERA",
+                   "FSD", "CAVALI", "MEF", "AGROBANCO", "TARJETAS")
+
+
 def _mapear_bancos_ccovn(cols_ccovn, bancos_canonicos):
     """
     Empareja cada banco CANÓNICO (nombres que salen de Transacciones_BancaLocal,
@@ -1004,15 +1043,39 @@ def _mapear_bancos_ccovn(cols_ccovn, bancos_canonicos):
     silencioso, porque el llamador reporta los faltantes.
     """
     normal_cols = {c: _normalizar_banco(c) for c in cols_ccovn}
-    mapeo = {}
+    por_normal = {}
+    for c, nc in normal_cols.items():
+        por_normal.setdefault(nc, c)
+
+    mapeo, via = {}, {}
     for b in bancos_canonicos:
         nb = _normalizar_banco(b)
-        candidatos = [c for c, nc in normal_cols.items() if nb in nc or nc in nb]
+
+        # 1) Tabla explícita. Tiene prioridad sobre la heurística siempre: es el
+        #    dato confirmado contra el archivo, no una inferencia.
+        alias = ALIAS_CCOVN.get(b)
+        if alias is not None:
+            col = por_normal.get(_normalizar_banco(alias))
+            if col is not None:
+                mapeo[b], via[b] = col, "alias"
+                continue
+            logger.warning(f"  CCOVN: el alias {b} -> {alias!r} no existe en el "
+                           f"archivo. Revisar ALIAS_CCOVN contra los headers.")
+
+        # 2) Subcadena bidireccional, descartando las categorías que no son
+        #    bancos. Sin ese filtro la heurística prefiere una coincidencia
+        #    espuria antes que NaN, que es peor porque no se ve.
+        candidatos = [c for c, nc in normal_cols.items()
+                      if (nb in nc or nc in nb)
+                      and not any(k in nc for k in CCOVN_NO_BANCOS)]
         if len(candidatos) > 1:
-            # Ambigüedad (varias columnas contienen la clave): la más corta es
-            # la menos probable candidata a coincidencia espuria por casualidad.
+            # La más corta es la menos probable candidata a coincidencia espuria.
             candidatos.sort(key=len)
         mapeo[b] = candidatos[0] if candidatos else None
+        via[b] = "subcadena" if candidatos else "sin match"
+
+    _det = ", ".join(f"{b}->{mapeo[b] or 'NaN'}[{via[b][:3]}]" for b in bancos_canonicos)
+    logger.info(f"  CCOVN mapeo completo: {_det}")
     return mapeo
 
 
@@ -1053,18 +1116,47 @@ def armar_ccovn_ancho(df_ccovn_raw, bancos_canonicos, reporte_particion):
                        f"resto de la partición activa, subestiman esa suma.")
 
     if reporte_particion and reporte_particion.get("activa"):
+        # RESTO POR DIFERENCIA, no por suma de emparejados.
+        #
+        # Solo los bancos globales pueden componer un FOCO, y son diez con
+        # columna conocida en el archivo (ver ALIAS_CCOVN). El resto no hace
+        # falta emparejarlo uno por uno: 'sistema' ya es la suma de TODAS las
+        # columnas del Excel sin depender del matching, así que
+        #
+        #     resto = sistema - foco
+        #
+        # es exacto siempre que foco lo sea, y no arrastra el error de ningún
+        # banco del resto que no empareje. Sumar los emparejados del resto, en
+        # cambio, silenciosamente omitía a cualquiera sin columna y —peor—
+        # incorporaba los falsos positivos de la subcadena.
+        #
+        # Contrapartida a tener presente: 'sistema' cubre las 86 entidades del
+        # CCOVN (cajas, cooperativas, financieras, fondos), un universo más
+        # amplio que los bancos de Transacciones_BancaLocal. Entonces 'resto' es
+        # "todo lo que no es el foco" y no "los N bancos del lado resto". Es la
+        # misma definición amplia que ccovn_sistema_lag1 ya tenía en v1, así que
+        # las participaciones quedan internamente consistentes.
         f_bancos = reporte_particion["bancos_foco"]
-        r_bancos = reporte_particion["bancos_resto"]
         cols_f = [mapeo[b] for b in f_bancos if mapeo.get(b) is not None]
-        cols_r = [mapeo[b] for b in r_bancos if mapeo.get(b) is not None]
+        faltan_f = [b for b in f_bancos if mapeo.get(b) is None]
+
         ancho["foco"]  = df_ccovn_raw[cols_f].sum(axis=1) if cols_f else np.nan
-        ancho["resto"] = df_ccovn_raw[cols_r].sum(axis=1) if cols_r else np.nan
+        ancho["resto"] = ancho["sistema"] - ancho["foco"]
+
         cob_f = len(cols_f) / max(len(f_bancos), 1)
-        cob_r = len(cols_r) / max(len(r_bancos), 1)
-        reporte["cobertura_foco"], reporte["cobertura_resto"] = cob_f, cob_r
-        logger.info(f"  CCOVN partición '{reporte_particion['activa']}': "
-                    f"cobertura foco {cob_f:.0%} ({len(cols_f)}/{len(f_bancos)}), "
-                    f"resto {cob_r:.0%} ({len(cols_r)}/{len(r_bancos)})")
+        reporte["cobertura_foco"] = cob_f
+        reporte["foco_sin_match"] = faltan_f
+        logger.info(f"  CCOVN partición '{reporte_particion['activa']}': foco "
+                    f"{len(cols_f)}/{len(f_bancos)} emparejados ({cob_f:.0%}) | "
+                    f"resto = sistema - foco (exacto)")
+        if faltan_f:
+            # El foco es el único lado que depende del matching, así que un
+            # faltante acá sí corrompe las dos series: foco queda corto y resto,
+            # por diferencia, queda largo.
+            logger.warning(
+                f"  CCOVN: el FOCO tiene bancos sin columna: {faltan_f}. Foco "
+                f"subestimado y resto sobreestimado en esa parte. Agregar el "
+                f"header correspondiente a ALIAS_CCOVN.")
 
     return ancho, reporte
 
