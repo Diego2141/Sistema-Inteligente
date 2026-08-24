@@ -26,8 +26,11 @@ from pathlib import Path
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuración
 # ─────────────────────────────────────────────────────────────────────────────
+# La matriz CON particiones, que escribe step001_build_feature_matrix_v2.py.
+# No es la misma que matriz_features.parquet, que sigue siendo la de v1 (sin
+# FOCO/RESTO): este exportador no tendría qué conciliar contra aquella.
 RUTA_PARQUET = (r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente"
-                r"\1. Data\Clean\matriz_features.parquet")
+                r"\1. Data\Clean\matriz_features_particiones.parquet")
 
 RUTA_OUTPUT  = (r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente"
                 r"\2. Output\matriz_particion.xlsx")

@@ -45,7 +45,8 @@ No hay `requirements.txt`. Dependencias en uso: `pandas`, `numpy`, `xgboost`,
 ## Pipeline
 
 ```
-step001_build_feature_matrix[_v2].py   →  1. Data/Clean/matriz_features.parquet
+step001_build_feature_matrix.py        →  1. Data/Clean/matriz_features.parquet
+step001_build_feature_matrix_v2.py     →  1. Data/Clean/matriz_features_particiones.parquet
         │                                  (formato largo: una fila por banco × fecha_t × h)
         ↓
 step005_walk_forward_cv_4.py           →  XGBoost por horizonte, walk-forward CV

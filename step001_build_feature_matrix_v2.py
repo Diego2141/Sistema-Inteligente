@@ -421,7 +421,11 @@ PARAMS = {
     # "ruta_igv" eliminado: pagos IGV en soles, no relevante para liquidez ME
     # ruta_elecciones: eliminado — fechas presidenciales hardcodeadas en build_peru_calendar()
     "ruta_aux_xgboost": r"RUTA\Aux_XGBoost.py",
-    "ruta_output":      r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Clean\matriz_features.parquet",
+    # v2 escribe a un archivo PROPIO, no al de v1. Los dos escribian a
+    # matriz_features.parquet, asi que una corrida de v2 pisaba la matriz sin
+    # particion y ~10 scripts aguas abajo levantaban una matriz distinta de la
+    # que esperaban, sin ningun aviso.
+    "ruta_output":      r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Clean\matriz_features_particiones.parquet",
     "ruta_diccionario": r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\1. Data\Clean\diccionario_variables.xlsx",
 
     # Series BCRP descargadas manualmente con Add-In BCRPData
@@ -3673,7 +3677,7 @@ def build_full_matrix(
     logger.info("PARTE 6: Construyendo matriz completa de features...")
 
     df_bancarios = datos_manuales.get("bancarios", pd.DataFrame())
-    ruta_output  = Path(params.get("ruta_output", "matriz_features.parquet"))
+    ruta_output  = Path(params.get("ruta_output", "matriz_features_particiones.parquet"))
     ruta_output.parent.mkdir(parents=True, exist_ok=True)
 
     # ── Agregar SISTEMA: suma del sistema bancario completo ──────────────────
@@ -4529,7 +4533,7 @@ if __name__ == "__main__":
         reporte_particion=reporte_particion,
     )
 
-    ruta_out = Path(PARAMS.get("ruta_output", "matriz_features.parquet"))
+    ruta_out = Path(PARAMS.get("ruta_output", "matriz_features_particiones.parquet"))
     if ruta_out.exists() and ruta_out.stat().st_size > 0:
         print(f"\nMatriz generada correctamente → {ruta_out}")
     else:

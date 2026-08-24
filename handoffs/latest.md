@@ -66,7 +66,8 @@ BASE = H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente\
   1. Data\Raw\Saldos_CCOVN.xlsx                saldos CC+OVN en BCR, 86 columnas
   1. Data\Raw\EncajeD.xlsx                     encaje diario
   2. Output\encaje_bbva\bbva_encaje_features_modelo.xlsx
-  1. Data\Clean\matriz_features.parquet        SALIDA de step001, ENTRADA de step005
+  1. Data\Clean\matriz_features.parquet             SALIDA de step001 v1, ENTRADA de step005
+  1. Data\Clean\matriz_features_particiones.parquet  SALIDA de step001 v2 (con FOCO/RESTO)
 ```
 
 ### Entorno
