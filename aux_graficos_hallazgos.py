@@ -579,6 +579,52 @@ def datos_serie_diaria(df):
     return out
 
 
+def datos_serie_diaria_por_banco(df):
+    """Retiro y depósito diarios POR BANCO, en millones USD.
+
+    Habilita el filtro por broker del gráfico "La variable" del one-pager, que
+    hasta ahora solo podía mostrar el agregado.
+
+    CODIFICACIÓN COMPACTA, y no es un detalle menor. Repetir la estructura de
+    datos_serie_diaria() por cada banco —un dict {f,r,d} por día y por banco—
+    daría ~3.6 MB para 23 bancos sobre 3.936 fechas, con la fecha repetida 23
+    veces. Acá las fechas van UNA vez y cada banco aporta dos arrays paralelos
+    de números: ~950 KB, cuatro veces menos, para exactamente la misma
+    información.
+
+    El orden de `bancos` es por volumen descendente, con SISTEMA primero: es el
+    orden en que conviene ofrecerlos en un desplegable, y evita que el front
+    tenga que recalcularlo.
+    """
+    fechas = pd.Index(sorted(df["fecha"].unique()), name="fecha")
+
+    piv_r = (df.pivot_table(index="fecha", columns="banco", values="R",
+                            aggfunc="sum")
+               .reindex(fechas).fillna(0.0) / 1e6).round(1)
+    piv_d = (df.pivot_table(index="fecha", columns="banco", values="D",
+                            aggfunc="sum")
+               .reindex(fechas).fillna(0.0) / 1e6).round(1)
+
+    # Orden por volumen total movido, no por neto: un banco puede tener neto
+    # cercano a cero y aun así mover mucho, y para elegirlo en un desplegable
+    # interesa cuánto mueve.
+    vol = (piv_r.sum() + piv_d.sum()).sort_values(ascending=False)
+
+    series = {"SISTEMA": {"r": piv_r.sum(axis=1).round(1).tolist(),
+                          "d": piv_d.sum(axis=1).round(1).tolist()}}
+    for b in vol.index:
+        series[str(b)] = {"r": piv_r[b].tolist(), "d": piv_d[b].tolist()}
+
+    out = {
+        "fechas": [f.strftime("%Y-%m-%d") for f in fechas],
+        "series": series,
+        "bancos": ["SISTEMA"] + [str(b) for b in vol.index],
+    }
+    print(f"  Serie diaria por banco: {len(out['bancos'])} entidades × "
+          f"{len(fechas):,} días")
+    return out
+
+
 # ── 6. Magnitud absoluta del retiro, indexada ───────────────────────────────
 
 def datos_magnitud_retiro(df):
@@ -618,7 +664,8 @@ def datos_magnitud_retiro(df):
 
 # ── 7. Export para el one-pager (artifact) ────────────────────────────────
 
-def exportar_json_artifact(datos0, datos1, datos1_ini, datos2, datos3, datos4, datos5, ruta):
+def exportar_json_artifact(datos0, datos1, datos1_ini, datos2, datos3, datos4, datos5, ruta,
+                           datos0_bancos=None):
     """Escribe un JSON compacto con SOLO las series que se dibujan.
 
     Deliberadamente NO incluye el detalle por banco ni el agregado diario:
@@ -637,6 +684,11 @@ def exportar_json_artifact(datos0, datos1, datos1_ini, datos2, datos3, datos4, d
     payload = {
         # Serie cruda primero: es la variable a modelar, y el resto son lecturas de ella.
         "g0_serie_diaria": _registros(datos0, cols=["f", "r", "d"]),
+        # Serie diaria por banco, en codificación compacta (fechas una sola vez
+        # + arrays paralelos). El one-pager la usa para el filtro por broker y
+        # cae a g0_serie_diaria si esta clave no está, así que una versión vieja
+        # del JSON sigue renderizando, solo que sin desplegable.
+        **({"g0_por_banco": datos0_bancos} if datos0_bancos else {}),
         "meta": {
             "ventana_cierre_bdays": VENTANA_CIERRE_BDAYS,
             "umbral_inicio_retiro": UMBRAL_INICIO_RETIRO,

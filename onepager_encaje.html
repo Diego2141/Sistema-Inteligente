@@ -204,6 +204,10 @@
   .ctl label { font-size: .74rem; letter-spacing: .05em; text-transform: uppercase;
     color: var(--ink-faint); font-weight: 700; flex: none; }
   .ctl input[type=range] { flex: 1; accent-color: var(--s-retiro); min-width: 110px; }
+  .ctl select { flex: 1; font: inherit; font-size: .88rem; padding: .3rem .5rem;
+    border: 1px solid var(--line); border-radius: 7px; background: var(--paper);
+    color: var(--ink); min-width: 140px; cursor: pointer; }
+  .ctl select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .ctl output { font-family: ui-serif, Georgia, serif; font-size: 1.3rem; font-weight: 600;
     color: var(--ink); min-width: 3.4ch; text-align: right; font-variant-numeric: tabular-nums; }
   .ctl input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -276,6 +280,10 @@
     <section id="serie">
       <div class="sec-head"><h2>La variable</h2><span class="n">serie diaria</span></div>
       <p class="f-body" style="max-width:62ch">Antes de los hallazgos, esto es lo que estamos modelando: el flujo diario del sistema entero. Cada barra es un día hábil. Los tres hallazgos que siguen son lecturas de esta misma serie.</p>
+      <div class="ctl">
+        <label for="bancoSerie">Entidad</label>
+        <select id="bancoSerie"><option value="SISTEMA">Todo el sistema</option></select>
+      </div>
       <div class="ctl">
         <label for="anioSerie">Año</label>
         <input type="range" id="anioSerie" min="0" max="1" step="1" value="0" aria-describedby="anioSerie-val">
@@ -790,21 +798,55 @@ const DATOS = {"g0_serie_diaria":[{"f":"2010-01-04","r":70.0,"d":40.0},{"f":"201
   slider.max = anios.length - 1; slider.value = anios.indexOf(2024) >= 0 ? anios.indexOf(2024) : anios.length - 1;
 
   /* ── La variable: serie diaria cruda ── */
-  const g0 = DATOS.g0_serie_diaria || [];
   const MESES_CORTOS = ["ene","feb","mar","abr","may","jun","jul","ago","set","oct","nov","dic"];
-  /* Escala común a todos los años: el máximo entre depósito, retiro y neto de
-     toda la serie, redondeado hacia arriba a un múltiplo redondo para que el eje
-     dé cifras limpias. Se calcula una sola vez, no en cada redibujo. */
-  const G0_YMAX = (() => {
-    if (!g0.length) return null;
-    const m = Math.max(...g0.map(r => Math.max(r.d, r.r, Math.abs(r.d - r.r))));
+
+  /* Dos formatos de datos conviven a propósito:
+       g0_por_banco    compacto (fechas una vez + arrays paralelos por entidad),
+                       habilita el filtro por broker
+       g0_serie_diaria formato viejo, solo el sistema
+     Se prefiere el primero y se cae al segundo, así un JSON generado antes de
+     que existiera el filtro sigue renderizando: pierde el desplegable, no el
+     gráfico. */
+  const G0P = DATOS.g0_por_banco || null;
+  const _g0cache = {}, _ymaxCache = {};
+
+  function serieG0(banco) {
+    if (_g0cache[banco]) return _g0cache[banco];
+    let arr;
+    if (G0P && G0P.series && G0P.series[banco]) {
+      const s = G0P.series[banco];
+      arr = G0P.fechas.map((f, i) => ({ f, r: s.r[i], d: s.d[i] }));
+    } else {
+      arr = DATOS.g0_serie_diaria || [];
+    }
+    return (_g0cache[banco] = arr);
+  }
+
+  function bancoG0() {
+    const s = document.getElementById("bancoSerie");
+    return (s && s.value) || "SISTEMA";
+  }
+
+  /* Escala fija POR ENTIDAD, no común a todas. El eje quieto entre años es lo
+     que deja ver el crecimiento real al mover el control, y eso se conserva.
+     Pero compartir escala entre entidades aplastaría a cualquier banco contra
+     el cero: el sistema mueve un orden de magnitud más que el mayor de ellos. */
+  function ymaxG0(banco) {
+    if (_ymaxCache[banco] !== undefined) return _ymaxCache[banco];
+    const g = serieG0(banco);
+    if (!g.length) return (_ymaxCache[banco] = null);
+    const m = Math.max(...g.map(r => Math.max(r.d, r.r, Math.abs(r.d - r.r))));
+    if (!(m > 0)) return (_ymaxCache[banco] = null);
     const paso = Math.pow(10, Math.floor(Math.log10(m))) / 2;
-    return Math.ceil(m * 1.05 / paso) * paso;
-  })();
+    return (_ymaxCache[banco] = Math.ceil(m * 1.05 / paso) * paso);
+  }
 
   function draw0() {
     const cont = document.getElementById("w0");
     const nota = document.getElementById("w0nota");
+    const banco = bancoG0();
+    const g0 = serieG0(banco);
+    const G0_YMAX = ymaxG0(banco);
     if (!g0.length) {
       if (nota) { nota.innerHTML = "<li>Falta la serie diaria en estos datos. Volvé a correr el script para incluirla.</li>";
                   nota.style.color = css("--warm"); }
@@ -854,13 +896,30 @@ const DATOS = {"g0_serie_diaria":[{"f":"2010-01-04","r":70.0,"d":40.0},{"f":"201
       const iMin = netos.indexOf(Math.min(...netos));
       const f = dias[iMin].f;
       nota.innerHTML =
-        `<li>${dias.length} días hábiles en ${anio}.</li>`
+        `<li>${dias.length} días hábiles en ${anio}` +
+        `${banco === "SISTEMA" ? "" : ` · ${banco}`}.</li>`
         + `<li>La mayor salida neta del año fue el ${f.slice(8)} de ${MESES_CORTOS[+f.slice(5, 7) - 1]}: `
         + `${Math.round(-netos[iMin]).toLocaleString("es-PE").replace(/,/g, ".")} MM USD.</li>`
-        + `<li>El eje no cambia entre años, así que mover el control muestra el crecimiento real.</li>`;
+        + `<li>El eje no cambia entre años para una misma entidad, así que mover el control muestra el crecimiento real. Sí cambia al cambiar de entidad.</li>`;
       nota.style.color = "var(--ink-faint)";
     }
   }
+  /* El desplegable se puebla desde los datos, en el orden de volumen que ya
+     resolvió el exportador: SISTEMA primero y después por cuánto mueve cada
+     banco. Si el JSON no trae g0_por_banco, el control queda oculto en vez de
+     ofrecer una única opción inerte. */
+  (() => {
+    const selB = document.getElementById("bancoSerie");
+    if (!selB) return;
+    const lista = (G0P && G0P.bancos) || [];
+    if (lista.length <= 1) { selB.closest(".ctl").style.display = "none"; return; }
+    selB.innerHTML = lista.map(b =>
+      `<option value="${b}">${b === "SISTEMA" ? "Todo el sistema" : b}</option>`
+    ).join("");
+    selB.value = "SISTEMA";
+    selB.addEventListener("change", draw0);
+  })();
+
   document.getElementById("anioSerie").addEventListener("input", draw0);
   legend(document.getElementById("l0"), [
     { name: "Depósito", color: css("--s-dep") },
