@@ -852,6 +852,7 @@ def main():
 
     print("Preparando serie diaria del sistema...")
     datos0 = datos_serie_diaria(df)
+    datos0_bancos = datos_serie_diaria_por_banco(df)
     if not datos5.empty:
         ult = datos5[datos5["año"] == datos5["año"].max()]
         print(f"  Cuota de la salida neta en {int(datos5['año'].max())} "
@@ -897,7 +898,8 @@ def main():
     # JSON compacto para incrustar las curvas reales en el one-pager
     print("Exportando JSON para el one-pager...")
     ruta_json = RUTA_SALIDA / "datos_para_onepager.json"
-    exportar_json_artifact(datos0, datos1, datos1_ini, datos2, datos3, datos4, datos5, ruta_json)
+    exportar_json_artifact(datos0, datos1, datos1_ini, datos2, datos3, datos4, datos5,
+                           ruta_json, datos0_bancos=datos0_bancos)
 
     print(f"\nListo. Archivos en: {RUTA_SALIDA}")
     print(f"  Excel de validación : {ruta_xlsx.name}")
