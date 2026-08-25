@@ -222,6 +222,49 @@ python -m pyflakes step001_build_feature_matrix_v2.py   # debe dar 0 "undefined 
 
 Es el paso 0 de `aux_verificar_particion.py`.
 
+## Artifacts publicados: leerlos por fragmento, nunca completos
+
+Dos entregables vivos, con su fuente versionada en el repo:
+
+| Fuente en el repo | Artifact publicado |
+|---|---|
+| `onepager_encaje.html` | https://claude.ai/code/artifact/322e9f5b-c7e4-4fca-b3a7-b2e142d077a5 |
+| `diccionario_features.html` | https://claude.ai/code/artifact/b8e796f5-693e-48f5-b473-99c4b65722cc |
+
+Para actualizarlos hay que republicar **con la misma URL**; sin ella se crea un
+artifact nuevo y el link ya compartido queda apuntando a la versión vieja.
+
+**`onepager_encaje.html` no se puede leer entero, y no hace falta.** Son 443 KB,
+de los cuales **371 KB (84%) son una sola línea**: el `const DATOS = {...}` con
+la serie diaria completa 2010-2026 embebida. Un `Read` del archivo aborta por
+límite de tamaño, y un `WebFetch` del artifact publicado vuelca ese blob al
+contexto. En una sesión eso costó más de 100k tokens sin aportar nada.
+
+El contenido editable son ~70 KB repartidos alrededor de esa línea: el markup
+antes y las funciones de gráficos después.
+
+Flujo correcto para editarlo:
+
+```bash
+# 1. Ubicar la sección, sin traer el archivo
+grep -n 'id="w3stat"\|const DATOS = ' onepager_encaje.html
+
+# 2. Leer SOLO ese rango
+#    Read con offset/limit alrededor de la línea encontrada
+```
+
+Y **saltear siempre la línea del `DATOS`**: se ubica con
+`grep -n "const DATOS = "` y no se lee nunca. Es dato, no código.
+
+Medido sobre este archivo: leerlo entero son ~113.000 tokens; el fragmento de 4
+líneas que hace falta para editar una sección son ~130. **849 veces menos.**
+
+La fuente de verdad es la copia del repo, no el artifact publicado: leer de local
+en vez de hacer `WebFetch` evita el volcado inline por completo. El `WebFetch`
+solo hace falta para recuperar una versión publicada que no esté en el repo, y
+aun así guarda el HTML en un archivo local cuya ruta devuelve — hay que leer
+fragmentos de **ese** archivo, no del resultado inline.
+
 ## Errores estadísticos a evitar en este dominio
 
 **Nunca sumar ni acumular cuantiles.** `q_τ(A+B) ≠ q_τ(A) + q_τ(B)`, y
