@@ -432,6 +432,49 @@ def build_folds(df: pd.DataFrame) -> list[dict]:
             f"Reduzca las ventanas o adelante TRAIN_INICIO_CUTOFF."
         )
 
+    # ── Auditoría de solapamiento entre folds ───────────────────────────────
+    # Dos comprobaciones distintas, con causas distintas:
+    #
+    # 1) VENTANAS de test que se pisan. Con VENTANA_TEST_AÑOS == PASO_AÑOS los
+    #    tests deberían embaldosar sin solaparse, pero test_start NO avanza un
+    #    paso fijo: se deriva encadenando dos saltos de GAP_DIAS_HAB días
+    #    HÁBILES desde train_end, y 119 hábiles no son un número fijo de días
+    #    calendario — dependen de cuántos feriados caigan en ese tramo. Medido
+    #    en una corrida real, test_start avanzó 189 y 173 días calendario entre
+    #    folds consecutivos en vez de ~182, y eso produjo 8 días de solape.
+    #
+    # 2) TARGETS que se pisan aunque las ventanas no. El target de fecha_t vive
+    #    en t+h con h hasta H_MAX días hábiles (~3.5 meses), así que dos tests
+    #    adyacentes en fecha_t predicen períodos que sí se superponen. Es
+    #    estructural del diseño multi-horizonte, no un defecto de las ventanas,
+    #    pero afecta igual la independencia entre folds y conviene tenerlo a la
+    #    vista al leer las métricas por fold.
+    for _a, _b in zip(folds, folds[1:]):
+        _ov = (_a["test_end"] - _b["test_start"]).days + 1
+        if _ov > 0:
+            log.warning(
+                "Folds %d y %d: sus ventanas de TEST se solapan %d día(s) "
+                "(%s..%s). Las métricas de esos folds comparten observaciones, "
+                "así que no son independientes.",
+                _a["fold"], _b["fold"], _ov,
+                _b["test_start"].date(), _a["test_end"].date(),
+            )
+    if folds:
+        _alcance = int(H_MAX * 7 / 5) + 7          # H_MAX hábiles a días calendario
+        _solape_target = 0
+        for _a, _b in zip(folds, folds[1:]):
+            _fin_target_a = _a["test_end"] + pd.Timedelta(days=_alcance)
+            _solape_target = max(_solape_target,
+                                 (_fin_target_a - _b["test_start"]).days + 1)
+        if _solape_target > 0:
+            log.warning(
+                "Los TARGETS de folds consecutivos se superponen hasta %d días: "
+                "con h hasta %d hábiles, el test de un fold predice fechas que "
+                "caen dentro del test del siguiente. Es estructural del diseño "
+                "multi-horizonte, no de las ventanas.",
+                _solape_target, H_MAX,
+            )
+
     return folds
 
 
