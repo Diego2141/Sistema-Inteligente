@@ -1311,6 +1311,25 @@ def armar_sub_ccovn(ccovn_features, clave_propio, clave_contraparte):
     return sub
 
 
+def ruta_output_particion(params, reporte_particion):
+    """
+    Ruta de salida con el nombre de la partición activa incorporado.
+
+    Sin esto las dos particiones escriben al mismo archivo y correr "globales"
+    pisa el resultado de "bbva", obligando a recorrer step001 entero —varios
+    minutos— cada vez que se quiere volver a la otra. Con el sufijo conviven y
+    step005 elige cuál leer con su propio botón.
+
+    Sin partición activa devuelve la ruta tal cual, que es el comportamiento de
+    v1 y el que espera quien no usa particiones.
+    """
+    base = Path(params["ruta_output"])
+    activa = (reporte_particion or {}).get("activa")
+    if not activa:
+        return base
+    return base.with_name(f"{base.stem}_{activa}{base.suffix}")
+
+
 def agrupar_bancos(df_bancarios, umbral_pct, bancos_otros, nombre_otros,
                    excluir=None):
     """
@@ -4569,6 +4588,11 @@ if __name__ == "__main__":
         PARAMS.get("particion_activa"),
         nombre_otros=PARAMS["nombre_otros"],
     )
+
+    # Cada partición a su propio archivo, para que no se pisen entre corridas.
+    PARAMS["ruta_output"] = str(ruta_output_particion(PARAMS, reporte_particion))
+    if reporte_particion.get("activa"):
+        logger.info(f"  Salida: {Path(PARAMS['ruta_output']).name}")
 
     # 3. Agrupación de bancos pequeños → Otros_bancos
     df_bancarios_agrupado, lista_bancos, reporte_agrupacion = agrupar_bancos(
