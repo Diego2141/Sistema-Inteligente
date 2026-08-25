@@ -257,6 +257,14 @@ FEATURES_EXCLUIR = [
     #"var_ccovn_propio_lag1",
     #"ccovn_contraparte_lag1",       # nuevo en v2, activo — ver el hallazgo
     #"var_ccovn_contraparte_lag1",   # correspondiente en el diccionario
+    # share_propio_lag1 quedó excluida por HERENCIA del renombre: en v1 la
+    # entrada era "bbva_share_lag1" y ya estaba excluida. No fue una decisión
+    # nueva, y dejó una asimetría —share_contraparte_lag1 sí entra— que nadie
+    # había medido. Se mantiene excluida, pero ahora por un motivo explícito:
+    # para los lados de una partición share_propio + share_contraparte == 1
+    # exactamente, así que tener las dos es redundante, y share_contraparte es
+    # la que además sirve a SISTEMA, donde share_propio es constante 1 por
+    # construcción y se anula a NaN.
     "share_propio_lag1",
     "var_ccovn_propio_exceso_lag1",
     "ccovn_vs_dia_mes_lag1",
@@ -2445,6 +2453,12 @@ def build_ccovn_features(df_ccovn, peru_bday, flujo_sistema=None):
         sis.groupby(rango_dia)
            .transform(lambda x: x.expanding().mean().shift(1))
     )
+    # NO es relativa a la entidad: se calcula sobre `sis` (el sistema) y se
+    # reparte igual a SISTEMA, FOCO y RESTO. Para FOCO_BBVA describe al sistema,
+    # que es casi BBVA; para RESTO_BBVA describe mayormente a su CONTRAPARTE.
+    # Hoy no molesta porque está en FEATURES_EXCLUIR, pero reactivarla exige
+    # generarla por clave —como ccovn_<clave>_lag1— y elegir la propia en
+    # resolver_ccovn_lados(). aux_verificar_particion.py lo comprueba.
     resultado["ccovn_vs_dia_mes_lag1"] = (sis - media_por_rango).shift(1)
 
     # ── residuo_ccovn_lag1 ───────────────────────────────────────────────────
@@ -2458,6 +2472,12 @@ def build_ccovn_features(df_ccovn, peru_bday, flujo_sistema=None):
     #  equivale a Δsaldo > flujo. El cálculo nunca estuvo mal, solo la nota.)
     if flujo_sistema is not None and not flujo_sistema.empty:
         flujo_bd = flujo_sistema.reindex(idx_bd).ffill()
+        # Mismo caso que ccovn_vs_dia_mes_lag1, y acá es más notorio: la
+        # identidad Δsaldo ≈ flujo vale POR ENTIDAD, no solo para el agregado.
+        # El residuo del sistema puede ser casi cero mientras el de un grupo es
+        # grande, así que compartirlo no le dice nada a FOCO ni a RESTO sobre su
+        # propio descalce. Reactivarla exige pasar el flujo de cada entidad y no
+        # solo flujo_sistema. Excluida hoy.
         resultado["residuo_ccovn_lag1"] = (sis.diff() - flujo_bd).shift(1)
         n_res = resultado["residuo_ccovn_lag1"].notna().sum()
         logger.info(f"  build_ccovn_features: residuo_ccovn_lag1 calculado "

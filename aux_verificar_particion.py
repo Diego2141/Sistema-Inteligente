@@ -519,7 +519,63 @@ def modo_matriz(ruta):
           float(dif.max()) < 1e-3,
           f"{len(comunes):,} filas comparadas, peor desvío {dif.max():.4g}")
 
-    print("\n3. Cobertura de features de encaje por grupo")
+    print("\n3. Cada feature, ¿es propia de la entidad o compartida?")
+    # El corazón de la auditoría por partición. Una feature que DEBE describir a
+    # la entidad modelada y sale idéntica en FOCO y RESTO está describiendo a
+    # otra cosa: casi siempre al sistema, que es el default del diseño sin
+    # particiones. Es un error que no rompe nada y no se ve en ningún log.
+    #
+    # Se compara fila a fila sobre las mismas llaves (fecha_t, h), no por
+    # agregados: dos series distintas pueden compartir media y engañar a un
+    # resumen.
+    llaves = [c for c in ("fecha_t", "h") if c in df.columns]
+    num = [c for c in df.columns
+           if c not in ("banco", *llaves) and df[c].dtype.kind in "fiub"]
+    a = df[df["banco"] == foco[0]].set_index(llaves)[num].sort_index()
+    b = df[df["banco"] == resto[0]].set_index(llaves)[num].sort_index()
+    comunes = a.index.intersection(b.index)
+    a, b = a.loc[comunes], b.loc[comunes]
+
+    propias, compartidas = [], []
+    for c in num:
+        ca, cb = a[c], b[c]
+        iguales = ((ca == cb) | (ca.isna() & cb.isna())).all()
+        (compartidas if iguales else propias).append(c)
+
+    # Lo que TIENE que diferir entre foco y resto: describe el flujo o el saldo
+    # de la entidad. Si alguna sale compartida, no está mirando a su grupo.
+    DEBEN_DIFERIR = {
+        "target", "R_conf_t2", "ma_flujo_5d", "ma_flujo_20d", "sigma_flujo_ratio",
+        "esc_neto_min_pos", "esc_neto_max_pos", "esc_retiro_pos",
+        "acum_neto_min_pos", "acum_neto_max_pos",
+        "esc_neto_max_pos_ap", "esc_deposito_pos_ap",
+        "ccovn_propio_lag1", "var_ccovn_propio_lag1",
+    }
+    # Lo que DEBE ser igual: calendario, macro y el régimen sistémico, que es
+    # contexto común a propósito.
+    DEBEN_COMPARTIR = {
+        "dias_al_cierre_mes", "dias_desde_cierre_mes", "dias_al_cierre_trim",
+        "CDS_PERU_5Y_frac", "ccovn_sistema_lag1", "var_ccovn_sistema_lag1",
+        "hmm_estado",
+    }
+    print(f"   propias de la entidad: {len(propias)} | compartidas: {len(compartidas)}")
+    mal_compartidas = sorted(DEBEN_DIFERIR & set(compartidas))
+    mal_propias     = sorted(DEBEN_COMPARTIR & set(propias))
+    check("toda feature de flujo/saldo propio DIFIERE entre foco y resto",
+          not mal_compartidas,
+          f"SALEN IGUALES: {mal_compartidas}" if mal_compartidas
+          else f"{len(DEBEN_DIFERIR & set(propias))} verificadas")
+    check("calendario, macro y régimen sistémico son COMPARTIDOS",
+          not mal_propias,
+          f"DIFIEREN: {mal_propias}" if mal_propias
+          else f"{len(DEBEN_COMPARTIR & set(compartidas))} verificadas")
+    _sin_clasificar = sorted(set(num) - DEBEN_DIFERIR - DEBEN_COMPARTIR)
+    if _sin_clasificar:
+        print(f"   sin clasificar (revisar a mano si son propias o compartidas):")
+        for c in _sin_clasificar:
+            print(f"     {c:32s} {'propia' if c in propias else 'compartida'}")
+
+    print("\n4. Cobertura de features de encaje por grupo")
     if "encaje_lag1" in df.columns:
         cob = df.groupby("banco")["encaje_lag1"].apply(lambda s: s.notna().mean())
         print(cob.to_string(float_format=lambda v: f"{v:.1%}"))
