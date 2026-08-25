@@ -128,6 +128,12 @@ PASO_AÑOS           = 0.5
 # En False se reproduce la geometría previa, para comparar contra corridas viejas.
 CORREGIR_SOLAPE_TEST = True
 
+# Contraparte simétrica: cierra los HUECOS, días hábiles que quedan entre el
+# test de un fold y el del siguiente sin que ninguno los evalúe. Con los dos en
+# True los tests embaldosan el período fuera de muestra sin pisarse ni dejar
+# nada afuera.
+CERRAR_HUECOS_TEST = True
+
 # Purge & embargo — derivados de los parámetros del modelo
 LOOKBACK_MAX_DIAS   = 22   # ventana máxima de lags del target usados como features
 PURGE_DIAS_HAB      = H_MAX + LOOKBACK_MAX_DIAS   # 75 + 22 = 97
@@ -516,12 +522,12 @@ def build_folds(df: pd.DataFrame) -> list[dict]:
     if CORREGIR_SOLAPE_TEST and folds:
         _ajustados = []
         for _f in folds:
+            _f = dict(_f)          # copia: abajo se muta también el anterior
             if _ajustados:
                 _prev = _ajustados[-1]
                 _ov = (_prev["test_end"] - _f["test_start"]).days + 1
                 if _ov > 0:
                     _largo = _f["test_end"] - _f["test_start"]
-                    _f = dict(_f)
                     _viejo = _f["test_start"]
                     _f["test_start"] = _prev["test_end"] + pd.Timedelta(days=1)
                     _f["test_end"]   = _f["test_start"] + _largo
@@ -532,6 +538,28 @@ def build_folds(df: pd.DataFrame) -> list[dict]:
                         _f["fold"], _ov, _prev["fold"],
                         _viejo.date(), _f["test_start"].date(),
                     )
+                elif CERRAR_HUECOS_TEST and _ov < 0:
+                    # Hueco: días hábiles que ningún fold evalúa. Misma causa
+                    # que el solape —cada test_start sale de su propia cadena de
+                    # saltos hábiles, así que los tests consecutivos caen donde
+                    # caen— pero con el signo opuesto.
+                    #
+                    # Se EXTIENDE el test_end del fold anterior, no se adelanta
+                    # el de este: adelantarlo acortaría su purge contra su
+                    # propia validación, que es la dirección peligrosa. Extender
+                    # hacia adelante no toca ningún purge.
+                    _hab = int(((all_bdays > np.datetime64(_prev["test_end"])) &
+                                (all_bdays < np.datetime64(_f["test_start"]))).sum())
+                    if _hab > 0:
+                        _viejo_fin = _prev["test_end"]
+                        _prev["test_end"] = _f["test_start"] - pd.Timedelta(days=1)
+                        log.warning(
+                            "Fold %d: test extendido hasta %s (antes %s) para "
+                            "cubrir %d día(s) hábil(es) que ningún fold "
+                            "evaluaba. No altera ningún purge.",
+                            _prev["fold"], _prev["test_end"].date(),
+                            _viejo_fin.date(), _hab,
+                        )
             # Empujar puede sacar el test fuera de la muestra. Los folds
             # posteriores arrancan aún más tarde, así que ninguno entra.
             if _f["test_end"] > fecha_max:
