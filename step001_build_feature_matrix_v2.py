@@ -607,6 +607,17 @@ def load_manual_data(params):
             df_raw["Fecha Valor"] = pd.to_datetime(df_raw["Fecha Valor"])
             df_raw["monto"] = pd.to_numeric(df_raw["Delivery Principal Usd"], errors="coerce")
 
+            # FUGA A: errors="coerce" convierte en NaN todo lo que no parsea, y
+            # el groupby.sum() de abajo saltea los NaN. Una celda con separador
+            # de miles, un texto o un guion desaparece del total sin dejar
+            # rastro. Se cuenta antes de que se pierda.
+            _no_parse = df_raw["monto"].isna() & df_raw["Delivery Principal Usd"].notna()
+            if _no_parse.any():
+                _ej = df_raw.loc[_no_parse, "Delivery Principal Usd"].astype(str).unique()[:5]
+                logger.warning(
+                    f"  {_no_parse.sum():,} filas con monto NO parseable quedan "
+                    f"fuera de los totales. Ejemplos: {list(_ej)}")
+
             # Separar retiros y depósitos
             df_raw["R"] = df_raw["monto"].clip(upper=0).abs()  # negativos → positivos
             df_raw["D"] = df_raw["monto"].clip(lower=0)        # positivos
@@ -666,8 +677,66 @@ def load_manual_data(params):
             # fillna(0.0) cubre además los NaN internos del pivot (banco sin transacción
             # en una fecha donde otro banco sí la tuvo — pivot_table los deja como NaN).
             idx_completo = pd.bdate_range(start=df_wide.index.min(), end=df_wide.index.max())
+
+            # FUGA B: reindex() no solo AGREGA fechas, también DESCARTA las que
+            # no estén en idx_completo. bdate_range es Lun-Vie, así que una
+            # transacción con fecha de sábado o domingo se borra del pivot y su
+            # monto no llega a ninguna feature ni al target. Es plata real
+            # desapareciendo en silencio, así que se mide antes de reindexar.
+            _fuera = df_wide.index.difference(idx_completo)
+            if len(_fuera):
+                _rc = [c for c in df_wide.columns if c.endswith("_R")]
+                _dc = [c for c in df_wide.columns if c.endswith("_D")]
+                # nansum y no sum: en este punto el pivot todavía tiene NaN
+                # donde un banco no operó esa fecha (el fillna(0) viene después
+                # del reindex), y un solo NaN volvía el total entero en NaN,
+                # dejando el warning sin la cifra que lo hace accionable.
+                _rp = float(np.nansum(df_wide.loc[_fuera, _rc].to_numpy()))
+                _dp = float(np.nansum(df_wide.loc[_fuera, _dc].to_numpy()))
+                _dias = sorted({d.day_name() for d in _fuera})
+                logger.warning(
+                    f"  {len(_fuera)} fecha(s) del crudo NO caen en día hábil "
+                    f"Lun-Vie ({', '.join(_dias)}) y se DESCARTAN: "
+                    f"R={_rp:,.2f} D={_dp:,.2f} perdidos. "
+                    f"Primeras: {[str(d.date()) for d in _fuera[:5]]}")
+
+            _n_antes = len(df_wide)
             df_wide = df_wide.reindex(idx_completo, fill_value=0.0).fillna(0.0)
             df_wide.index.name = "fecha"
+
+            # FUGA C: las fechas agregadas entran con R=D=0, indistinguibles de
+            # un día hábil sin transacciones. bdate_range NO excluye feriados
+            # peruanos, así que ~290 feriados quedan como ceros que arrastran
+            # hacia abajo toda media y volatilidad móvil de build_bank_features.
+            # Se reporta la magnitud para que el sesgo sea visible, no implícito.
+            _agregadas = len(idx_completo) - (_n_antes - len(_fuera))
+            if _agregadas:
+                logger.info(
+                    f"  Calendario completado: +{_agregadas:,} fechas con R=D=0 "
+                    f"({_agregadas / len(idx_completo):.1%} del índice). Incluye "
+                    f"feriados: bdate_range es Lun-Vie sin excluirlos, y esos "
+                    f"ceros sesgan ma_flujo_* y sigma_flujo_* hacia abajo.")
+
+            # FUGA D: el relleno es global, no por banco. Un banco que empezó a
+            # operar en 2020 recibe ceros desde 2010, o sea historia fabricada en
+            # sus propias medias y volatilidades. Se reporta cuántos bancos
+            # tienen una porción sustantiva del índice fuera de su período real.
+            _parciales = []
+            for _c in [c for c in df_wide.columns if c.endswith("_R")]:
+                _b = _c[:-2]
+                _nz = df_wide.index[(df_wide[_c] != 0) | (df_wide.get(f"{_b}_D", 0) != 0)]
+                if len(_nz):
+                    _fuera_rango = len(idx_completo) - len(
+                        pd.bdate_range(_nz.min(), _nz.max()))
+                    if _fuera_rango > 250:      # más de un año hábil
+                        _parciales.append((_b, _fuera_rango))
+            if _parciales:
+                _parciales.sort(key=lambda x: -x[1])
+                logger.warning(
+                    f"  {len(_parciales)} banco(s) con >1 año de ceros fuera de su "
+                    f"período real de operación: "
+                    f"{', '.join(f'{b} ({n}d)' for b, n in _parciales[:5])}. "
+                    f"Sus features móviles se calculan sobre historia que no existió.")
 
             resultado["bancarios"] = df_wide
             logger.info(
