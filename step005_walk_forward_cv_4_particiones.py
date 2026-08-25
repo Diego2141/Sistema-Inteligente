@@ -119,6 +119,15 @@ VENTANA_VAL_AÑOS    = 0.5
 VENTANA_TEST_AÑOS   = 0.5
 PASO_AÑOS           = 0.5
 
+# A': empuja test_start del fold siguiente cuando su ventana se solaparía con
+# la del anterior. El solape aparece porque train_start avanza meses calendario
+# exactos mientras test_start se deriva encadenando dos saltos de GAP_DIAS_HAB
+# días HÁBILES, y 119 hábiles no son un número fijo de días calendario: dependen
+# de cuántos feriados caigan en el tramo. Medido, test_start avanzó 189 y 173
+# días entre folds consecutivos en vez de ~182, con 8 días de solape.
+# En False se reproduce la geometría previa, para comparar contra corridas viejas.
+CORREGIR_SOLAPE_TEST = True
+
 # Purge & embargo — derivados de los parámetros del modelo
 LOOKBACK_MAX_DIAS   = 22   # ventana máxima de lags del target usados como features
 PURGE_DIAS_HAB      = H_MAX + LOOKBACK_MAX_DIAS   # 75 + 22 = 97
@@ -489,6 +498,51 @@ def build_folds(df: pd.DataFrame) -> list[dict]:
             f"años más 2×{GAP_DIAS_HAB} días hábiles de gap desde {train_min.date()}. "
             f"Reduzca las ventanas o adelante TRAIN_INICIO_CUTOFF."
         )
+
+    # ── A': eliminar solapes de TEST empujando el fold siguiente ────────────
+    # Se empuja test_start del fold posterior en vez de recortar test_end del
+    # anterior, por dos razones:
+    #
+    #   · Preserva el LARGO de todas las ventanas. Recortar dejaba un fold
+    #     estimando sobre menos observaciones, y su métrica dejaba de ser
+    #     comparable con la de los demás.
+    #   · El purge solo puede AUMENTAR. Empujar el test lo aleja más de la
+    #     validación; recortar el test anterior no lo mejora. Estrictamente más
+    #     seguro respecto de leakage.
+    #
+    # El bucle va hacia adelante y compara contra el fold ya ajustado, así que
+    # un empujón que provoque un solape nuevo con el siguiente se resuelve en
+    # cascada en la misma pasada.
+    if CORREGIR_SOLAPE_TEST and folds:
+        _ajustados = []
+        for _f in folds:
+            if _ajustados:
+                _prev = _ajustados[-1]
+                _ov = (_prev["test_end"] - _f["test_start"]).days + 1
+                if _ov > 0:
+                    _largo = _f["test_end"] - _f["test_start"]
+                    _f = dict(_f)
+                    _viejo = _f["test_start"]
+                    _f["test_start"] = _prev["test_end"] + pd.Timedelta(days=1)
+                    _f["test_end"]   = _f["test_start"] + _largo
+                    log.warning(
+                        "Fold %d: test movido %d día(s) por solape con el fold "
+                        "%d (%s -> %s). El largo de la ventana se conserva y el "
+                        "purge contra val aumenta.",
+                        _f["fold"], _ov, _prev["fold"],
+                        _viejo.date(), _f["test_start"].date(),
+                    )
+            # Empujar puede sacar el test fuera de la muestra. Los folds
+            # posteriores arrancan aún más tarde, así que ninguno entra.
+            if _f["test_end"] > fecha_max:
+                log.warning(
+                    "Fold %d descartado: tras el ajuste su test terminaría el "
+                    "%s, más allá del último dato disponible (%s).",
+                    _f["fold"], _f["test_end"].date(), fecha_max.date(),
+                )
+                break
+            _ajustados.append(_f)
+        folds = _ajustados
 
     # ── Auditoría de solapamiento entre folds ───────────────────────────────
     # Dos comprobaciones distintas, con causas distintas:
