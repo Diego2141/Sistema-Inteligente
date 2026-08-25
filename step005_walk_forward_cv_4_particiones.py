@@ -319,6 +319,24 @@ class _Tee:
         self._f.close()
 
 
+def _fmt_anios(x: float) -> str:
+    """0.5 -> '0.5', 1.0 -> '1'. Sin el .0 colgando, que ensucia la ruta."""
+    return f"{x:g}"
+
+
+def etiqueta_corrida() -> str:
+    """
+    Identidad de la corrida: entidad + geometria del fold.
+
+    Ejemplo: FOCO_BBVA_0.5_0.5  (banco, ventana de validacion, ventana de test)
+
+    aux_fanchart_cv4_direct_particiones.py reconstruye esta misma etiqueta para
+    encontrar las predicciones, asi que las dos definiciones tienen que
+    moverse juntas.
+    """
+    return f"{BANCO}_{_fmt_anios(VENTANA_VAL_AÑOS)}_{_fmt_anios(VENTANA_TEST_AÑOS)}"
+
+
 def _dir_modo() -> Path:
     """
     Carpeta de salida del modo actual, creada si no existe.
@@ -334,7 +352,10 @@ def _dir_modo() -> Path:
     # que sin separar la carpeta, entrenar FOCO después de SISTEMA sobrescribía
     # los diagnósticos del primero en silencio. Las 12 rutas que cuelgan de acá
     # quedan separadas con este solo cambio.
-    d = DIR_OUTPUT / f"fold_{base}{sfx}" / BANCO
+    # BANCO + geometria del fold. Cambiar VENTANA_VAL_AÑOS o VENTANA_TEST_AÑOS
+    # produce resultados que NO son comparables con los anteriores, y sin el
+    # sufijo se sobrescribian entre si sin dejar forma de distinguirlos.
+    d = DIR_OUTPUT / f"fold_{base}{sfx}" / etiqueta_corrida()
     d.mkdir(parents=True, exist_ok=True)
     return d
 
