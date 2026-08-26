@@ -1078,6 +1078,9 @@ def calcular_metricas(
       - RMSE (TEST)
       - Coverage empírica TEST 90% y 98%
       - Coverage empírica VAL 90% y 98%   (para detectar overfitting de calibración)
+      - Pinball loss por cuantil (VAL)    (idem: VAL es el eval_set del early
+                                           stopping, sale optimista por
+                                           construcción — sirve para la brecha)
       - Winkler Score 90% y 98%           (penaliza anchura + violaciones)
       - Interval Sharpness 90%            (anchura media sin penalización)
       - CRPS aproximado (trapz sobre taus discretos)
@@ -1125,6 +1128,24 @@ def calcular_metricas(
         _crps_v = _crps_interp(preds_val_dict, y_val)
         if _crps_v is not None:
             row["val_crps"] = _crps_v
+
+        # ── Pinball VAL por cuantil ──────────────────────────────────────────
+        # NO es una estimación de riesgo predictivo, y no debe leerse como tal.
+        # VAL es el eval_set del early stopping (entrenar_modelos_h: se pasa a
+        # fit() con eval_metric="quantile"), así que el nº de árboles de cada
+        # modelo-τ se eligió para minimizar EXACTAMENTE esta cifra. Sale
+        # optimista por construcción, igual que val_coverage_90/98.
+        #
+        # Sirve para la BRECHA: val_crps ya compara VAL vs TEST pero agregado
+        # sobre todos los cuantiles (interpolación PCHIP), y esconde si el gap
+        # es parejo o se concentra en las colas. Las colas son el objeto de
+        # negocio —el MCO se lee de q01— así que un sobreajuste concentrado
+        # ahí importa más que el promedio. Desagregado por τ se ve cuál.
+        for tau, preds in preds_val_dict.items():
+            if tau != "mean":
+                err = y_val - preds
+                pb  = np.where(err >= 0, tau * err, (tau - 1) * err)
+                row[f"val_pinball_q{int(tau * 100):02d}"] = float(np.mean(pb))
 
     # ── Winkler Score: W = (U-L) + (2/α)*[max(0,L-y) + max(0,y-U)] ──────────
     if 0.05 in preds_dict and 0.95 in preds_dict:
@@ -3110,6 +3131,68 @@ def _run_interno(banco: str = BANCO) -> None:
             _v98 = df_res.groupby("h_grupo", observed=True)["val_coverage_98"].mean()
             _reg(_tablas, "cov98_val_por_grupo", _v98)
             print(_v98.map("{:.1%}".format))
+
+        # ── Pinball VAL y brecha TEST−VAL ────────────────────────────────────
+        # Leer estas tablas en pares. El nivel de VAL por sí solo no dice nada:
+        # es el valor que el early stopping minimizó (ver calcular_metricas),
+        # así que SIEMPRE va a salir mejor que TEST. Lo informativo es la
+        # BRECHA: cuánto peor le va al modelo fuera del conjunto con el que se
+        # eligió su número de árboles.
+        #
+        # Brecha ≈ 0  → el early stopping no compró optimismo: el nº de árboles
+        #               que minimiza VAL también sirve fuera.
+        # Brecha > 0  → sobreajuste de la selección de modelo. Su MAGNITUD
+        #               RELATIVA entre cuantiles es lo que importa: si se
+        #               concentra en q01/q99 (las colas), el MCO —que se lee de
+        #               q01— está peor estimado de lo que sugiere el promedio.
+        _val_pb_cols = sorted(c for c in df_res.columns
+                              if c.startswith("val_pinball_q"))
+        if _val_pb_cols:
+            # (a) Nivel VAL por fold × cuantil.
+            print("\nPinball VAL por fold y cuantil (MM USD) "
+                  "[optimista por construcción — comparar contra la brecha]:")
+            _vpb = (df_res.groupby("fold", observed=True)[_val_pb_cols]
+                    .mean() / 1e6)
+            _vpb.columns = [c.replace("val_pinball_q", "Q") for c in _vpb.columns]
+            _vpb.index = ["Fold {}".format(f) for f in _vpb.index]
+            _reg(_tablas, "pinball_val_fold_cuantil", _vpb)
+            print(_vpb.round(3).to_string())
+
+            # (b) Brecha TEST − VAL por fold × cuantil. Solo los cuantiles que
+            #     existen de los dos lados: si un τ está en TAUS pero no llegó a
+            #     VAL (fold sin ventana de validación), restar daría NaN mudo.
+            _pares = [(f"pinball_q{c[len('val_pinball_q'):]}", c)
+                      for c in _val_pb_cols
+                      if f"pinball_q{c[len('val_pinball_q'):]}" in df_res.columns]
+            if _pares:
+                _gap = pd.DataFrame({
+                    "Q" + _vc[len("val_pinball_q"):]:
+                        df_res[_tc] - df_res[_vc]
+                    for _tc, _vc in _pares
+                })
+                _gap["fold"] = df_res["fold"].values
+                _gap_fc = (_gap.groupby("fold", observed=True).mean() / 1e6)
+                _gap_fc.index = ["Fold {}".format(f) for f in _gap_fc.index]
+                print("\nBrecha TEST−VAL del pinball por fold y cuantil (MM USD) "
+                      "[>0 = el modelo va peor fuera de VAL]:")
+                _reg(_tablas, "pinball_brecha_fold_cuantil", _gap_fc)
+                print(_gap_fc.round(3).to_string())
+
+                # (c) Misma brecha, promediada sobre cuantiles, por fold ×
+                #     h_grupo. El pinball TEST ya crece con h; esta tabla
+                #     responde si la brecha TAMBIÉN crece —es decir, si el
+                #     sobreajuste se concentra en horizontes largos, donde la
+                #     ventana de VAL cubre menos ciclos de cierre de mes.
+                _gap["h_grupo"]      = df_res["h_grupo"].values
+                _gap["brecha_prom"]  = _gap[[c for c in _gap.columns
+                                             if c.startswith("Q")]].mean(axis=1)
+                _gap_fh = (_gap.groupby(["fold", "h_grupo"], observed=True)
+                           ["brecha_prom"].mean().unstack("h_grupo") / 1e6)
+                _gap_fh.index = ["Fold {}".format(f) for f in _gap_fh.index]
+                print("\nBrecha TEST−VAL promedio sobre cuantiles, "
+                      "por fold y grupo de horizonte (MM USD):")
+                _reg(_tablas, "pinball_brecha_fold_grupo", _gap_fh)
+                print(_gap_fh.round(3).to_string())
 
         if "winkler_90" in df_res.columns:
             print("\nWinkler Score 90% medio por grupo de horizonte (MM USD):")
