@@ -37,6 +37,15 @@ import pathlib
 import numpy as np
 import pandas as pd
 
+# Ruta de la matriz real para cuando se corre sin argumentos (Spyder,
+# runfile() sin args=). Con la ruta puesta acá, correr el script "pelado"
+# valida contra datos reales en vez de caer al autotest sintético. Vacía
+# ("") o inexistente, se cae al autotest sin abortar — no todo el mundo
+# tiene montada la unidad H:.
+RUTA_MATRIZ_DEFECTO = (
+    "1. Data/Clean/matriz_features_particiones_bbva.parquet"
+)
+
 RUTA_V2 = pathlib.Path(__file__).with_name("step001_build_feature_matrix_v2.py")
 
 _FALLAS = []
@@ -598,9 +607,20 @@ def main():
     g.add_argument("--matriz", metavar="RUTA")
     a = ap.parse_args()
     if not a.sintetico and not a.matriz:
-        a.sintetico = True
-        print("(sin argumentos: corriendo el autotest sintético; "
-              "para validar una matriz usar --matriz RUTA)\n")
+        # Sin argumentos: preferir RUTA_MATRIZ_DEFECTO si existe en disco.
+        # Así runfile() sin args= valida contra datos reales sin que haga
+        # falta escribir --matriz a mano cada vez. Si no está montada la
+        # ruta (u otra máquina sin acceso a H:), se cae al sintético en vez
+        # de abortar.
+        if RUTA_MATRIZ_DEFECTO and os.path.exists(RUTA_MATRIZ_DEFECTO):
+            a.matriz = RUTA_MATRIZ_DEFECTO
+            print(f"(sin argumentos: usando RUTA_MATRIZ_DEFECTO = "
+                  f"{RUTA_MATRIZ_DEFECTO!r})\n")
+        else:
+            a.sintetico = True
+            print("(sin argumentos: RUTA_MATRIZ_DEFECTO no existe en disco, "
+                  "corriendo el autotest sintético; para validar una matriz "
+                  "usar --matriz RUTA)\n")
 
     print("=" * 74)
     print("CHECKLIST — particiones del sistema (step001 v2)")
