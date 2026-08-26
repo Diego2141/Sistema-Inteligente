@@ -36,6 +36,25 @@ Diferencia clave vs cv3: los parquets están en step005_wfcv_v4_direct/fold_exp/
 según el flag EXPANDING (True → expanding/fold_exp/fan_exp; False → rolling/fold_roll/fan_roll).
 y el nombre del banco en el filename es SISTEMA (no BancaLocal).
 
+FUENTE elige qué predicciones se grafican:
+
+    FUENTE = "test"   preds_base_<BANCO>_*.parquet        (ventana de TEST)
+    FUENTE = "val"    preds_val_fold<NN>_<BANCO>_*.parquet (ventana de VALIDACIÓN)
+
+VAL no es un holdout limpio: es el eval_set del early stopping de step005
+(entrenar_modelos_h usa eval_set=[(X_val, y_val)] con eval_metric="quantile"),
+así que el número de árboles de cada modelo-τ se eligió para minimizar el
+pinball sobre esas mismas filas. El fan chart de VAL sirve para VER la brecha
+contra TEST —las bandas van a lucir mejor calibradas de lo que generalizan—,
+no como evidencia de desempeño fuera de muestra.
+
+Cada fuente escribe en su propia carpeta (fan_<tipo>/<ETIQUETA> y
+fan_<tipo>_val/<ETIQUETA>), de modo que los PNG y el Excel de una nunca pisan
+los de la otra y SOLO_VIDEO sigue funcionando por separado en cada una. Para
+comparar los dos videos lado a lado conviene fijar YLIM_DIARIO a mano: con el
+rango automático cada fuente calcula el suyo y las bandas no son comparables
+entre videos.
+
 Dos botones independientes controlan la salida:
 
     FOTOS_DIARIAS = True/False   un PNG por fecha de origen
@@ -166,10 +185,25 @@ ETIQUETA = f"{BANCO}_{_fmt_anios(VENTANA_VAL_AÑOS)}_{_fmt_anios(VENTANA_TEST_A�
 _STEM = ("matriz_features" if not PARTICION
          else f"matriz_features_particiones_{PARTICION}")
 
+# ── Fuente de las predicciones ────────────────────────────────────────────────
+# "test" -> preds_base_<BANCO>_*.parquet          (comportamiento previo)
+# "val"  -> preds_val_fold<NN>_<BANCO>_*.parquet  (ventana de validación)
+# Ver la nota del encabezado: VAL es el eval_set del early stopping, no un
+# holdout limpio. Se grafica para medir la brecha contra TEST, no para reportar
+# desempeño fuera de muestra.
+FUENTE = "val"
+
+if FUENTE not in ("test", "val"):
+    raise ValueError(f"FUENTE inválida: {FUENTE!r} — usar 'test' o 'val'")
+
 DIR_PREDS    = (BASE_SISTEMA / "2. Output" / "step005_wfcv_v4_direct"
                 / f"fold_{_MODO_SUFIJO}" / ETIQUETA)
+# Carpeta propia por fuente: los PNG comparten patrón de nombre, así que sin
+# separarlas el video de VAL se armaría mezclando frames de TEST. El sufijo va
+# en el nivel del modo (no de ETIQUETA) para espejar aux_fanchart_cv4_direct.py.
+_SUF_FUENTE  = "" if FUENTE == "test" else "_val"
 DIR_OUTPUT   = (BASE_SISTEMA / "2. Output" / "aux_fanchart_cv4_direct"
-                / f"fan_{_MODO_SUFIJO}" / ETIQUETA)
+                / f"fan_{_MODO_SUFIJO}{_SUF_FUENTE}" / ETIQUETA)
 DIR_OUTPUT.mkdir(parents=True, exist_ok=True)
 
 RUTA_MATRIZ  = BASE_SISTEMA / "1. Data" / "Clean" / f"{_STEM}.parquet"
@@ -221,25 +255,82 @@ YLIM_DIARIO  = None   # None -> automático global; o fijar a mano, ej. (-3000, 
 
 
 # ── 1. Cargar parquet ─────────────────────────────────────────────────────────
-def cargar_parquet(banco: str) -> pd.DataFrame:
-    candidatos = sorted(DIR_PREDS.glob(f"preds_base_{banco}_*.parquet"))
-    if not candidatos:
-        raise FileNotFoundError(
-            f"No se encontró preds_base_{banco}_*.parquet en {DIR_PREDS}\n"
-            f"  Etiqueta buscada: {ETIQUETA}\n"
+def _pista_etiqueta() -> str:
+    """Sufijo de error común a las dos fuentes: casi siempre la etiqueta no coincide."""
+    return (f"  Etiqueta buscada: {ETIQUETA}\n"
             f"  Verificar que step005_walk_forward_cv_4_particiones.py corrió "
             f"con PARTICION={PARTICION!r}, ENTIDAD={ENTIDAD!r} y las mismas "
-            f"VENTANA_VAL_AÑOS / VENTANA_TEST_AÑOS.\n"
-            f"  -> Corre step005_walk_forward_cv_4.py primero"
+            f"VENTANA_VAL_AÑOS / VENTANA_TEST_AÑOS.")
+
+
+def _sello_de(p: Path) -> str:
+    """Timestamp final del nombre (…_<YYYYmmdd>.parquet). '' si no lo tiene."""
+    tail = p.stem.rsplit("_", 1)[-1]
+    return tail if tail.isdigit() else ""
+
+
+def _cargar_val(banco: str) -> pd.DataFrame:
+    """
+    Concatena los preds_val_fold<NN> de la corrida MÁS RECIENTE.
+
+    step005 escribe un parquet por fold (no hay consolidado como en TEST), y
+    cada corrida deja su propio sello de fecha. Mezclar sellos juntaría folds
+    entrenados con configuraciones distintas —otro EXPANDING, otros HP de
+    Optuna— en un mismo video, sin que nada lo delate. Por eso se toma el sello
+    máximo y se cargan solo los folds que lo llevan.
+    """
+    todos = sorted(DIR_PREDS.glob(f"preds_val_fold*_{banco}_*.parquet"))
+    if not todos:
+        raise FileNotFoundError(
+            f"No se encontró preds_val_fold*_{banco}_*.parquet en {DIR_PREDS}\n"
+            + _pista_etiqueta() + "\n"
+            f"  -> Corre step005_walk_forward_cv_4_particiones.py primero "
+            f"(escribe VAL por fold)"
         )
-    ruta = candidatos[-1]
-    df = pd.read_parquet(ruta)
+    sello = max(_sello_de(p) for p in todos)
+    rutas = [p for p in todos if _sello_de(p) == sello]
+    descartados = len(todos) - len(rutas)
+
+    df = pd.concat([pd.read_parquet(p) for p in rutas], ignore_index=True)
+    print(f"[OK] VAL cargado: {len(rutas)} fold(s) del sello {sello}  "
+          f"({len(df):,} filas)")
+    if descartados:
+        print(f"     {descartados} parquet(s) de corridas anteriores ignorados")
+    return df
+
+
+def cargar_parquet(banco: str) -> pd.DataFrame:
+    if FUENTE == "val":
+        df = _cargar_val(banco)
+    else:
+        candidatos = sorted(DIR_PREDS.glob(f"preds_base_{banco}_*.parquet"))
+        if not candidatos:
+            raise FileNotFoundError(
+                f"No se encontró preds_base_{banco}_*.parquet en {DIR_PREDS}\n"
+                + _pista_etiqueta() + "\n"
+                f"  -> Corre step005_walk_forward_cv_4.py primero"
+            )
+        ruta = candidatos[-1]
+        df = pd.read_parquet(ruta)
+        print(f"[OK] Parquet cargado: {ruta.name}  ({len(df):,} filas)")
+
     df["fecha_t"] = pd.to_datetime(df["fecha_t"])
     if "fecha_th" in df.columns:
         df["fecha_th"] = pd.to_datetime(df["fecha_th"])
-    print(f"[OK] Parquet cargado: {ruta.name}  ({len(df):,} filas)")
+    print(f"     Fuente: {FUENTE.upper()}")
     print(f"     Folds: {sorted(df['fold'].unique())}  |  h: {df['h'].min()}–{df['h'].max()}")
     print(f"     fecha_t: {df['fecha_t'].min().date()} → {df['fecha_t'].max().date()}")
+
+    # Las ventanas de VALIDACIÓN de folds consecutivos SÍ se solapan (a
+    # diferencia de las de test, que CORREGIR_SOLAPE_TEST dejó disjuntas), así
+    # que una misma fecha_t aparece bajo más de un fold. Se avisa acá porque
+    # decide la unidad del video: un frame por (fold, fecha), no por fecha.
+    _dup = (df.drop_duplicates(["fold", "fecha_t"])
+              .groupby("fecha_t")["fold"].nunique())
+    _n_comp = int((_dup > 1).sum())
+    if _n_comp:
+        print(f"     {_n_comp:,} fecha(s) de origen aparecen en más de un fold "
+              f"(ventanas de VAL solapadas) — se grafica una por fold")
     return df
 
 
@@ -319,11 +410,41 @@ def fechas_validas(df: pd.DataFrame) -> np.ndarray:
     return np.sort(df["fecha_t"].unique())
 
 
+def pares_fold_fecha(df: pd.DataFrame) -> list:
+    """
+    Unidad de graficado: un (fold, fecha_t) por frame, en orden cronológico.
+
+    No alcanza con la fecha sola. En VAL las ventanas de folds consecutivos se
+    solapan, así que filtrar solo por fecha_t devolvería las filas de DOS folds
+    y el fan chart saldría con dos valores por h —líneas en zigzag— sin ningún
+    aviso. Con TEST el resultado es idéntico a iterar por fecha, porque
+    CORREGIR_SOLAPE_TEST dejó las ventanas disjuntas y cada fecha cae en un
+    solo fold.
+
+    Se ordena por (fecha, fold) y no por (fold, fecha) para que el video avance
+    en el tiempo; cuando dos folds comparten fecha, van uno tras otro.
+    """
+    pares = df[["fold", "fecha_t"]].drop_duplicates()
+    pares = pares.sort_values(["fecha_t", "fold"])
+    return list(zip(pares["fold"].to_numpy(), pares["fecha_t"].to_numpy()))
+
+
 # ── 4. Preparar resultado para una fecha ─────────────────────────────────────
-def preparar_resultado(df: pd.DataFrame, fecha_origen: pd.Timestamp) -> pd.DataFrame:
-    res = df[df["fecha_t"] == fecha_origen].sort_values("h").reset_index(drop=True)
+def preparar_resultado(df: pd.DataFrame, fecha_origen: pd.Timestamp,
+                       fold: int | None = None) -> pd.DataFrame:
+    sel = df["fecha_t"] == fecha_origen
+    if fold is not None:
+        sel &= df["fold"] == fold
+    res = df[sel].sort_values("h").reset_index(drop=True)
     if res.empty:
-        raise ValueError(f"Sin datos para fecha_t={fecha_origen.date()}")
+        raise ValueError(f"Sin datos para fecha_t={fecha_origen.date()}"
+                         + (f" fold={fold}" if fold is not None else ""))
+    # Una fecha_t dentro de un mismo fold no puede repetir h. Si repite, el
+    # parquet trae filas duplicadas y las bandas saldrían mal dibujadas.
+    if res["h"].duplicated().any():
+        raise ValueError(
+            f"fecha_t={fecha_origen.date()} fold={fold}: h repetidos "
+            f"({int(res['h'].duplicated().sum())} filas) — parquet inconsistente")
     return res
 
 
@@ -414,9 +535,16 @@ def graficar(res: pd.DataFrame, fecha_origen: pd.Timestamp, banco: str,
     cum_real = np.where(mask_real, np.nancumsum(np.where(mask_real, realizado, 0)), np.nan)
     cum_real[~mask_real] = np.nan
 
+    # La fuente va en el título y no solo en la carpeta: un PNG suelto o un
+    # frame de video fuera de contexto no dice de dónde salió, y confundir VAL
+    # con TEST invierte la conclusión (VAL luce mejor calibrado por ser el
+    # eval_set del early stopping, no por generalizar mejor).
+    _fuente_txt = ("VENTANA DE TEST" if FUENTE == "test" else
+                   "VENTANA DE VALIDACIÓN (eval_set del early stopping)")
     titulo = (
         f"Fan Chart cv4 DIRECT — {banco}  |  Fold {fold_num}  |  "
         f"Origen: {fecha_origen.strftime('%d %b %Y')}  |  h = 2…{int(hs.max())} dh\n"
+        f"{_fuente_txt}\n"
         f"Realizado: h ≤ {h_max_real}  |  "
         f"Proyección pura: h > {h_max_real}  |  [1 modelo por h, h ∉ features]"
     )
@@ -716,7 +844,10 @@ def crear_video_desde_carpeta(tipo: str, banco: str = BANCO,
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    _tipo = VIDEO_TIPO if VIDEO_TIPO else _MODO_SUFIJO
+    # El sufijo de fuente entra también en el nombre del video: las carpetas ya
+    # los separan, pero los videos se comparten sueltos y "exp_arctan" a secas
+    # no distingue TEST de VAL una vez fuera de su carpeta.
+    _tipo = (VIDEO_TIPO if VIDEO_TIPO else _MODO_SUFIJO) + _SUF_FUENTE
 
     if SOLO_VIDEO:
         crear_video_desde_carpeta(_tipo, BANCO)
@@ -726,11 +857,14 @@ if __name__ == "__main__":
     df = _enriquecer_desde_matriz(df, BANCO)
 
     if FOTOS_DIARIAS or VIDEO_DIARIO:
-        fechas = fechas_validas(df)
-        fechas_sel = fechas[::PASO_FECHAS]
+        # (fold, fecha) y no solo fecha: en VAL los folds comparten fechas de
+        # origen. Ver pares_fold_fecha(). PASO_FECHAS / N_FECHAS_MAX submuestrean
+        # esta lista; con TEST equivale exactamente a submuestrear por fecha.
+        pares = pares_fold_fecha(df)
+        pares_sel = pares[::PASO_FECHAS]
         if N_FECHAS_MAX is not None:
-            fechas_sel = fechas_sel[:N_FECHAS_MAX]
-        total = len(fechas_sel)
+            pares_sel = pares_sel[:N_FECHAS_MAX]
+        total = len(pares_sel)
 
         # Si solo se quiere el video, los PNG son un intermedio desechable
         _tmp = None if FOTOS_DIARIAS else tempfile.mkdtemp(prefix="fanchart_cv4_")
@@ -747,17 +881,17 @@ if __name__ == "__main__":
 
         # Rutas en el orden en que se generan (cronológico) = orden de los frames
         pngs, pngs_por_fold = [], {}
-        for i, fecha_np in enumerate(fechas_sel, 1):
-            fecha = pd.Timestamp(fecha_np)
+        for i, (fold_np, fecha_np) in enumerate(pares_sel, 1):
+            fecha    = pd.Timestamp(fecha_np)
+            fold_num = int(fold_np)
             try:
-                res = preparar_resultado(df, fecha)
-                fold_num = int(res["fold"].iloc[0]) if "fold" in res.columns else 0
+                res = preparar_resultado(df, fecha, fold_num)
                 ruta_png = graficar(res, fecha, BANCO, i, total, fold_num,
                                     dir_out=dir_png, ylims=_ylims)
                 pngs.append(ruta_png)
                 pngs_por_fold.setdefault(fold_num, []).append(ruta_png)
             except Exception as e:
-                print(f"  [{i}/{total}] {fecha.date()} omitida: {e}")
+                print(f"  [{i}/{total}] f{fold_num} {fecha.date()} omitida: {e}")
 
             # gc.collect() cada 25 figuras: el objeto Figure ya se cierra en
             # graficar() (try/finally), pero el recolector de Python no
