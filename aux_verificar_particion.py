@@ -575,6 +575,14 @@ def modo_matriz(ruta):
         "acum_neto_min_pos", "acum_neto_max_pos",
         "esc_neto_max_pos_ap", "esc_deposito_pos_ap",
         "ccovn_propio_lag1", "var_ccovn_propio_lag1",
+        # Contraparte-CCOVN: por diseño es "el otro lado" de la partición, así
+        # que FOCO y RESTO tienen que verla distinta (uno mira al otro).
+        "ccovn_contraparte_lag1", "var_ccovn_contraparte_lag1",
+        "share_contraparte_lag1",
+        # Bloque de encaje: solo se calcula para la entidad configurada como
+        # banco_encaje (destinos_encaje_bbva), NaN para la otra — difieren por
+        # construcción, no por un flujo propio en sentido estricto.
+        "avance_mes_lag1", "exceso_abs_lag1",
     }
     # Lo que DEBE ser igual: calendario, macro y el régimen sistémico, que es
     # contexto común a propósito.
