@@ -524,9 +524,25 @@ def modo_matriz(ruta):
     piv = df.pivot_table(index=llaves, columns="banco", values=col_t, aggfunc="first")
     comunes = piv[["SISTEMA", foco[0], resto[0]]].dropna()
     dif = (comunes["SISTEMA"] - comunes[foco[0]] - comunes[resto[0]]).abs()
-    check("SISTEMA == FOCO + RESTO en el target",
-          float(dif.max()) < 1e-3,
-          f"{len(comunes):,} filas comparadas, peor desvío {dif.max():.4g}")
+    # Tolerancia escalada a float32, no absoluta. step001 castea cada entidad a
+    # float32 por separado justo antes de escribir (línea "Reducir a float32
+    # antes de reordenar"), y el target está en dólares crudos: para SISTEMA
+    # (suma de ~9 bancos) la magnitud puede ser de miles de millones, donde el
+    # ULP de float32 (valor × 2⁻²³) ya son cientos de dólares. Redondear cada
+    # entidad por separado y restar no da lo mismo que restar en float64 y
+    # redondear una vez, así que un desvío del orden del ULP no es un bug de
+    # partición — es el costo esperado del downcast. Una tolerancia absoluta
+    # fija (ej. 1e-3) es imposible de cumplir a esta escala y dispara un falso
+    # [FALLA] en cualquier matriz real.
+    _eps32 = np.finfo(np.float32).eps
+    _escala = comunes["SISTEMA"].abs().clip(lower=1.0)
+    _tol = (4 * _eps32 * _escala).clip(lower=1e-3)   # piso 1e-3 para targets chicos
+    _peor_idx = (dif / _tol).idxmax() if len(dif) else None
+    check("SISTEMA == FOCO + RESTO en el target (tolerancia ~float32)",
+          bool((dif <= _tol).all()),
+          f"{len(comunes):,} filas comparadas, peor desvío {dif.max():.4g} "
+          f"(tolerancia en ese punto: {_tol.loc[_peor_idx]:.4g})" if _peor_idx is not None
+          else f"{len(comunes):,} filas comparadas")
 
     print("\n3. Cada feature, ¿es propia de la entidad o compartida?")
     # El corazón de la auditoría por partición. Una feature que DEBE describir a
