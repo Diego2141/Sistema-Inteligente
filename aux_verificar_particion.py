@@ -579,11 +579,16 @@ def modo_matriz(ruta):
         # que FOCO y RESTO tienen que verla distinta (uno mira al otro).
         "ccovn_contraparte_lag1", "var_ccovn_contraparte_lag1",
         "share_contraparte_lag1",
-        # Bloque de encaje: solo se calcula para la entidad configurada como
-        # banco_encaje (destinos_encaje_bbva), NaN para la otra — difieren por
-        # construcción, no por un flujo propio en sentido estricto.
-        "avance_mes_lag1", "exceso_abs_lag1",
     }
+    # Bloque de encaje: destinos_encaje_bbva() solo atribuye estas columnas al
+    # lado de la partición cuya composición es EXACTAMENTE {banco_encaje}
+    # ("'contiene' no alcanza"). Con "bbva" eso es FOCO_BBVA, así que difiere de
+    # RESTO_BBVA (NaN). Pero con "globales" NINGÚN lado es exactamente {BBVA} —
+    # FOCO_GLOBALES trae 6 bancos — así que las dos quedan en NaN a propósito:
+    # no es un dato compartido, es "no aplica" en ambos lados. Compartido-por-
+    # ambas-NaN es válido acá; compartido con valores reales iguales seguiría
+    # siendo el bug que este chequeo busca.
+    DEBEN_DIFERIR_O_AMBAS_NA = {"avance_mes_lag1", "exceso_abs_lag1"}
     # Lo que DEBE ser igual: calendario, macro y el régimen sistémico, que es
     # contexto común a propósito.
     DEBEN_COMPARTIR = {
@@ -593,16 +598,29 @@ def modo_matriz(ruta):
     }
     print(f"   propias de la entidad: {len(propias)} | compartidas: {len(compartidas)}")
     mal_compartidas = sorted(DEBEN_DIFERIR & set(compartidas))
+    # Encaje: compartido solo es aceptable si NINGÚN lado tiene dato (ambas
+    # enteramente NaN) — "no aplica" para los dos, no un valor real duplicado.
+    _encaje_no_aplica = []
+    for c in sorted(DEBEN_DIFERIR_O_AMBAS_NA & set(compartidas)):
+        if a[c].isna().all() and b[c].isna().all():
+            _encaje_no_aplica.append(c)
+        else:
+            mal_compartidas.append(c)
+    mal_compartidas = sorted(mal_compartidas)
     mal_propias     = sorted(DEBEN_COMPARTIR & set(propias))
     check("toda feature de flujo/saldo propio DIFIERE entre foco y resto",
           not mal_compartidas,
           f"SALEN IGUALES: {mal_compartidas}" if mal_compartidas
-          else f"{len(DEBEN_DIFERIR & set(propias))} verificadas")
+          else f"{len(DEBEN_DIFERIR & set(propias))} verificadas"
+          + (f" | {len(_encaje_no_aplica)} de encaje NaN en ambos lados "
+             f"(no aplica a ninguno, no es un dato compartido): {_encaje_no_aplica}"
+             if _encaje_no_aplica else ""))
     check("calendario, macro y régimen sistémico son COMPARTIDOS",
           not mal_propias,
           f"DIFIEREN: {mal_propias}" if mal_propias
           else f"{len(DEBEN_COMPARTIR & set(compartidas))} verificadas")
-    _sin_clasificar = sorted(set(num) - DEBEN_DIFERIR - DEBEN_COMPARTIR)
+    _sin_clasificar = sorted(set(num) - DEBEN_DIFERIR - DEBEN_DIFERIR_O_AMBAS_NA
+                             - DEBEN_COMPARTIR)
     if _sin_clasificar:
         print(f"   sin clasificar (revisar a mano si son propias o compartidas):")
         for c in _sin_clasificar:
