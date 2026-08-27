@@ -112,6 +112,29 @@ GAP_DIAS_HAB        = PURGE_DIAS_HAB + EMBARGO_DIAS_HAB   # 97 + 22 = 119
 MIN_TRAIN_ROWS      = 50
 
 # ---------------------------------------------------------------------------
+# Predicciones sobre TRAIN (diagnóstico)
+# ---------------------------------------------------------------------------
+# Escribe preds_train_fold<NN>_<BANCO>_<fecha>.parquet, con el mismo formato que
+# los de TEST y VAL, para poder mirar el ajuste dentro de muestra con las mismas
+# herramientas (fan charts, cobertura).
+#
+# QUÉ SIGNIFICAN Y QUÉ NO. Estas filas son las que el modelo ajustó: las bandas
+# van a verse estrechas y la cobertura cerca del nominal casi por construcción.
+# No miden desempeño — miden CAPACIDAD. Sirven para dos cosas concretas:
+#
+#   · Diagnosticar sobreajuste por la BRECHA train -> val -> test. Un train muy
+#     por encima de val ya dice que el modelo memoriza; si train y test se
+#     parecen, el modelo está limitado por sesgo y no por varianza, y subir
+#     N_ESTIMATORS_MAX o la profundidad tiene sentido.
+#   · Ver si el modelo puede siquiera representar la forma del fenómeno. Si ni
+#     dentro de muestra reproduce el pico de cierre de mes, el problema son las
+#     features, no la regularización.
+#
+# Cuesta: TRAIN son 3 años contra 0.5 de val/test, así que el parquet pesa ~6x
+# el de test y hay una predicción extra por (h, tau). Por eso arranca en False.
+PREDECIR_TRAIN = False
+
+# ---------------------------------------------------------------------------
 # Early stopping + Optuna
 # ---------------------------------------------------------------------------
 N_ESTIMATORS_MAX      = 500   # techo de árboles; early stopping lo reduce en práctica
@@ -2703,6 +2726,7 @@ def _run_interno(banco: str = BANCO) -> None:
         # Write each h directly to a list; concat and flush to disk per fold
         fold_scaffolds:     list[pd.DataFrame] = []
         fold_val_scaffolds: list[pd.DataFrame] = []   # para CQR calibración
+        fold_train_scaffolds: list[pd.DataFrame] = [] # diagnóstico dentro de muestra
         n_h_ok = 0
         n_cruces_test = n_filas_test = 0      # diagnóstico de cruces de cuantiles
         n_cruces_val  = n_filas_val  = 0
@@ -2826,6 +2850,52 @@ def _run_interno(banco: str = BANCO) -> None:
                     _val_scaffold[col] = _p
                 fold_val_scaffolds.append(_val_scaffold)
 
+            # ── Predicciones sobre TRAIN (ver PREDECIR_TRAIN) ────────────────
+            # Va acá y no más abajo porque el `del` del final del bucle libera
+            # X_train. Mismo tratamiento que test y val: destransformar h=2
+            # ANTES de reordenar, para que el parquet quede en el espacio del
+            # target original y sea comparable con los otros dos.
+            if PREDECIR_TRAIN:
+                _ptr = {tau: m.predict(X_train) for tau, m in modelos.items()}
+                if _desc:
+                    _ptr = _destransformar_h2(
+                        _ptr, X_train["R_conf_t2"].to_numpy(dtype=float))
+                _preds_train, _ = _reordenar_cuantiles(_ptr)
+
+                # La máscara se re-deriva en vez de venir de preparar_fold_data_h:
+                # esa función no devuelve las fechas de train, y replicar la
+                # máscara acá —idéntica a `mt`, incluido el target.notna()— evita
+                # tocar su firma. Si alguna vez divergen, las fechas dejarían de
+                # alinear con las predicciones, así que se verifica el largo.
+                mtr_mask = (
+                    (df_h["fecha_t"] >= fold["train_start"]) &
+                    (df_h["fecha_t"] <= fold["train_end"])   &
+                    df_h["target"].notna()
+                )
+                if int(mtr_mask.sum()) != len(X_train):
+                    raise AssertionError(
+                        f"h={h_val}: la máscara de train re-derivada da "
+                        f"{int(mtr_mask.sum())} filas pero X_train tiene "
+                        f"{len(X_train)} — quedaría desalineada con las fechas")
+
+                _th_tr = (_strip_tz(pd.to_datetime(df_h.loc[mtr_mask, "fecha_th"]))
+                          if "fecha_th" in df_h.columns
+                          else pd.Series([pd.NaT] * len(X_train)))
+                _train_scaffold = pd.DataFrame({
+                    "banco"   : banco,
+                    "fold"    : fold["fold"],
+                    "fecha_t" : pd.DatetimeIndex(_strip_tz(df_h.loc[mtr_mask, "fecha_t"])),
+                    "fecha_th": pd.DatetimeIndex(_th_tr),
+                    "h"       : h_val,
+                    # y_train, no y_fit_tr: con _desc y_fit_tr es D(t+2), y el
+                    # parquet debe traer el target real como test y val.
+                    "target"  : y_train.values,
+                })
+                for tau, _p in _preds_train.items():
+                    col = "mean" if tau == "mean" else f"q{int(tau * 100):02d}"
+                    _train_scaffold[col] = _p
+                fold_train_scaffolds.append(_train_scaffold)
+
             n_h_ok += 1
 
             _row_met = calcular_metricas(
@@ -2864,6 +2934,15 @@ def _run_interno(banco: str = BANCO) -> None:
             fold_parquet_paths.append(ruta_fold)
             print(f"  → Guardado TEST: {ruta_fold.name}")
             del df_fold, fold_scaffolds
+            gc.collect()
+
+        if fold_train_scaffolds:
+            df_train_fold = pd.concat(fold_train_scaffolds, ignore_index=True)
+            ruta_train = DIR_MODO / f"preds_train_fold{fold['fold']:02d}_{banco}_{fecha_hoy}.parquet"
+            df_train_fold.to_parquet(ruta_train, index=False)
+            print(f"  → Guardado TRAIN: {ruta_train.name} "
+                  f"({len(df_train_fold):,} filas, DENTRO de muestra)")
+            del df_train_fold, fold_train_scaffolds
             gc.collect()
 
         if fold_val_scaffolds:

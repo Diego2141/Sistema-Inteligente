@@ -15,8 +15,22 @@ y el nombre del banco en el filename es SISTEMA (no BancaLocal).
 
 FUENTE elige qué predicciones se grafican:
 
-    FUENTE = "test"   preds_base_<BANCO>_*.parquet        (ventana de TEST)
-    FUENTE = "val"    preds_val_fold<NN>_<BANCO>_*.parquet (ventana de VALIDACIÓN)
+    FUENTE = "test"    preds_base_<BANCO>_*.parquet            (ventana de TEST)
+    FUENTE = "val"     preds_val_fold<NN>_<BANCO>_*.parquet    (VALIDACIÓN)
+    FUENTE = "train"   preds_train_fold<NN>_<BANCO>_*.parquet  (ENTRENAMIENTO)
+
+TRAIN exige PREDECIR_TRAIN=True en step005, que por defecto está en False. Son
+las filas que el modelo ajustó: las bandas se ven estrechas y la cobertura cerca
+del nominal casi por construcción. No miden desempeño sino CAPACIDAD — sirven
+para dimensionar la brecha train -> val -> test (si train está muy por encima de
+val, el modelo memoriza; si train y test se parecen, el límite es sesgo y no
+varianza) y para ver si el modelo puede siquiera reproducir la forma del
+fenómeno dentro de muestra.
+
+Ojo con TRAIN y el solapamiento: las ventanas de entrenamiento son de 3 años y
+los folds avanzan 0.5, así que una misma fecha de origen puede caer en hasta 6
+folds. El video emite un frame por (fold, fecha) —ver pares_fold_fecha()— de
+modo que esa fecha aparece varias veces, una por modelo que la vio.
 
 VAL no es un holdout limpio: es el eval_set del early stopping de step005
 (entrenar_modelos_h usa eval_set=[(X_val, y_val)] con eval_metric="quantile"),
@@ -25,7 +39,8 @@ pinball sobre esas mismas filas. El fan chart de VAL sirve para VER la brecha
 contra TEST —las bandas van a lucir mejor calibradas de lo que generalizan—,
 no como evidencia de desempeño fuera de muestra.
 
-Cada fuente escribe en su propia carpeta (fan_<tipo> y fan_<tipo>_val), de modo
+Cada fuente escribe en su propia carpeta (fan_<tipo>, fan_<tipo>_val,
+fan_<tipo>_train), de modo
 que los PNG y el Excel de una nunca pisan los de la otra y SOLO_VIDEO sigue
 funcionando por separado en cada una. Para comparar los dos videos lado a lado
 conviene fijar YLIM_DIARIO a mano: con el rango automático cada fuente calcula
@@ -121,20 +136,21 @@ BASE_SISTEMA = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente"
 _MODO_SUFIJO = "exp_arctan"
 
 # ── Fuente de las predicciones ────────────────────────────────────────────────
-# "test" -> preds_base_<BANCO>_*.parquet          (comportamiento previo)
-# "val"  -> preds_val_fold<NN>_<BANCO>_*.parquet  (ventana de validación)
-# Ver la nota del encabezado: VAL es el eval_set del early stopping, no un
-# holdout limpio. Se grafica para medir la brecha contra TEST, no para reportar
-# desempeño fuera de muestra.
+# "test"  -> preds_base_<BANCO>_*.parquet            (comportamiento previo)
+# "val"   -> preds_val_fold<NN>_<BANCO>_*.parquet    (ventana de validación)
+# "train" -> preds_train_fold<NN>_<BANCO>_*.parquet  (DENTRO de muestra; exige
+#            PREDECIR_TRAIN=True en step005). Las bandas van a verse estrechas
+#            casi por construcción: son las filas que el modelo ajustó. Sirve
+#            para ver capacidad y la brecha contra val/test, no desempeño.
 FUENTE = "val"
 
-if FUENTE not in ("test", "val"):
-    raise ValueError(f"FUENTE inválida: {FUENTE!r} — usar 'test' o 'val'")
+if FUENTE not in ("test", "val", "train"):
+    raise ValueError(f"FUENTE inválida: {FUENTE!r} — usar 'test', 'val' o 'train'")
 
 DIR_PREDS    = BASE_SISTEMA / "2. Output" / "step005_wfcv_v4_direct" / f"fold_{_MODO_SUFIJO}"
 # Carpeta propia por fuente: los PNG comparten patrón de nombre, así que sin
 # separarlas el video de VAL se armaría mezclando frames de TEST.
-_SUF_FUENTE  = "" if FUENTE == "test" else "_val"
+_SUF_FUENTE  = "" if FUENTE == "test" else f"_{FUENTE}"
 DIR_OUTPUT   = (BASE_SISTEMA / "2. Output" / "aux_fanchart_cv4_direct"
                 / f"fan_{_MODO_SUFIJO}{_SUF_FUENTE}")
 DIR_OUTPUT.mkdir(parents=True, exist_ok=True)
@@ -206,10 +222,10 @@ def _cargar_val(banco: str) -> pd.DataFrame:
     Optuna— en un mismo video, sin que nada lo delate. Por eso se toma el sello
     máximo y se cargan solo los folds que lo llevan.
     """
-    todos = sorted(DIR_PREDS.glob(f"preds_val_fold*_{banco}_*.parquet"))
+    todos = sorted(DIR_PREDS.glob(f"preds_{FUENTE}_fold*_{banco}_*.parquet"))
     if not todos:
         raise FileNotFoundError(
-            f"No se encontró preds_val_fold*_{banco}_*.parquet en {DIR_PREDS}\n"
+            f"No se encontró preds_{FUENTE}_fold*_{banco}_*.parquet en {DIR_PREDS}\n"
             f"  -> Corre step005_walk_forward_cv_4.py primero (escribe VAL por fold)"
         )
     sello = max(_sello_de(p) for p in todos)
@@ -217,7 +233,7 @@ def _cargar_val(banco: str) -> pd.DataFrame:
     descartados = len(todos) - len(rutas)
 
     df = pd.concat([pd.read_parquet(p) for p in rutas], ignore_index=True)
-    print(f"[OK] VAL cargado: {len(rutas)} fold(s) del sello {sello}  "
+    print(f"[OK] {FUENTE.upper()} cargado: {len(rutas)} fold(s) del sello {sello}  "
           f"({len(df):,} filas)")
     if descartados:
         print(f"     {descartados} parquet(s) de corridas anteriores ignorados")
@@ -225,7 +241,7 @@ def _cargar_val(banco: str) -> pd.DataFrame:
 
 
 def cargar_parquet(banco: str) -> pd.DataFrame:
-    if FUENTE == "val":
+    if FUENTE in ("val", "train"):
         df = _cargar_val(banco)
     else:
         candidatos = sorted(DIR_PREDS.glob(f"preds_base_{banco}_*.parquet"))
@@ -463,8 +479,11 @@ def graficar(res: pd.DataFrame, fecha_origen: pd.Timestamp, banco: str,
     # frame de video fuera de contexto no dice de dónde salió, y confundir VAL
     # con TEST invierte la conclusión (VAL luce mejor calibrado por ser el
     # eval_set del early stopping, no por generalizar mejor).
-    _fuente_txt = ("VENTANA DE TEST" if FUENTE == "test" else
-                   "VENTANA DE VALIDACIÓN (eval_set del early stopping)")
+    _fuente_txt = {
+        "test":  "VENTANA DE TEST",
+        "val":   "VENTANA DE VALIDACIÓN (eval_set del early stopping)",
+        "train": "VENTANA DE ENTRENAMIENTO — DENTRO DE MUESTRA (no es desempeño)",
+    }[FUENTE]
     titulo = (
         f"Fan Chart cv4 DIRECT — {banco}  |  Fold {fold_num}  |  "
         f"Origen: {fecha_origen.strftime('%d %b %Y')}  |  h = 2…{int(hs.max())} dh\n"
