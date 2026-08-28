@@ -89,7 +89,29 @@ logger = logging.getLogger(__name__)
 ###############################################################################
 
 BASE_SISTEMA = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente")
-RUTA_MATRIZ  = BASE_SISTEMA / "1. Data" / "Clean" / "matriz_features.parquet"
+
+# ══ BOTÓN DE PARTICIÓN ═══════════════════════════════════════════════════════
+# False → comportamiento IDÉNTICO al previo a este botón: matriz v1, solo
+#         SISTEMA, y las carpetas de salida sin subnivel por entidad.
+# True  → matriz de la partición activa y una carpeta por entidad.
+#
+# El subnivel de carpeta no es cosmético. Varias salidas de diagnóstico NO
+# llevan el banco en el nombre del archivo (convergencia_{tau}.png,
+# panel_{senal}_{tau}.png, {senal}_fold{NN}_{tau}.png), así que dos entidades
+# escribiendo en la misma carpeta se pisan los diagnósticos sin ningún aviso.
+# Con la lista de un solo elemento que había antes eso no podía pasar; con
+# particiones sí, porque el caso natural es correr FOCO y RESTO.
+PARTICIONES = False
+
+# Solo se leen cuando PARTICIONES=True. Se declaran igual acá para que la
+# configuración viva en un único lugar en vez de repartirse en dos ramas.
+PARTICION = "bbva"      # "bbva" | "globales" — debe existir en step001 v2
+ENTIDAD   = "FOCO"      # "SISTEMA" | "FOCO" | "RESTO"
+# ═════════════════════════════════════════════════════════════════════════════
+
+_STEM = (f"matriz_features_particiones_{PARTICION}" if PARTICIONES
+         else "matriz_features")
+RUTA_MATRIZ  = BASE_SISTEMA / "1. Data" / "Clean" / f"{_STEM}.parquet"
 DIR_OUTPUT   = BASE_SISTEMA / "2. Output" / "step005_wfcv_v3"
 
 GUARDAR_PREDS_TEST = True   # guarda predicciones TEST por fold para step006
@@ -396,7 +418,27 @@ TRIALS_POR_TAU   = {         # usado cuando ADAPTIVE_TRIALS = True
 }
 
 # ── Opciones de salida ────────────────────────────────────────────────────────
-BANCOS_A_EVALUAR          = ["SISTEMA"]
+if not PARTICIONES:
+    BANCOS_A_EVALUAR      = ["SISTEMA"]
+else:
+    # FOCO/RESTO solo existen si la matriz se generó con partición activa.
+    # Pedirlos sobre la matriz v1 no falla al cargar: devuelve un DataFrame
+    # vacío y el error recién aparece folds después, así que se resuelve el
+    # nombre acá y se aborta temprano si la combinación no tiene sentido.
+    if ENTIDAD == "SISTEMA":
+        BANCO = "SISTEMA"
+    elif ENTIDAD in ("FOCO", "RESTO"):
+        BANCO = f"{ENTIDAD}_{PARTICION.upper()}"
+    else:
+        raise ValueError(
+            f"ENTIDAD={ENTIDAD!r} no es válida. Opciones: 'SISTEMA', 'FOCO', "
+            f"'RESTO'.")
+    BANCOS_A_EVALUAR      = [BANCO]
+    # v3.7 conserva la lista —a diferencia de v4_particiones, que corre una
+    # entidad por corrida— así que las dos caras se pueden hacer de una sola
+    # pasada. Con el subnivel de carpeta de dirs_de_banco() ya no se pisan:
+    #   BANCOS_A_EVALUAR = [f"FOCO_{PARTICION.upper()}",
+    #                       f"RESTO_{PARTICION.upper()}", "SISTEMA"]
 GUARDAR_MODELO_FINAL      = True
 # True  → guarda modelos de TODOS los folds (permite fan chart histórico sin lookahead)
 # False → solo guarda el último fold (comportamiento anterior)
@@ -565,15 +607,70 @@ SOLO_FOLDS_MANUALES = False
 # ── Rutas de salida ───────────────────────────────────────────────────────────
 _modo           = "expanding" if EXPANDING else "rolling"
 _ventanas       = f"{VENTANA_TRAIN_AÑOS}{VENTANA_VAL_AÑOS}{VENTANA_TEST_AÑOS}"
-DIR_MODO        = DIR_OUTPUT / f"{MODELO_CV}_{_modo}_{_ventanas}"
-DIR_MODELOS            = DIR_MODO / "modelos"
-DIR_PLOTS              = DIR_MODO / "plots"
-DIR_FANCHARTS          = DIR_MODO / "fancharts_test"
-DIR_FANCHARTS_MANUALES = DIR_MODO / "fancharts_manuales"   # plots de FOLDS_MANUALES
+_DIR_BASE       = DIR_OUTPUT / f"{MODELO_CV}_{_modo}_{_ventanas}"
 
-for _d in (DIR_OUTPUT, DIR_MODO, DIR_MODELOS, DIR_PLOTS,
-           DIR_FANCHARTS, DIR_FANCHARTS_MANUALES):
-    _d.mkdir(parents=True, exist_ok=True)
+
+def _fmt_anios(x: float) -> str:
+    """0.5 -> '0.5', 1.0 -> '1'. Sin el .0 colgando, que ensucia la ruta."""
+    return f"{x:g}"
+
+
+def etiqueta_corrida(banco: str) -> str:
+    """
+    Identidad de la corrida: entidad + geometría del fold. Ej: FOCO_BBVA_1_0.5
+
+    Mismo formato que etiqueta_corrida() de
+    step005_walk_forward_cv_4_particiones.py, que es el que reconstruye
+    aux_fanchart_cv4_direct_particiones.py para encontrar las predicciones. Las
+    definiciones tienen que moverse juntas.
+
+    Solo entra en la ruta con PARTICIONES=True (ver dirs_de_banco).
+    """
+    return f"{banco}_{_fmt_anios(VENTANA_VAL_AÑOS)}_{_fmt_anios(VENTANA_TEST_AÑOS)}"
+
+
+def dirs_de_banco(banco: str) -> dict:
+    """
+    Carpetas de salida de una entidad, creadas si no existen.
+
+    Con PARTICIONES=False devuelve EXACTAMENTE las rutas de siempre —sin
+    subnivel— así que el archivo se comporta igual que antes de este botón.
+    Con True agrega un nivel por entidad, porque los diagnósticos que no llevan
+    el banco en el nombre del archivo se sobrescribirían entre corridas de
+    entidades distintas.
+    """
+    dm = _DIR_BASE / etiqueta_corrida(banco) if PARTICIONES else _DIR_BASE
+    d = {"modo"          : dm,
+         "modelos"       : dm / "modelos",
+         "plots"         : dm / "plots",
+         "fancharts"     : dm / "fancharts_test",
+         "fancharts_man" : dm / "fancharts_manuales"}   # plots de FOLDS_MANUALES
+    DIR_OUTPUT.mkdir(parents=True, exist_ok=True)
+    for p in d.values():
+        p.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+# Valores iniciales. Con PARTICIONES=False son los definitivos —nada los
+# reasigna— y coinciden con los literales que había antes de este cambio.
+_d0 = dirs_de_banco(BANCOS_A_EVALUAR[0])
+DIR_MODO               = _d0["modo"]
+DIR_MODELOS            = _d0["modelos"]
+DIR_PLOTS              = _d0["plots"]
+DIR_FANCHARTS          = _d0["fancharts"]
+DIR_FANCHARTS_MANUALES = _d0["fancharts_man"]
+
+# Guarda del bug latente: sin subnivel por entidad, correr más de un banco hace
+# que el segundo pise los diagnósticos del primero. Antes no podía ocurrir
+# porque la lista traía un solo elemento; esto lo impide si alguien la amplía
+# sin activar el botón.
+if not PARTICIONES and len(BANCOS_A_EVALUAR) > 1:
+    raise ValueError(
+        f"BANCOS_A_EVALUAR trae {len(BANCOS_A_EVALUAR)} entidades con "
+        f"PARTICIONES=False. Los diagnósticos que no llevan el banco en el "
+        f"nombre del archivo (convergencia_<tau>.png, panel_<senal>_<tau>.png, "
+        f"<senal>_fold<NN>_<tau>.png) se pisarían entre entidades. Activar "
+        f"PARTICIONES=True, que separa la salida por entidad.")
 
 
 def get_n_trials(tau: float) -> int:
@@ -4905,6 +5002,15 @@ def _main_interno():
     logger.info(f"  EXPANDING={EXPANDING}  TRAIN_min={VENTANA_TRAIN_AÑOS}yr  "
                 f"VAL={VENTANA_VAL_AÑOS}yr  TEST={VENTANA_TEST_AÑOS}yr  "
                 f"paso={PASO_AÑOS}yr")
+    # Qué matriz y qué entidades, explícito: con el botón en False el log es el
+    # mismo de antes salvo esta línea, y con True evita la duda de si la corrida
+    # leyó la matriz particionada o la v1.
+    if PARTICIONES:
+        logger.info(f"  PARTICIONES=True  particion={PARTICION!r}  "
+                    f"entidad={ENTIDAD!r}  ->  {BANCOS_A_EVALUAR}")
+    else:
+        logger.info(f"  PARTICIONES=False (sin partición)  ->  {BANCOS_A_EVALUAR}")
+    logger.info(f"  Matriz: {RUTA_MATRIZ.name}")
 
     if MODELO_CV == "lgbm" and not _LGBM_OK:
         logger.error("MODELO_CV='lgbm' pero lightgbm no está instalado.")
@@ -4916,6 +5022,25 @@ def _main_interno():
     t0 = time.time()
     todos = []
     for banco in BANCOS_A_EVALUAR:
+        # Reapuntar las carpetas a ESTA entidad. Solo con PARTICIONES=True: con
+        # False la rama no se ejecuta y los globales conservan el valor que les
+        # dio el bloque de rutas, que es el de siempre.
+        #
+        # Se reasignan los globales en vez de pasar las rutas por parámetro
+        # porque hay 56 referencias a estas cinco constantes repartidas por el
+        # archivo. Las tres funciones que más las usan (guardar_diag_y_plots,
+        # guardar_hp_report, guardar_tablas_excel) ya reciben dir_modo y banco
+        # como argumentos, así que la parte delicada ya estaba preparada.
+        if PARTICIONES:
+            global DIR_MODO, DIR_MODELOS, DIR_PLOTS
+            global DIR_FANCHARTS, DIR_FANCHARTS_MANUALES
+            _d = dirs_de_banco(banco)
+            DIR_MODO, DIR_MODELOS  = _d["modo"], _d["modelos"]
+            DIR_PLOTS              = _d["plots"]
+            DIR_FANCHARTS          = _d["fancharts"]
+            DIR_FANCHARTS_MANUALES = _d["fancharts_man"]
+            logger.info(f"  [{banco}] salida → {DIR_MODO}")
+
         df_m = evaluar_banco(banco)
         if df_m is not None:
             todos.append((banco, df_m))
