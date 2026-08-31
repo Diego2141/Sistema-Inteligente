@@ -145,17 +145,41 @@ EPISODIOS = [
 
 # ── Carga de datos ─────────────────────────────────────────────────────────────
 
-def cargar_datos():
+def cargar_datos(banco: str = BANCO, ruta_matriz: Path = RUTA_MATRIZ):
+    """
+    Serie de flujo neto diario de una entidad, indexada por la fecha de
+    REALIZACIÓN (fecha_t + H_REF días hábiles), no por el origen.
+
+    Los dos parámetros existen para que step005_walk_forward_cv_*.py pueda
+    generar los regímenes de cada entidad en la misma corrida, sin tocar las
+    constantes del módulo:
+
+      - banco       : con PARTICIONES=True las entidades son FOCO_<PART> y
+                      RESTO_<PART>, no solo SISTEMA.
+      - ruta_matriz : con PARTICIONES=True la matriz es
+                      matriz_features_particiones_<part>.parquet. Filtrar
+                      banco="FOCO_BBVA" sobre la matriz v1 no falla: devuelve
+                      un DataFrame vacío y el error aparece mucho después.
+
+    Los valores por defecto son las constantes del módulo, así que main() y el
+    uso standalone desde Spyder no cambian en nada.
+    """
     df = pd.read_parquet(
-        RUTA_MATRIZ,
+        ruta_matriz,
         columns=["fecha_t", "banco", "h", "target"],
-        filters=[("banco", "==", BANCO), ("h", "==", H_REF)],
+        filters=[("banco", "==", banco), ("h", "==", H_REF)],
     )
+    if df.empty:
+        raise ValueError(
+            f"No hay filas para banco={banco!r} con h={H_REF} en "
+            f"{ruta_matriz.name}. Si la entidad es FOCO_*/RESTO_*, la matriz "
+            f"debe ser la generada por step001_build_feature_matrix_v2.py con "
+            f"particion_activa != None.")
     df["fecha_t"] = pd.to_datetime(df["fecha_t"])
     df = df.sort_values("fecha_t").reset_index(drop=True)
     df["fecha"] = df["fecha_t"] + pd.tseries.offsets.BusinessDay(H_REF)
     df = df.set_index("fecha").sort_index()
-    print(f"  {BANCO} | {len(df):,} obs | {df.index.min().date()} → {df.index.max().date()}")
+    print(f"  {banco} | {len(df):,} obs | {df.index.min().date()} → {df.index.max().date()}")
     return df["target"].dropna()
 
 

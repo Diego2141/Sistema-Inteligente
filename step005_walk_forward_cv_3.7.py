@@ -127,6 +127,18 @@ GUARDAR_PREDS_TEST = True   # guarda predicciones TEST por fold para step006
 #         principio anti-leakage que GARCH/FFD.
 # False → comportamiento original, sin esta feature.
 USAR_FEATURE_REGIMEN = True
+
+# True  → este script ajusta el HMM por su cuenta (importa step005_validar_hmm_v5)
+#         para cada entidad de BANCOS_A_EVALUAR, usando como cortes los train_end
+#         de sus propios folds. Es lo que permite que con PARTICIONES=True existan
+#         los parquets de FOCO y RESTO sin correr el otro script tres veces
+#         cambiando su constante BANCO.
+# False → comportamiento anterior: se leen los parquets que ya haya en disco,
+#         generados corriendo step005_validar_hmm_v5.py aparte.
+#
+# Solo regenera cuando hace falta: si el parquet ya tiene un bloque por cada
+# train_end, no reajusta nada.
+HMM_INTERNO = True
 # Carpeta donde step005_validar_hmm*.py guarda estados_regimen_hmm_<banco>.parquet
 # y transmat_hmm_<banco>.parquet (DIR_OUTPUT de ese script).
 DIR_REGIMEN_HMM = BASE_SISTEMA / "2. Output"
@@ -1209,6 +1221,101 @@ _regimen_cache: dict[str, pd.DataFrame] = {}   # cache por banco — evita re-le
 
 def _ruta_estados_regimen(banco: str) -> Path:
     return DIR_REGIMEN_HMM / f"estados_regimen_hmm_{banco}.parquet"
+
+
+# Entidades cuyos regimenes ya se generaron en ESTA corrida — evita repetir el
+# ajuste cuando BANCOS_A_EVALUAR trae varias y cada evaluar_banco lo pide.
+_hmm_generado: set[str] = set()
+
+
+def _cortes_cubren_folds(banco: str, train_ends: list) -> bool:
+    """
+    True si el parquet de regimen de `banco` ya tiene un bloque con año_corte
+    EXACTAMENTE igual a cada train_end de los folds.
+
+    No basta con que el parquet exista. _elegir_año_corte_regimen toma el
+    bloque mas reciente con fecha maxima <= train_end: si los cortes se
+    generaron con otra grilla (p.ej. HMM_PASO_AVANCE anual mientras el
+    walk-forward avanza 0.5 años), el bloque elegido termina ANTES de
+    train_end y el fold pierde los meses intermedios de clasificacion, sin
+    ningun aviso. Exigir coincidencia exacta convierte ese desalineamiento
+    silencioso en una regeneracion.
+    """
+    ruta = _ruta_estados_regimen(banco)
+    if not ruta.exists():
+        return False
+    try:
+        cortes = set(pd.to_datetime(
+            pd.read_parquet(ruta, columns=["año_corte"])["año_corte"].unique()))
+    except Exception as e:
+        logger.warning(f"  [HMM] No se pudo leer los cortes de {ruta.name} "
+                       f"({type(e).__name__}: {e}) — se regenera.")
+        return False
+    return all(pd.Timestamp(te) in cortes for te in train_ends)
+
+
+def asegurar_regimenes_hmm(bancos: list[str], folds: list[dict]) -> None:
+    """
+    Ajusta el HMM y guarda estados_regimen_hmm_<banco>.parquet (+ transmat y
+    pickles por fold) para cada entidad de `bancos`, usando como fechas de
+    corte los train_end de `folds`.
+
+    Se corre para TODAS las entidades de una vez, no solo la que se esta
+    evaluando: la correlacion transversal rho_ij del paper necesita el bloque
+    de la contraparte, y con BANCOS_A_EVALUAR=[FOCO, RESTO, SISTEMA] el primer
+    evaluar_banco corre antes de que exista el parquet del segundo.
+
+    Alinear los cortes con los folds no es solo comodidad. hmm_evolucion
+    documenta fechas_corte como "tipicamente = train_end de cada fold del
+    walk-forward", y pasarlos explicitamente GARANTIZA que el bloque elegido
+    por _elegir_año_corte_regimen termine exactamente en train_end. Corriendo
+    el script aparte esa coincidencia depende de que HMM_INICIO y
+    HMM_PASO_AVANCE casen por casualidad con la grilla de folds.
+
+    No hace nada si HMM_INTERNO=False, si hmmlearn no esta disponible, o si el
+    parquet ya cubre esos cortes. Cualquier fallo se degrada a warning: el
+    feature de regimen ya es opcional y reemplazar_regimen_fold sabe seguir
+    sin el.
+    """
+    if not (HMM_INTERNO and USAR_FEATURE_REGIMEN):
+        return
+
+    train_ends = [pd.Timestamp(f["train_end"]) for f in folds]
+    pendientes = [b for b in bancos
+                  if b not in _hmm_generado and not _cortes_cubren_folds(b, train_ends)]
+    if not pendientes:
+        return
+
+    try:
+        import step005_validar_hmm_v5 as _hmm
+    except ImportError as e:
+        logger.warning(f"  [HMM] No se pudo importar step005_validar_hmm_v5 "
+                       f"({e}) — se omite la generacion interna. El feature de "
+                       f"regimen usara los parquets que ya existan.")
+        return
+    if not getattr(_hmm, "_HMM_OK", False):
+        logger.warning("  [HMM] hmmlearn/sklearn no disponibles en el entorno "
+                       "— se omite la generacion interna de regimenes.")
+        return
+
+    logger.info(f"  [HMM] Generando regimenes para {pendientes} "
+                f"con {len(train_ends)} cortes = train_end de cada fold")
+    for b in pendientes:
+        try:
+            flujo = _hmm.cargar_datos(banco=b, ruta_matriz=RUTA_MATRIZ)
+            evol  = _hmm.hmm_evolucion(flujo, fechas_corte=train_ends)
+            _hmm.guardar_objetos_simulacion(evol, flujo, banco=b,
+                                            dir_output=DIR_REGIMEN_HMM)
+            # El cache guarda el DataFrame leido del parquet ANTERIOR; sin
+            # invalidarlo, reemplazar_regimen_fold seguiria usando los cortes
+            # viejos durante el resto de la corrida.
+            _regimen_cache.pop(b, None)
+            _hmm_generado.add(b)
+            logger.info(f"  [HMM] {b}: regimenes generados")
+        except Exception as e:
+            logger.warning(f"  [HMM] {b}: fallo la generacion "
+                           f"({type(e).__name__}: {e}) — se sigue sin "
+                           f"regenerar. Se usara el parquet existente si lo hay.")
 
 
 def _ruta_transmat_regimen(banco: str) -> Path:
@@ -4427,6 +4534,14 @@ def evaluar_banco(banco: str):
             f"VAL  {f['val_start'].date()} → {f['val_end'].date()} | "
             f"TEST {f['test_start'].date()} → {f['test_end'].date()}"
         )
+
+    # Regimenes HMM alineados a ESTOS folds. Va aca porque necesita los folds ya
+    # cerrados (train_end definitivos, incluidos N_MAX_FOLDS y los manuales) y
+    # antes del bucle, que es donde reemplazar_regimen_fold lee los parquets.
+    # Se piden TODAS las entidades, no solo `banco`: rho_ij necesita el bloque de
+    # la contraparte, y con BANCOS_A_EVALUAR=[FOCO, RESTO, ...] el primer
+    # evaluar_banco corre antes de que exista el parquet del segundo.
+    asegurar_regimenes_hmm(BANCOS_A_EVALUAR, folds)
 
     resultados_test   = []
     resultados_val    = []
