@@ -1270,6 +1270,18 @@ def asegurar_regimenes_hmm(bancos: list[str], folds: list[dict]) -> None:
     pickles por fold) para cada entidad de `bancos`, usando como fechas de
     corte los train_end de `folds`.
 
+    Genera tambien los regimenes de la CONTRAPARTE y de SISTEMA aunque no esten
+    en `bancos`. La razon es que rho_ij no consume nada de XGBoost: sus insumos
+    son flujo, sigma y estado, los tres producidos por validar_hmm_v5 a partir
+    de la serie cruda. Sin esto habria que correr el walk-forward completo de
+    RESTO —Optuna, retrain, diagnosticos, ~25 min— solo para obtener su parquet
+    de regimen, que sale de un ajuste de HMM de segundos. Son insumos baratos,
+    no entidades a evaluar.
+
+    (Eso vale para la base actual z=flujo/sigma. Si algun dia rho_ij se migra a
+    base PIT necesitaria las distribuciones predictivas de ambas entidades, y
+    ahi si harian falta las dos corridas completas.)
+
     Se corre para TODAS las entidades de una vez, no solo la que se esta
     evaluando: la correlacion transversal rho_ij del paper necesita el bloque
     de la contraparte, y con BANCOS_A_EVALUAR=[FOCO, RESTO, SISTEMA] el primer
@@ -1291,7 +1303,19 @@ def asegurar_regimenes_hmm(bancos: list[str], folds: list[dict]) -> None:
         return
 
     train_ends = [pd.Timestamp(f["train_end"]) for f in folds]
-    pendientes = [b for b in bancos
+
+    # Entidades cuyo REGIMEN hace falta, que no son solo las que se evaluan:
+    #   - la contraparte, porque rho_ij correlaciona los dos lados
+    #   - SISTEMA, porque el rho_ij condicional se condiciona por SU regimen
+    #     (no por el propio: ver _estimar_rho_transversal, el regimen propio
+    #     volveria rho_ij asimetrico entre FOCO y RESTO)
+    requeridos = set(bancos)
+    for b in list(bancos):
+        contra = _banco_contraparte(b)
+        if contra is not None:
+            requeridos.update({contra, "SISTEMA"})
+
+    pendientes = [b for b in sorted(requeridos)
                   if b not in _hmm_generado and not _cortes_cubren_folds(b, train_ends)]
     if not pendientes:
         return
