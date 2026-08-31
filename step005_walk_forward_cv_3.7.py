@@ -45,6 +45,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 import warnings
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
@@ -734,6 +735,42 @@ def get_max_workers_optuna() -> int:
         return min(n_tau, 3)
 
     return max(1, min(n_tau, int(avail_gb / _MEM_POR_WORKER_GB)))
+
+
+def _monitor_rss_hijos(stop_evt, out, intervalo=2.0):
+    """
+    Muestrea el RSS agregado de los procesos hijo hasta que stop_evt se active.
+
+    Sirve para calibrar _MEM_POR_WORKER_GB con medición real en vez de la
+    estimación analítica. Corre en un hilo daemon: no bloquea la salida del
+    script ni altera el resultado del modelo.
+
+    Guarda el pico y cuántos procesos había EN ESE MISMO INSTANTE. Rastrear el
+    máximo del total y el máximo del conteo por separado daría un GB/worker
+    falso, al dividir el pico de un momento entre el conteo de otro.
+    """
+    try:
+        import psutil
+    except ImportError:
+        return                              # sin psutil no se mide, y no pasa nada
+
+    padre = psutil.Process()
+    while not stop_evt.wait(intervalo):     # wait() → True apenas se pide parar
+        try:
+            hijos = padre.children(recursive=True)
+            if not hijos:
+                continue
+            total = 0
+            for h in hijos:
+                try:
+                    total += h.memory_info().rss
+                except psutil.Error:
+                    pass                    # el worker terminó entre listar y medir
+            if total > out.get("pico", 0):
+                out["pico"]      = total
+                out["n_en_pico"] = len(hijos)
+        except psutil.Error:
+            pass
 
 
 def _guardar_preds_test(preds, y_real, h_arr, fechas_t,
@@ -1866,17 +1903,40 @@ def _entrenar_fold_xgb_qt(X_tr, y_tr, X_va, y_va, std_y, n_trials, fold_num):
     logger.info(f"    [xgb_qt] fold {fold_num}: {n_workers} workers paralelos "
                 f"× {n_rondas} ronda(s) para {len(QUANTILES)} cuantiles")
 
-    with ProcessPoolExecutor(max_workers=n_workers) as ex:
-        futures = {ex.submit(_worker_optuna_tau, args): args[0] for args in worker_args}
-        for fut in as_completed(futures):
-            tau, model, bp, best_val, trial_values = fut.result()
-            modelos[tau]     = model
-            best_by_tau[tau] = bp
-            optuna_meta[tau] = {"best_pinball_val": float(best_val),
-                                "trial_values": trial_values}
-            logger.info(f"    [xgb_qt] τ={tau:.2f} fold {fold_num}: "
-                        f"pinball/VAL={best_val:.4f}  s={bp['s']:.3f}  "
-                        f"n_est={bp['n_estimators']}")
+    # Monitor de RAM: mide el consumo real de los workers para calibrar
+    # _MEM_POR_WORKER_GB con datos en vez de la estimación analítica.
+    _stop_mon  = threading.Event()
+    _mem_stats = {}
+    _mon = threading.Thread(target=_monitor_rss_hijos,
+                            args=(_stop_mon, _mem_stats), daemon=True)
+    _mon.start()
+
+    try:
+        with ProcessPoolExecutor(max_workers=n_workers) as ex:
+            futures = {ex.submit(_worker_optuna_tau, args): args[0] for args in worker_args}
+            for fut in as_completed(futures):
+                tau, model, bp, best_val, trial_values = fut.result()
+                modelos[tau]     = model
+                best_by_tau[tau] = bp
+                optuna_meta[tau] = {"best_pinball_val": float(best_val),
+                                    "trial_values": trial_values}
+                logger.info(f"    [xgb_qt] τ={tau:.2f} fold {fold_num}: "
+                            f"pinball/VAL={best_val:.4f}  s={bp['s']:.3f}  "
+                            f"n_est={bp['n_estimators']}")
+    finally:
+        _stop_mon.set()
+        _mon.join(timeout=3)
+        _pico = _mem_stats.get("pico")
+        if _pico:
+            _n   = _mem_stats["n_en_pico"]
+            _por = _pico / _n / 1e9
+            logger.info(f"    [mem] fold {fold_num}: pico hijos={_pico/1e9:.2f} GB "
+                        f"con {_n} proceso(s) → {_por:.2f} GB/worker "
+                        f"(_MEM_POR_WORKER_GB={_MEM_POR_WORKER_GB})")
+            if _por > _MEM_POR_WORKER_GB:
+                logger.warning(f"    [mem] consumo real > estimación: sube "
+                               f"_MEM_POR_WORKER_GB a ~{_por * 1.2:.1f} "
+                               f"para no arriesgar OOM")
 
     # Mean model — reg:squarederror with best Q50 hyperparameters as base
     bp_mean = best_by_tau.get(0.50, list(best_by_tau.values())[0])
