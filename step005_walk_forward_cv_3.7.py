@@ -406,6 +406,15 @@ ADAPTIVE_TRIALS  = False
 
 TRIALS_FLAT      = 60        # usado cuando ADAPTIVE_TRIALS = False
 
+# Número máximo de procesos Optuna que corren en paralelo (uno por cuantil).
+# Con 7 τ y 16 GB RAM, lanzar los 7 simultáneamente agota la memoria en folds
+# grandes (>70 k filas). Reducir a 3 limita el pico de RAM a ~1.2 GB adicional
+# por ronda, dejando margen suficiente. Ajusta según RAM disponible:
+#   RAM 8 GB  → MAX_WORKERS_OPTUNA = 2
+#   RAM 16 GB → MAX_WORKERS_OPTUNA = 3
+#   RAM 32 GB → MAX_WORKERS_OPTUNA = 5  (o len(QUANTILES) para máximo paralelismo)
+MAX_WORKERS_OPTUNA = 3
+
 TRIALS_POR_TAU   = {         # usado cuando ADAPTIVE_TRIALS = True
     # Llaves = round(tau, 1) para QUANTILES = [0.01, 0.05, 0.40, 0.50, 0.60, 0.95, 0.99]
     0.0: 110,   # τ=0.01 → colas extremas, más difíciles de calibrar
@@ -1802,7 +1811,7 @@ def _entrenar_fold_xgb_qt(X_tr, y_tr, X_va, y_va, std_y, n_trials, fold_num):
     modelos      = {}
     best_by_tau  = {}
     optuna_meta  = {}   # {tau: {"best_pinball_val": …, "trial_values": [...]}}
-    with ProcessPoolExecutor(max_workers=_N_QUANTILES_PARALLEL) as ex:
+    with ProcessPoolExecutor(max_workers=MAX_WORKERS_OPTUNA) as ex:
         futures = {ex.submit(_worker_optuna_tau, args): args[0] for args in worker_args}
         for fut in as_completed(futures):
             tau, model, bp, best_val, trial_values = fut.result()
