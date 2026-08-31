@@ -4908,7 +4908,28 @@ def evaluar_banco(banco: str):
             })
 
         del X_train, y_train, X_val, y_val, X_test, y_test
+
+        # Los modelos del fold (74 horizontes x 8 modelos x 2 dicts ~ 1,200
+        # boosters) solo se soltaban al reasignar los dicts en el fold siguiente,
+        # DESPUES de que preparar_fold_data ya habia cargado la matriz nueva: en
+        # ese punto convivian los modelos viejos con los datos nuevos. Soltarlos
+        # aca adelanta la liberacion al final del fold que los produjo.
+        # Se asigna None en vez de 'del' porque segun MODELO_CV algunos de estos
+        # nombres pueden no haberse creado, y 'del' lanzaria NameError.
+        modelos = modelos_final = modelos_por_h = modelos_final_por_h = None
         gc.collect()
+
+        # RSS del padre tras liberar: si crece fold a fold hay retencion real;
+        # si se mantiene y aun asi baja la RAM libre del sistema, es
+        # fragmentacion del heap (memoria devuelta por Python pero no al SO).
+        try:
+            import psutil
+            _rss = psutil.Process().memory_info().rss / 1e9
+            _av  = psutil.virtual_memory().available / 1e9
+            logger.info(f"    [mem] fin fold {fold['fold']}: RSS padre={_rss:.2f} GB "
+                        f"| RAM libre={_av:.1f} GB")
+        except ImportError:
+            pass
         
     # -- Exportar predicciones a parquet (input para orquestador/video) ----------
     if all_preds_base:
