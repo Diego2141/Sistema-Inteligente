@@ -419,9 +419,17 @@ TRIALS_FLAT      = 60        # usado cuando ADAPTIVE_TRIALS = False
 #   int  → fuerza ese número de workers (reproducibilidad / debug)
 MAX_WORKERS_OPTUNA = None
 
-# RAM estimada por worker. Único número a ajustar si en la práctica los procesos
-# consumen más o menos: subirlo lanza menos workers, bajarlo lanza más.
+# RAM estimada por worker. Medido: ~0.22 GB en este dataset (954 obs × 23 feats);
+# el margen cubre datasets mayores. Subirlo lanza menos workers, bajarlo más.
 _MEM_POR_WORKER_GB = 0.5
+
+# Reserva que NUNCA se reparte entre workers. Sin ella la formula asigna toda la
+# RAM libre y el proceso padre se queda sin aire a mitad del fold: sigue
+# creciendo mientras los workers corren (acumula ~1,200 boosters por fold entre
+# modelos_por_h y modelos_final_por_h), XGBoost pide bloques transitorios, y el
+# SO necesita su parte. Medido: con ~3 GB libres la formula sin reserva autorizo
+# 6 workers que solo usaron 1.31 GB, y aun asi XGBoost fallo al pedir 4.8 MB.
+_RESERVA_PADRE_GB = 2.0
 
 TRIALS_POR_TAU   = {         # usado cuando ADAPTIVE_TRIALS = True
     # Llaves = round(tau, 1) para QUANTILES = [0.01, 0.05, 0.40, 0.50, 0.60, 0.95, 0.99]
@@ -734,7 +742,15 @@ def get_max_workers_optuna() -> int:
     if avail_gb is None:                       # no se pudo medir → asumir lo peor
         return min(n_tau, 3)
 
-    return max(1, min(n_tau, int(avail_gb / _MEM_POR_WORKER_GB)))
+    # Solo se reparte lo que sobra tras la reserva del padre, no toda la RAM libre.
+    usable_gb = avail_gb - _RESERVA_PADRE_GB
+    if usable_gb <= 0:                         # RAM al limite → secuencial
+        logger.warning(f"    [mem] solo {avail_gb:.1f} GB libres (< reserva de "
+                       f"{_RESERVA_PADRE_GB} GB) → 1 worker. Reinicia el kernel "
+                       f"de Spyder o corre desde terminal para liberar RAM.")
+        return 1
+
+    return max(1, min(n_tau, int(usable_gb / _MEM_POR_WORKER_GB)))
 
 
 def _monitor_rss_hijos(stop_evt, out, intervalo=2.0):
@@ -1900,8 +1916,13 @@ def _entrenar_fold_xgb_qt(X_tr, y_tr, X_va, y_va, std_y, n_trials, fold_num):
     # libre, así que el valor del fold 1 no sirve para el fold 3.
     n_workers = get_max_workers_optuna()
     n_rondas  = -(-len(QUANTILES) // n_workers)   # ceil division
+    try:
+        import psutil
+        _libre = f" | RAM libre={psutil.virtual_memory().available / 1e9:.1f} GB"
+    except ImportError:
+        _libre = ""
     logger.info(f"    [xgb_qt] fold {fold_num}: {n_workers} workers paralelos "
-                f"× {n_rondas} ronda(s) para {len(QUANTILES)} cuantiles")
+                f"× {n_rondas} ronda(s) para {len(QUANTILES)} cuantiles{_libre}")
 
     # Monitor de RAM: mide el consumo real de los workers para calibrar
     # _MEM_POR_WORKER_GB con datos en vez de la estimación analítica.
