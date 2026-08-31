@@ -47,6 +47,7 @@ import os
 import sys
 import threading
 import time
+import tracemalloc
 import warnings
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -422,6 +423,22 @@ MAX_WORKERS_OPTUNA = None
 # RAM estimada por worker. Medido: ~0.22 GB en este dataset (954 obs × 23 feats);
 # el margen cubre datasets mayores. Subirlo lanza menos workers, bajarlo más.
 _MEM_POR_WORKER_GB = 0.5
+
+# ── Diagnostico de memoria ────────────────────────────────────────────────────
+# True → tracemalloc atribuye el crecimiento de RAM entre folds a la linea que
+# lo asigna, y al cerrar cada fold sale un bloque [memtop] con los 10 sitios que
+# mas crecieron. Cuesta ~2x en tiempo de asignacion, asi que se deja apagado
+# salvo cuando se investiga una fuga.
+#
+# LIMITE IMPORTANTE: tracemalloc solo ve asignaciones de Python. Los boosters de
+# XGBoost son objetos C++ y su memoria NO aparece aca — solo el wrapper Python,
+# que son bytes. Por eso el resultado se lee en dos direcciones:
+#   [memtop] muestra MB relevantes  → retencion en Python, se corrige soltando
+#                                      la referencia que señala la linea
+#   [memtop] no muestra casi nada   → el crecimiento esta en el heap de C++
+#                                      (XGBoost); ahi la unica salida real es
+#                                      un subproceso por fold
+DIAGNOSTICO_MEMORIA = False
 
 # Reserva que NUNCA se reparte entre workers. Sin ella la formula asigna toda la
 # RAM libre y el proceso padre se queda sin aire a mitad del fold: sigue
@@ -4368,6 +4385,12 @@ def evaluar_banco(banco: str):
     importancias_folds = []
     # v3.7.0 — acumuladores del diagnóstico fold × h × τ (reemplazan a
     # diag_por_fold, que guardaba una sola entrada promediada por fold).
+    # Snapshot previo para el diff de tracemalloc entre folds (ver
+    # DIAGNOSTICO_MEMORIA). None en el fold 1: no hay con que comparar todavia.
+    _snap_prev = None
+    if DIAGNOSTICO_MEMORIA and not tracemalloc.is_tracing():
+        tracemalloc.start(1)
+
     diag_rows          = []   # una fila por (fold, h, τ) con gain_/perm_/shap_
     diag_familia_rows  = []   # una fila por (fold, h, τ) con Δ conjunto por familia
     hp_rows            = []   # una fila por (fold, grupo, τ) para el reporte HP
@@ -4930,6 +4953,24 @@ def evaluar_banco(banco: str):
                         f"| RAM libre={_av:.1f} GB")
         except ImportError:
             pass
+
+        # Atribucion del crecimiento a la linea que lo asigna. Se compara contra
+        # el fold anterior, no contra el arranque: lo que interesa es lo que
+        # queda retenido DESPUES de la limpieza, no el pico de trabajo.
+        if DIAGNOSTICO_MEMORIA:
+            _snap = tracemalloc.take_snapshot()
+            if _snap_prev is not None:
+                _top = [st for st in _snap.compare_to(_snap_prev, "lineno")
+                        if st.size_diff > 0][:10]
+                _tot = sum(st.size_diff for st in _top) / 1e6
+                logger.info(f"    [memtop] fold {fold['fold']} vs fold anterior "
+                            f"(+{_tot:.1f} MB en los 10 mayores, solo Python):")
+                for _st in _top:
+                    _fr = _st.traceback[0]
+                    _arch = Path(_fr.filename).name
+                    logger.info(f"      +{_st.size_diff / 1e6:8.2f} MB  "
+                                f"{_arch}:{_fr.lineno}")
+            _snap_prev = _snap
         
     # -- Exportar predicciones a parquet (input para orquestador/video) ----------
     if all_preds_base:
