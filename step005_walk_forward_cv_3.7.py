@@ -610,6 +610,43 @@ DIAG_BLOCK_SIZE       = 20    # filas por bloque en la permutación (preserva au
 DIAG_N_REPEATS        = 3     # repeticiones por feature para estabilizar la estimación
 DIAG_SHAP_MAX_SAMPLES = 800   # máximo de filas VAL para SHAP (None = todas)
 
+###############################################################################
+# MODO DEBUG — corrida rápida para diagnóstico, NO para resultados
+###############################################################################
+# True → recorta el trabajo para que dos folds terminen en ~10 min en vez de
+# ~60, y enciende la instrumentación de memoria. Pensado para localizar la
+# retención de RAM del proceso padre (ver DIAGNOSTICO_MEMORIA), no para producir
+# métricas: con estos valores los modelos están submuestreados y submuestreados
+# y sus resultados NO son comparables con una corrida normal.
+#
+# Reparto del tiempo medido en un fold real (30.2 min, 74 horizontes):
+#   [diag] gain+perm+shap  11.0 min (36%)  → DIAG_N_REPEATS, DIAG_SHAP_MAX_SAMPLES
+#   retrain_tv             10.4 min (34%)  → H_GRUPOS
+#   Optuna                  7.4 min (25%)  → TRIALS_FLAT
+#   fanchart + guardado      1.4 min (5%)  → sin tocar
+#
+# Criterio de qué se recorta: se ESCALAN las fases, no se apagan. Poner
+# DIAGNOSTICO_FEATURES = False ahorraría los 11 min de golpe, pero diag_rows
+# vive ahí dentro y es uno de los sospechosos de la retención: apagarlo daría
+# un falso negativo — "no hay fuga" cuando lo que se apagó fue la causa.
+MODO_DEBUG = False
+
+if MODO_DEBUG:
+    # 74 horizontes → 8. Cada h_rep (3, 13, 35, 62) se conserva dentro de su
+    # lista: si no estuviera, la búsqueda de HP del grupo aborta. h=2 se
+    # mantiene para que la descomposición R_conf_t2 se siga ejercitando.
+    H_GRUPOS = {
+        "muy_corto": ([2, 3],    3),
+        "corto":     ([6, 13],  13),
+        "medio":     ([21, 35], 35),
+        "largo":     ([51, 62], 62),
+    }
+    TRIALS_FLAT           = 15    # 60 → 15
+    DIAG_N_REPEATS        = 1     # 3 → 1   (permutación)
+    DIAG_SHAP_MAX_SAMPLES = 150   # 800 → 150
+    DIAGNOSTICO_MEMORIA   = True  # el objetivo de la corrida
+    # DIAGNOSTICO_FEATURES se deja en True a propósito (ver arriba).
+
 # ── Comparación con Step004 en fan charts ─────────────────────────────────────
 # True  → superpone predicciones del modelo step004 (línea naranja discontinua)
 #          para comparar visualmente con step005 fold-by-fold
@@ -4299,6 +4336,19 @@ def evaluar_banco(banco: str):
         f"trials={'adaptivo' if ADAPTIVE_TRIALS else f'flat={TRIALS_FLAT}'} | "
         f"workers_optuna={MAX_WORKERS_OPTUNA if MAX_WORKERS_OPTUNA else 'auto'}"
     )
+    # Advertencia ruidosa: una corrida debug produce metricas submuestreadas que
+    # se ven normales en los CSV. Sin este aviso es facil archivarlas como si
+    # fueran una corrida real.
+    if MODO_DEBUG:
+        _n_h = sum(len(hs) for hs, _ in H_GRUPOS.values())
+        logger.warning("  " + "!" * 63)
+        logger.warning(f"  !! MODO_DEBUG ACTIVO — corrida de diagnostico, "
+                       f"NO usar sus metricas")
+        logger.warning(f"  !! {_n_h} horizontes (normal: 74) | "
+                       f"TRIALS_FLAT={TRIALS_FLAT} | "
+                       f"SHAP<={DIAG_SHAP_MAX_SAMPLES} | "
+                       f"DIAG_N_REPEATS={DIAG_N_REPEATS}")
+        logger.warning("  " + "!" * 63)
     if ADAPTIVE_TRIALS:
         _tau_trials = {tau: get_n_trials(tau) for tau in QUANTILES}
         logger.info(f"  Trials por cuantil: " +
