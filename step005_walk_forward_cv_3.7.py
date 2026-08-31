@@ -858,7 +858,7 @@ def _monitor_rss_hijos(stop_evt, out, intervalo=2.0):
 def _guardar_preds_test(preds, y_real, h_arr, fechas_t,
                         fold_num, banco, fecha_hoy, dir_out,
                         regimen_hmm=None, regimen_sigma=None,
-                        año_corte_regimen=None, rho_s_val=None):
+                        año_corte_regimen=None, rho_s_val=None, rho_ij=None):
     """
     Guarda las predicciones TEST por fold.
     - regimen_hmm / regimen_sigma: estado HMM y sigma de CADA fila de test.
@@ -888,6 +888,16 @@ def _guardar_preds_test(preds, y_real, h_arr, fechas_t,
     if rho_s_val is not None:
         for s in sorted(rho_s_val.keys()):
             df[f"rho_s_{s}"] = float(rho_s_val[s])
+    if rho_ij:
+        # Constantes por fold, igual que rho_s_*. Nombres: rho_ij (global),
+        # rho_ij_s<estado> (condicional) y n_pares_rho_ij para poder juzgar
+        # cuanta muestra hay detras al armar R en la simulacion conjunta.
+        df["rho_ij"]         = float(rho_ij["global"])
+        df["n_pares_rho_ij"] = int(rho_ij.get("n_pares", 0))
+        df["contraparte_rho_ij"] = str(rho_ij.get("contraparte", ""))
+        for k, v in rho_ij.items():
+            if isinstance(k, int):
+                df[f"rho_ij_s{k}"] = float(v)
     ruta = dir_out / f"preds_test_fold{fold_num:02d}_{banco}_{fecha_hoy}.parquet"
     df.to_parquet(ruta, index=False)
     logger.info(f"    Preds TEST fold {fold_num} guardadas: {ruta.name}")
@@ -1555,6 +1565,140 @@ def _estimar_rho_val_fold(clasif: pd.DataFrame,
 
     logger.info(f"    [RHO_VAL] resumen fold -> {rho_por_s}")
     return rho_por_s
+
+
+def _banco_contraparte(banco: str) -> str | None:
+    """
+    Entidad complementaria dentro de la misma particion: FOCO_<P> <-> RESTO_<P>.
+
+    Se deriva del nombre en vez de leerla de config porque BANCO ya se arma asi
+    en la seccion de opciones (f"{ENTIDAD}_{PARTICION.upper()}"), y duplicar la
+    regla en dos lugares es como se desincronizan.
+
+    Devuelve None para SISTEMA o cualquier nombre sin ese prefijo: no tienen
+    contraparte y rho_ij no aplica.
+    """
+    for pref, otro in (("FOCO_", "RESTO_"), ("RESTO_", "FOCO_")):
+        if banco.startswith(pref):
+            return otro + banco[len(pref):]
+    return None
+
+
+def _estimar_rho_transversal(clasif_i: pd.DataFrame,
+                             clasif_j: pd.DataFrame,
+                             estados_cond: pd.Series | None = None,
+                             tau_ewma_pares: float = 100.0) -> dict:
+    """
+    Estima rho_ij = Corr_ponderada(z_i(t), z_j(t)) — la condicion (D2) del paper
+    de agregacion por grupos: correlacion CONTEMPORANEA entre dos entidades,
+    frente a la (D1) temporal que estima _estimar_rho_val_fold.
+
+    MISMA BASE QUE phi, a proposito. La ecuacion (5) del paper construye la
+    matriz de innovaciones como
+
+        Sigma_e = R (x) (11' - phi phi')      (Sigma_e)_ij = rho_ij (1 - phi_i phi_j)
+
+    o sea multiplica rho_ij por (1 - phi_i phi_j). Si phi se midiera sobre
+    z=flujo/sigma y rho sobre otra cosa (p.ej. normal scores del PIT), el
+    producto mezclaria dos objetos distintos y Sigma_e dejaria de significar lo
+    que la derivacion dice. Por eso aca se replica exactamente el z, la
+    ponderacion EWMA y la formula de Pearson ponderada de _estimar_rho_val_fold.
+    Si algun dia se migra phi a base PIT, hay que migrar esta funcion en el
+    mismo commit.
+
+    SIN filtro de gap, y no es un olvido: el max_gap_dias de la version temporal
+    existe para no correlacionar t-1 con t cuando los separa un feriado largo,
+    tratandolos como consecutivos. Aca los dos valores son del MISMO dia, asi
+    que la consecutividad no interviene — solo se exige que ambas entidades
+    tengan dato ese dia (join interno por fecha).
+
+    Parametros
+    ----------
+    clasif_i, clasif_j : DataFrame indexado por fecha con columnas "flujo" y
+                         "sigma", tal como los guarda
+                         estados_regimen_hmm_<banco>.parquet. Se cruzan por
+                         interseccion de fechas.
+    estados_cond       : serie {fecha: estado} para calcular ademas un rho por
+                         regimen. OPCIONAL y deliberadamente externa: cada
+                         entidad tiene su propio HMM y sus etiquetas pueden
+                         diferir el mismo dia, asi que condicionar por el
+                         regimen "propio" volveria rho_ij asimetrico — el valor
+                         calculado desde FOCO no coincidiria con el calculado
+                         desde RESTO. Pasar una serie comun (la de SISTEMA)
+                         mantiene la simetria. Si es None, solo se devuelve el
+                         global.
+    tau_ewma_pares     : vida media (dias habiles) del peso exponencial, igual
+                         que en la version temporal.
+
+    Devuelve
+    --------
+    {"global": rho, "n_pares": n, <estado>: rho_s, ...} — las claves por estado
+    solo aparecen si estados_cond se paso y ese regimen junto suficientes dias.
+    """
+    if clasif_i is None or clasif_j is None:
+        return {}
+
+    # Interseccion de fechas: rho_ij es contemporaneo, necesita ambas series el
+    # mismo dia. El sort es necesario para que el peso por recencia sea correcto.
+    idx = clasif_i.index.intersection(clasif_j.index).sort_values()
+    if len(idx) < MIN_PARES_RHO_REGIMEN:
+        logger.warning(f"    [RHO_IJ] Solo {len(idx)} fechas en comun entre las "
+                       f"dos entidades — insuficiente, se omite rho_ij.")
+        return {}
+
+    def _z(clasif: pd.DataFrame) -> np.ndarray:
+        f = clasif.loc[idx, "flujo"].values.astype(float)
+        s = clasif.loc[idx, "sigma"].values.astype(float)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return np.where(s > 1e-9, f / s, np.nan)
+
+    z_i, z_j = _z(clasif_i), _z(clasif_j)
+    valido = ~(np.isnan(z_i) | np.isnan(z_j))
+    if valido.sum() < MIN_PARES_RHO_REGIMEN:
+        logger.warning(f"    [RHO_IJ] Solo {int(valido.sum())} pares con sigma>0 "
+                       f"en ambas entidades — se omite rho_ij.")
+        return {}
+
+    z_i, z_j = z_i[valido], z_j[valido]
+    fechas   = np.array([pd.Timestamp(d) for d in idx[valido]])
+
+    K = float(np.exp(-1.0 / tau_ewma_pares))
+    mas_reciente = fechas.max()
+    pesos = np.array([K ** np.busday_count(d.date(), mas_reciente.date())
+                      for d in fechas], dtype=float)
+
+    def _pearson_ponderada(w, a, b) -> float:
+        """Identica a la de _estimar_rho_val_fold; el prefactor (1-K) se cancela."""
+        w_sum = w.sum()
+        if w_sum <= 0:
+            return 0.0
+        mu_a  = np.sum(w * a) / w_sum
+        mu_b  = np.sum(w * b) / w_sum
+        cov   = np.sum(w * (a - mu_a) * (b - mu_b)) / w_sum
+        var_a = np.sum(w * (a - mu_a) ** 2) / w_sum
+        var_b = np.sum(w * (b - mu_b) ** 2) / w_sum
+        den   = np.sqrt(var_a * var_b)
+        # El clip a +-0.98 no es cosmetico: rho_ij=+-1 vuelve R singular y la
+        # factorizacion de Cholesky del paso P1 del algoritmo falla.
+        return float(np.clip(cov / den, -0.98, 0.98)) if den > 1e-12 else 0.0
+
+    out = {"global": _pearson_ponderada(pesos, z_i, z_j),
+           "n_pares": int(valido.sum())}
+    logger.info(f"    [RHO_IJ] global: rho={out['global']:+.3f}  "
+                f"n_pares={out['n_pares']} (ponderado, tau={tau_ewma_pares:.0f}d)")
+
+    if estados_cond is not None:
+        est = pd.Series(estados_cond).reindex(idx[valido]).values
+        for s in sorted({int(v) for v in est if pd.notna(v)}):
+            m = np.array([pd.notna(v) and int(v) == s for v in est])
+            if m.sum() < MIN_PARES_RHO_REGIMEN:
+                logger.info(f"    [RHO_IJ] estado {s}: solo {int(m.sum())} pares "
+                            f"< minimo={MIN_PARES_RHO_REGIMEN} — se usa el global")
+                continue
+            out[s] = _pearson_ponderada(pesos[m], z_i[m], z_j[m])
+            logger.info(f"    [RHO_IJ] estado {s}: rho={out[s]:+.3f}  "
+                        f"n_pares={int(m.sum())}")
+    return out
 
 
 def reemplazar_regimen_fold(df_fold: pd.DataFrame, train_end: pd.Timestamp,
@@ -4906,6 +5050,8 @@ def evaluar_banco(banco: str):
         
         # ── Estimacion de rho_s en VAL (anti-leakage) ──────────────────────
         _rho_s_val = None
+        _rho_ij    = None   # rho transversal; queda None si la entidad no tiene
+                            # contraparte (SISTEMA) o falta su parquet
         if ESTIMAR_RHO_EN_VAL and USAR_FEATURE_REGIMEN and año_corte_regimen is not None:
             # Nivel 3 (exclusión): si el fold HMM es degenerado (state collapse),
             # la clasificación de régimen en VAL no es confiable — los pares
@@ -4958,6 +5104,50 @@ def evaluar_banco(banco: str):
                             tau_ewma_pares=TAU_EWMA_RHO_PARES,
                         )
                         logger.info(f"    [RHO_VAL] rho_s estimado (año_corte={año_corte_regimen}): {_rho_s_val}")
+
+                        # ── rho_ij transversal (D2 del paper) ──────────────
+                        # Mismo bloque año_corte que phi, asi que hereda su
+                        # anti-leakage: no ve nada posterior a train_end.
+                        _contraparte = _banco_contraparte(banco)
+                        if _contraparte is not None:
+                            _df_otro = _cargar_estados_regimen_disco(_contraparte)
+                            if _df_otro is None:
+                                logger.info(
+                                    f"    [RHO_IJ] Sin parquet de {_contraparte} "
+                                    f"— se omite rho_ij. Con HMM_INTERNO=True y "
+                                    f"esa entidad en BANCOS_A_EVALUAR se genera sola.")
+                            else:
+                                _bloque_otro = (
+                                    _df_otro[_df_otro["año_corte"] == año_corte_regimen]
+                                    .drop_duplicates("fecha")
+                                    .set_index("fecha")[["estado", "sigma", "flujo"]]
+                                    .sort_index()
+                                )
+                                # Regimen para condicionar: el de SISTEMA si esta,
+                                # NO el propio. Cada entidad tiene su HMM y sus
+                                # etiquetas difieren el mismo dia, asi que usar el
+                                # propio haria que rho_ij calculado desde FOCO no
+                                # coincida con el calculado desde RESTO — y esa
+                                # simetria es justamente el chequeo gratis que da
+                                # correr las dos caras en una pasada.
+                                _df_sist = _cargar_estados_regimen_disco("SISTEMA")
+                                _est_cond = None
+                                if _df_sist is not None:
+                                    _bl_sist = _df_sist[
+                                        _df_sist["año_corte"] == año_corte_regimen]
+                                    if not _bl_sist.empty:
+                                        _est_cond = (_bl_sist.drop_duplicates("fecha")
+                                                     .set_index("fecha")["estado"])
+                                _rho_ij = _estimar_rho_transversal(
+                                    _bloque_rho, _bloque_otro,
+                                    estados_cond=_est_cond,
+                                    tau_ewma_pares=TAU_EWMA_RHO_PARES,
+                                )
+                                if _rho_ij:
+                                    _rho_ij["contraparte"] = _contraparte
+                                    logger.info(
+                                        f"    [RHO_IJ] {banco} vs {_contraparte} "
+                                        f"(año_corte={año_corte_regimen}): {_rho_ij}")
                     else:
                         # Bloque vacio para ESTE año_corte, pero el resto del
                         # parquet (otros folds, misma corrida de
@@ -4984,7 +5174,8 @@ def evaluar_banco(banco: str):
                 regimen_hmm=_regimen_hmm_test,
                 regimen_sigma=_regimen_sigma_test,
                 año_corte_regimen=año_corte_regimen,
-                rho_s_val=_rho_s_val)    
+                rho_s_val=_rho_s_val,
+                rho_ij=_rho_ij)
             
         if not SOLO_REGENERAR_PLOTS:
             row_test = calcular_metricas_fold(preds_test, y_test.values, fold, "test")
