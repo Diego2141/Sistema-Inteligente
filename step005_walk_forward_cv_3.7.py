@@ -406,14 +406,21 @@ ADAPTIVE_TRIALS  = False
 
 TRIALS_FLAT      = 60        # usado cuando ADAPTIVE_TRIALS = False
 
-# Número máximo de procesos Optuna que corren en paralelo (uno por cuantil).
-# Con 7 τ y 16 GB RAM, lanzar los 7 simultáneamente agota la memoria en folds
-# grandes (>70 k filas). Reducir a 3 limita el pico de RAM a ~1.2 GB adicional
-# por ronda, dejando margen suficiente. Ajusta según RAM disponible:
-#   RAM 8 GB  → MAX_WORKERS_OPTUNA = 2
-#   RAM 16 GB → MAX_WORKERS_OPTUNA = 3
-#   RAM 32 GB → MAX_WORKERS_OPTUNA = 5  (o len(QUANTILES) para máximo paralelismo)
-MAX_WORKERS_OPTUNA = 3
+# ── Paralelismo Optuna ────────────────────────────────────────────────────────
+# Procesos Optuna en paralelo (uno por cuantil). Cada worker carga su copia de
+# X_tr/X_va, construye su propio DMatrix de XGBoost (~3× los datos) y arranca un
+# intérprete Python nuevo (spawn en Windows) → ~400 MB por proceso. Con 7 τ eso
+# da ~2.8 GB de pico, suficiente para agotar un laptop de 16 GB en folds grandes
+# (>70 k filas) y que el SO mate el proceso sin traceback.
+#
+#   None → auto-detecta según la RAM libre AL INICIO DE CADA FOLD (recomendado:
+#          se adapta solo entre un laptop y un servidor, y entre folds)
+#   int  → fuerza ese número de workers (reproducibilidad / debug)
+MAX_WORKERS_OPTUNA = None
+
+# RAM estimada por worker. Único número a ajustar si en la práctica los procesos
+# consumen más o menos: subirlo lanza menos workers, bajarlo lanza más.
+_MEM_POR_WORKER_GB = 0.5
 
 TRIALS_POR_TAU   = {         # usado cuando ADAPTIVE_TRIALS = True
     # Llaves = round(tau, 1) para QUANTILES = [0.01, 0.05, 0.40, 0.50, 0.60, 0.95, 0.99]
@@ -687,6 +694,46 @@ def get_n_trials(tau: float) -> int:
     if ADAPTIVE_TRIALS:
         return TRIALS_POR_TAU.get(round(tau, 1), 90)
     return TRIALS_FLAT
+
+
+def get_max_workers_optuna() -> int:
+    """
+    Número de procesos Optuna que caben en la RAM libre en este momento.
+
+    Se llama al inicio de cada fold (no una sola vez al importar) porque la RAM
+    disponible cae a medida que el proceso padre acumula datos: medir en el fold
+    1 y reutilizar ese valor en el fold 3 sería optimista justo donde importa.
+
+    Si MAX_WORKERS_OPTUNA trae un int, respeta ese valor y no mide nada.
+    Detección en cascada: psutil → /proc/meminfo → fallback conservador (3).
+    """
+    if MAX_WORKERS_OPTUNA:
+        return MAX_WORKERS_OPTUNA
+
+    n_tau    = len(QUANTILES)
+    avail_gb = None
+
+    # Libera lo que dejó el fold anterior para no medir basura como si fuera
+    # memoria ocupada — sin esto la estimación sale pesimista tras el fold 1.
+    gc.collect()
+
+    try:
+        import psutil
+        avail_gb = psutil.virtual_memory().available / 1e9
+    except ImportError:
+        try:                                   # Linux / WSL sin psutil
+            with open("/proc/meminfo") as fmem:
+                for line in fmem:
+                    if line.startswith("MemAvailable:"):
+                        avail_gb = int(line.split()[1]) / 1e6   # kB → GB
+                        break
+        except OSError:
+            pass                               # Windows sin psutil
+
+    if avail_gb is None:                       # no se pudo medir → asumir lo peor
+        return min(n_tau, 3)
+
+    return max(1, min(n_tau, int(avail_gb / _MEM_POR_WORKER_GB)))
 
 
 def _guardar_preds_test(preds, y_real, h_arr, fechas_t,
@@ -1811,7 +1858,15 @@ def _entrenar_fold_xgb_qt(X_tr, y_tr, X_va, y_va, std_y, n_trials, fold_num):
     modelos      = {}
     best_by_tau  = {}
     optuna_meta  = {}   # {tau: {"best_pinball_val": …, "trial_values": [...]}}
-    with ProcessPoolExecutor(max_workers=MAX_WORKERS_OPTUNA) as ex:
+
+    # Se remide en cada fold: los folds tardíos tienen más filas y menos RAM
+    # libre, así que el valor del fold 1 no sirve para el fold 3.
+    n_workers = get_max_workers_optuna()
+    n_rondas  = -(-len(QUANTILES) // n_workers)   # ceil division
+    logger.info(f"    [xgb_qt] fold {fold_num}: {n_workers} workers paralelos "
+                f"× {n_rondas} ronda(s) para {len(QUANTILES)} cuantiles")
+
+    with ProcessPoolExecutor(max_workers=n_workers) as ex:
         futures = {ex.submit(_worker_optuna_tau, args): args[0] for args in worker_args}
         for fut in as_completed(futures):
             tau, model, bp, best_val, trial_values = fut.result()
@@ -4143,7 +4198,8 @@ def evaluar_banco(banco: str):
         f"  TRAIN {VENTANA_TRAIN_AÑOS}yr{'(min)' if EXPANDING else ''} | "
         f"VAL {VENTANA_VAL_AÑOS}yr (Optuna) | TEST {VENTANA_TEST_AÑOS}yr (métricas) | "
         f"paso {PASO_AÑOS}yr | purge {PURGE_DIAS_HAB}dh | burn-in {BURN_IN_DIAS_HAB}dh | "
-        f"trials={'adaptivo' if ADAPTIVE_TRIALS else f'flat={TRIALS_FLAT}'}"
+        f"trials={'adaptivo' if ADAPTIVE_TRIALS else f'flat={TRIALS_FLAT}'} | "
+        f"workers_optuna={MAX_WORKERS_OPTUNA if MAX_WORKERS_OPTUNA else 'auto'}"
     )
     if ADAPTIVE_TRIALS:
         _tau_trials = {tau: get_n_trials(tau) for tau in QUANTILES}
