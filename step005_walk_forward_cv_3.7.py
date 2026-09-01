@@ -4144,11 +4144,23 @@ class _Tee:
 
     def write(self, s):
         self._orig.write(s)
-        self._f.write(s)
+        try:
+            self._f.write(s)
+        except OSError:
+            # H: es una unidad de red; una corrida larga (>2h en la practica)
+            # puede sobrevivir a un corte momentaneo de la conexion, pero eso
+            # invalida el handle del archivo. Sin este guard, el siguiente
+            # write() propaga el OSError hasta matar el proceso justo al
+            # final — despues de horas de computo ya persistido en los
+            # parquets de cada fold, perdiendo solo el resumen de consola.
+            pass
 
     def flush(self):
         self._orig.flush()
-        self._f.flush()
+        try:
+            self._f.flush()
+        except OSError:
+            pass
 
     def __getattr__(self, nombre):
         orig = self.__dict__.get("_orig")
@@ -4159,10 +4171,16 @@ class _Tee:
     def cerrar(self):
         if self._handler is not None:
             logging.getLogger().removeHandler(self._handler)
-            self._handler.close()
+            try:
+                self._handler.close()
+            except OSError:
+                pass
             self._handler = None
         sys.stdout = self._orig
-        self._f.close()
+        try:
+            self._f.close()
+        except OSError:
+            pass
 
 
 
