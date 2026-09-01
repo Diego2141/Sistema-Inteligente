@@ -5118,7 +5118,24 @@ def evaluar_banco(banco: str):
                     f"  [RHO_VAL] Fold año_corte={año_corte_regimen}: "
                     f"_fold_degenerado=False (HMM estable o pickle no leído) — "
                     f"se procederá a estimar rho en VAL.")
-                
+            else:
+                # Sin esto, un fold degenerado salta TODO el bloque de rho_s/
+                # rho_ij en absoluto silencio: ni warning ni error, la corrida
+                # termina "exitosa" con coverage/pinball normales y sin que
+                # nada en el log indique por que rho_ij nunca aparecio. Costo
+                # real: una tarde de diagnostico a ciegas buscando el bug en
+                # la estimacion cuando el problema era el HMM del fold, no la
+                # formula de correlacion.
+                logger.warning(
+                    f"  [RHO_VAL] Fold año_corte={año_corte_regimen} banco={banco}: "
+                    f"HMM DEGENERADO (diag_ok=False en {_pkl_path_diag.name}, "
+                    f"umbral HMM_MIN_DIAG_TRANSMAT en step005_validar_hmm_v5.py) "
+                    f"— se omiten rho_s y rho_ij para este fold. Fallback del "
+                    f"orquestador (columnas rho_s_*/rho_ij ausentes). Si esto "
+                    f"ocurre en TODOS los folds de una entidad, esa entidad "
+                    f"probablemente tiene muy pocas observaciones para 3 "
+                    f"regimenes — considerar N_ESTADOS=2 en validar_hmm_v5.")
+
         if ESTIMAR_RHO_EN_VAL and USAR_FEATURE_REGIMEN and año_corte_regimen is not None and not _fold_degenerado:
             try:
                 _h_min_rho = H_MIN_RHO_VAL if H_MIN_RHO_VAL is not None else int(h_val.min())
