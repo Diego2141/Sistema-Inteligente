@@ -27,6 +27,15 @@ Uso:
     python step005_validar_sadf.py
 """
 
+# Sin esto, `fechas_corte: list | None` (sintaxis PEP 604) se evalua en tiempo
+# de import y revienta con TypeError en cualquier Python < 3.10 — que es
+# exactamente el caso al importar este modulo desde step005_walk_forward_cv_3.7,
+# corriendo en Anaconda3 con una version mas vieja. cv_3.7 ya tiene este import
+# y por eso nunca mostro el problema; quedo invisible hasta que otro modulo lo
+# importa. __future__.annotations difiere TODAS las anotaciones a texto, asi
+# que blinda el archivo tambien contra otras uniones que se agreguen despues.
+from __future__ import annotations
+
 import warnings
 warnings.filterwarnings("ignore")
 
