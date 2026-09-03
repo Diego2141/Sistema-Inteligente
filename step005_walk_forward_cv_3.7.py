@@ -167,6 +167,71 @@ HMM_INTERNO = True
 # es la escala que estandariza z_t = flujo_t/sigma_t de ESA entidad.
 BANCO_REGIMEN = "SISTEMA"
 
+# ── BOTON: sobre QUE se estratifican phi_i(s) y rho_ij(s) ────────────────────
+# El supuesto A3 del paper escribe el condicionante como s_h (un subindice por
+# horizonte, no por grupo) pero NO exige que sea latente ni markoviano. Una
+# etiqueta de calendario lo satisface igual de bien, y tiene tres ventajas
+# operativas sobre el HMM:
+#
+#   1. Es DETERMINISTA en t+h. El regimen HMM hay que simularlo
+#      (simular_regimen_path muestrea la cadena de Markov antes de poder elegir
+#      phi(s)/rho_ij(s) de cada dia); la posicion del mes se CALCULA. Menos
+#      ruido Monte Carlo y una dependencia menos que arrastrar a step006.
+#   2. No degenera. No hay Baum-Welch, no hay diag(A) que colapsar. Es lo que
+#      desbloquea a FOCO_BBVA, cuyos 3 folds salen degenerados por el 10.0% de
+#      dias con flujo exactamente cero (vs 0.3% en SISTEMA).
+#   3. Los baldes quedan balanceados por construccion, en vez de tener un
+#      "severo" raro con n chico e inestable entre folds (medido: rho_ij(severo)
+#      = +0.039 y +0.199 en los dos folds no degenerados, con n≈216-244 pares).
+#
+# CONTRA, y es la razon por la que esto es un boton y no un reemplazo: regimen
+# y calendario miden cosas distintas (estres latente vs estacionalidad del
+# encaje), y las marginales de XGBoost YA condicionan en dias_al_cierre_mes
+# —la familia calendario_cierre es la de mayor importancia por permutacion—,
+# asi que hay riesgo de doble conteo. Solo aporta si lo que varia por posicion
+# del mes es la DEPENDENCIA (phi, rho_ij), no el nivel. eta^2=11.2% mide
+# varianza del NIVEL del flujo, que es justo lo que la marginal ya se lleva:
+# no es evidencia de que rho_ij varie por calendario. Por eso: correr las dos
+# y comparar, no asumir.
+#
+# "regimen"    → estado del HMM de BANCO_REGIMEN (comportamiento anterior).
+# "calendario" → balde de posicion en el mes (4 baldes, ver abajo).
+CONDICIONAR_POR = "regimen"
+
+# Los 4 baldes de calendario. Numerados 0..3 en orden creciente de tension
+# esperada, misma convencion que los estados HMM (0=calma ... n-1=severo), para
+# que las columnas phi_s0..phi_s3 / rho_ij_s0..rho_ij_s3 del CSV se lean igual
+# en los dos modos y las dos corridas sean comparables columna a columna.
+CAL_RESTO      = 0   # interior del mes
+CAL_APERTURA   = 1   # apertura, ya pasado el cambio de mes
+CAL_CIERRE     = 2   # ventana de cierre, sin llegar al cambio de mes
+CAL_TRANSICION = 3   # el CAMBIO de mes: ultimos habiles de M + primeros de M+1
+
+# Anchos de cada ventana, en dias HABILES. La precedencia al asignar es
+# transicion > cierre > apertura > resto, asi que la transicion se recorta de
+# los extremos de las otras dos y la particion nunca se solapa.
+#
+# La transicion existe como balde propio porque es el unico tramo donde
+# conviven los dos anclajes de la familia *_pos: el sistema esta retirando
+# contra el cierre de M y depositando contra la apertura de M+1 en dias
+# consecutivos. Meterlo dentro de "cierre" o de "apertura" promedia dos
+# comportamientos de signo opuesto — exactamente el error que las dos anclas
+# (dias_al_cierre_mes para q01, dias_desde_cierre_mes para q99) existen para
+# evitar.
+CAL_N_TRANS_FIN = 2   # ultimos N habiles de M         → transicion
+CAL_N_TRANS_INI = 2   # primeros N habiles de M+1      → transicion
+CAL_N_CIERRE    = 5   # ultimos N habiles de M         → cierre (misma
+                      # definicion de "ventana de cierre" que usan los tres
+                      # hallazgos del negocio; los 2 ultimos se los lleva
+                      # transicion, asi que cierre queda con dam in {2,3,4})
+CAL_N_APERTURA  = 5   # primeros N habiles de M        → apertura (idem:
+                      # ddc in {2,3,4})
+
+if CONDICIONAR_POR not in ("regimen", "calendario"):
+    raise ValueError(
+        f"CONDICIONAR_POR={CONDICIONAR_POR!r} invalido — debe ser "
+        f"'regimen' o 'calendario'.")
+
 # Carpeta donde step005_validar_hmm*.py guarda estados_regimen_hmm_<banco>.parquet
 # y transmat_hmm_<banco>.parquet (DIR_OUTPUT de ese script).
 DIR_REGIMEN_HMM = BASE_SISTEMA / "2. Output"
@@ -1476,11 +1541,76 @@ def _nombres_estados(n_estados: int) -> list[str]:
     aquí (en vez de importarla) para no acoplar los dos scripts — cada uno
     debe poder correr solo.
     """
+    if CONDICIONAR_POR == "calendario":
+        # Un solo lugar decide los nombres para que el log de _estimar_rho_val_fold
+        # y el de _estimar_rho_transversal digan "cierre"/"transicion" y no
+        # "moderado"/"severo" — leer un log de modo calendario con la
+        # nomenclatura del HMM es la forma mas facil de confundir las dos
+        # corridas al compararlas.
+        return _nombres_calendario(n_estados)
     if n_estados == 2:
         return ["calma", "severo"]
     elif n_estados == 3:
         return ["calma", "moderado", "severo"]
     return [f"estado_{i}" for i in range(n_estados)]
+
+
+def _nombres_calendario(n_baldes: int = 4) -> list[str]:
+    """
+    Nombres de los baldes de calendario, indexados por su codigo CAL_*.
+    Se construye por asignacion posicional (no como literal ordenado) para que
+    reordenar las constantes CAL_* no desalinee los nombres en silencio.
+    """
+    nombres = [f"balde_{i}" for i in range(max(n_baldes, 4))]
+    for _cod, _nom in ((CAL_RESTO, "resto"), (CAL_APERTURA, "apertura"),
+                       (CAL_CIERRE, "cierre"), (CAL_TRANSICION, "transic")):
+        nombres[_cod] = _nom
+    return nombres[:max(n_baldes, 4)]
+
+
+def _etiquetas_calendario(idx) -> pd.Series:
+    """
+    Mapea cada fecha a uno de los 4 baldes CAL_* segun su posicion en el mes.
+
+    Devuelve una Series {fecha -> int} indexada por el `idx` recibido (ordenado
+    y sin duplicados). Es una funcion PURA del indice: no lee ningun parquet, no
+    depende del HMM y no puede degenerar — esa es toda la gracia del modo
+    calendario.
+
+    La posicion se deriva RANKEANDO las fechas observadas dentro de cada mes
+    calendario, no de un bdate_range sintetico. Motivo: el eje del parquet de
+    regimen es el calendario real del flujo (feriados peruanos ya excluidos), y
+    reconstruirlo aqui obligaria a duplicar la lista de feriados que vive en
+    step001 — que es exactamente como se desincronizan dos copias de la misma
+    regla. Consecuencia a tener presente: un hueco en la serie corre la posicion
+    de los dias siguientes de ese mes en uno. Por eso el llamador arma el indice
+    de referencia UNA sola vez (union con el bloque de SISTEMA) y reusa la misma
+    Series para las dos entidades, en vez de recalcular por entidad.
+
+        ddc = dias_desde_cierre_mes (0 = primer habil del mes)
+        dam = dias_al_cierre_mes    (0 = ultimo  habil del mes)
+
+    misma convencion que step001 (pos_en_mes-1 y total_bdays-pos_en_mes).
+
+    Precedencia: transicion > cierre > apertura > resto. En un mes corto donde
+    las ventanas de cierre y apertura se tocarian, cierre gana — es la cola que
+    manda en q01 y la que motiva el ejercicio.
+    """
+    idx = pd.DatetimeIndex(pd.Index(idx).unique()).sort_values()
+    if len(idx) == 0:
+        return pd.Series(dtype="int64")
+
+    _mes = pd.PeriodIndex(idx, freq="M")
+    _df  = pd.DataFrame({"mes": _mes}, index=idx)
+    ddc  = _df.groupby("mes").cumcount().values                  # 0 = primer habil
+    tot  = _df.groupby("mes")["mes"].transform("size").values
+    dam  = (tot - 1 - ddc)                                       # 0 = ultimo habil
+
+    lab = np.full(len(idx), CAL_RESTO, dtype=int)
+    lab[ddc < CAL_N_APERTURA] = CAL_APERTURA
+    lab[dam < CAL_N_CIERRE]   = CAL_CIERRE
+    lab[(dam < CAL_N_TRANS_FIN) | (ddc < CAL_N_TRANS_INI)] = CAL_TRANSICION
+    return pd.Series(lab, index=idx, name="estado")
 
 
 def _estimar_rho_val_fold(clasif: pd.DataFrame,
@@ -5181,6 +5311,11 @@ def evaluar_banco(banco: str):
         # bucle de folds en vez de fallar — un bug latente que el reporte
         # consolidado habria heredado en silencio.
         _fold_degenerado = None
+        # Igual que _fold_degenerado pero ya combinado con CONDICIONAR_POR: es
+        # lo que decide si se estima o no. Se separan porque _fold_degenerado
+        # sigue yendo al CSV tal cual (dice si el HMM colapso, un hecho del
+        # ajuste) mientras que _bloquea_rho dice si eso IMPORTA en este modo.
+        _bloquea_rho = None
         if ESTIMAR_RHO_EN_VAL and USAR_FEATURE_REGIMEN and año_corte_regimen is not None:
             # Nivel 3 (exclusión): si el fold HMM es degenerado (state collapse),
             # la clasificación de régimen en VAL no es confiable — los pares
@@ -5205,12 +5340,26 @@ def evaluar_banco(banco: str):
                         f"  [RHO_VAL] No se pudo leer diag_ok del pickle "
                         f"{_pkl_path_diag.name} → {type(_e_pkl).__name__}: {_e_pkl}. "
                         f"Se asume fold NO degenerado (diag_ok=True).")
+            # En modo calendario el estado del HMM no entra en NADA: los baldes
+            # salen del calendario y sigma es la EWMA (lambda=0.92), que se
+            # calcula fuera del Baum-Welch y por lo tanto no se contamina con el
+            # state collapse. Un fold degenerado si puede estimar phi/rho_ij
+            # aca — es justamente lo que desbloquea los 3 folds de FOCO_BBVA.
+            _bloquea_rho = _fold_degenerado and CONDICIONAR_POR != "calendario"
+            if _fold_degenerado and not _bloquea_rho:
+                logger.warning(
+                    f"  [RHO_VAL] Fold año_corte={año_corte_regimen} banco={banco}: "
+                    f"HMM DEGENERADO, pero CONDICIONAR_POR='calendario' — se "
+                    f"estima igual (los baldes no dependen del ajuste HMM; solo "
+                    f"se reusa la sigma EWMA del parquet). Al comparar contra la "
+                    f"corrida en modo 'regimen' tener presente que este fold NO "
+                    f"tiene contraparte alli.")
             if not _fold_degenerado:
                 logger.debug(
                     f"  [RHO_VAL] Fold año_corte={año_corte_regimen}: "
                     f"_fold_degenerado=False (HMM estable o pickle no leído) — "
                     f"se procederá a estimar rho en VAL.")
-            else:
+            elif _bloquea_rho:
                 # Sin esto, un fold degenerado salta TODO el bloque de rho_s/
                 # rho_ij en absoluto silencio: ni warning ni error, la corrida
                 # termina "exitosa" con coverage/pinball normales y sin que
@@ -5228,7 +5377,7 @@ def evaluar_banco(banco: str):
                     f"probablemente tiene muy pocas observaciones para 3 "
                     f"regimenes — considerar N_ESTADOS=2 en validar_hmm_v5.")
 
-        if ESTIMAR_RHO_EN_VAL and USAR_FEATURE_REGIMEN and año_corte_regimen is not None and not _fold_degenerado:
+        if ESTIMAR_RHO_EN_VAL and USAR_FEATURE_REGIMEN and año_corte_regimen is not None and not _bloquea_rho:
             try:
                 _h_min_rho = H_MIN_RHO_VAL if H_MIN_RHO_VAL is not None else int(h_val.min())
 
@@ -5269,6 +5418,46 @@ def evaluar_banco(banco: str):
                             f"    [RHO_VAL] estado de {_banco_est_rho}, "
                             f"flujo/sigma de {banco}: {len(_bloque_rho):,} fechas "
                             f"en comun (de {len(_flujo_sigma):,} de la entidad)")
+                    # ── Modo calendario: se sustituye la etiqueta ──────────
+                    # Unico punto de intervencion del boton. Se reemplaza la
+                    # columna "estado" por el balde de calendario y todo lo de
+                    # abajo (phi por estado, rho_ij por estado, columnas
+                    # phi_s*/rho_ij_s* del CSV) sigue igual sin tocar una linea:
+                    # ni _estimar_rho_val_fold ni _estimar_rho_transversal saben
+                    # de donde salio la etiqueta, solo que es un int por fecha.
+                    #
+                    # El indice de referencia se arma UNA vez, uniendo el bloque
+                    # de SISTEMA con el de la entidad, y la misma Series se usa
+                    # para phi y para rho_ij. Es el mismo criterio que ya aplica
+                    # el modo regimen unas lineas mas abajo (estado de SISTEMA,
+                    # no el propio) y por la misma razon: que rho_ij calculado
+                    # desde FOCO coincida exactamente con el calculado desde
+                    # RESTO, que es el chequeo de simetria gratis.
+                    _est_cond_cal = None
+                    if CONDICIONAR_POR == "calendario" and not _bloque_rho.empty:
+                        _df_sist_cal = _cargar_estados_regimen_disco("SISTEMA")
+                        _idx_ref_cal = _bloque_rho.index
+                        if _df_sist_cal is not None:
+                            _bl_s_cal = _df_sist_cal[
+                                _df_sist_cal["año_corte"] == año_corte_regimen]
+                            if not _bl_s_cal.empty:
+                                _idx_ref_cal = _idx_ref_cal.union(
+                                    pd.DatetimeIndex(_bl_s_cal["fecha"].unique()))
+                        _est_cond_cal = _etiquetas_calendario(_idx_ref_cal)
+                        _bloque_rho = _bloque_rho.copy()
+                        # La union garantiza cobertura total del bloque, asi que
+                        # el reindex no puede dejar NaN y el astype(int) que hace
+                        # _estimar_rho_val_fold sobre "estado" es seguro.
+                        _bloque_rho["estado"] = (
+                            _est_cond_cal.reindex(_bloque_rho.index).astype(int).values)
+                        _cnt_cal = _bloque_rho["estado"].value_counts().sort_index()
+                        _nom_cal = _nombres_calendario()
+                        logger.info(
+                            "    [CALENDARIO] baldes sobre "
+                            f"{len(_idx_ref_cal):,} fechas de referencia: "
+                            + ", ".join(f"{_nom_cal[int(_s)]}={int(_n)}"
+                                        for _s, _n in _cnt_cal.items()))
+
                     if not _bloque_rho.empty:
                         _rho_s_val = _estimar_rho_val_fold(
                             _bloque_rho,
@@ -5304,14 +5493,24 @@ def evaluar_banco(banco: str):
                                 # coincida con el calculado desde RESTO — y esa
                                 # simetria es justamente el chequeo gratis que da
                                 # correr las dos caras en una pasada.
-                                _df_sist = _cargar_estados_regimen_disco("SISTEMA")
+                                # En modo calendario se reusa EXACTAMENTE la
+                                # misma Series con la que se estratifico phi
+                                # unas lineas arriba — no se recalcula, para que
+                                # phi_i(s) y rho_ij(s) queden definidos sobre la
+                                # misma particion de dias (que es lo que
+                                # Sigma_e(s) del paper necesita para ser
+                                # coherente entre grupos).
                                 _est_cond = None
-                                if _df_sist is not None:
-                                    _bl_sist = _df_sist[
-                                        _df_sist["año_corte"] == año_corte_regimen]
-                                    if not _bl_sist.empty:
-                                        _est_cond = (_bl_sist.drop_duplicates("fecha")
-                                                     .set_index("fecha")["estado"])
+                                if CONDICIONAR_POR == "calendario":
+                                    _est_cond = _est_cond_cal
+                                else:
+                                    _df_sist = _cargar_estados_regimen_disco("SISTEMA")
+                                    if _df_sist is not None:
+                                        _bl_sist = _df_sist[
+                                            _df_sist["año_corte"] == año_corte_regimen]
+                                        if not _bl_sist.empty:
+                                            _est_cond = (_bl_sist.drop_duplicates("fecha")
+                                                         .set_index("fecha")["estado"])
                                 _rho_ij = _estimar_rho_transversal(
                                     _bloque_rho, _bloque_otro,
                                     estados_cond=_est_cond,
@@ -5347,6 +5546,12 @@ def evaluar_banco(banco: str):
             "fold": fold["fold"], "banco": banco,
             "año_corte_regimen": año_corte_regimen,
             "banco_regimen": _banco_del_regimen(banco),
+            # Sin esta columna, dos CSV de la misma entidad y el mismo fold son
+            # indistinguibles al compararlos: mismas columnas phi_s0..phi_s3 con
+            # significados distintos (calma/moderado/severo vs
+            # resto/apertura/cierre/transic). Va en la tabla, no solo en el
+            # nombre del archivo, porque las tablas se terminan concatenando.
+            "condicionar_por": CONDICIONAR_POR,
             "fold_degenerado": _fold_degenerado,
         }
         if _rho_s_val:
@@ -5732,11 +5937,19 @@ def evaluar_banco(banco: str):
     # el estado real de cada fold en vez de solo los que tuvieron rho_ij.
     df_rho = pd.DataFrame(rho_rows) if rho_rows else pd.DataFrame()
     if not df_rho.empty:
-        logger.info(f"\n  Correlaciones por fold (phi_s / rho_ij):")
+        _nom_s = (_nombres_calendario() if CONDICIONAR_POR == "calendario"
+                  else _nombres_estados(_n_estados_de(None)))
+        logger.info(f"\n  Correlaciones por fold (phi_s / rho_ij) — "
+                    f"condicionado por {CONDICIONAR_POR} "
+                    f"(s0..s{len(_nom_s)-1} = {', '.join(_nom_s)}):")
         logger.info("\n" + df_rho.to_string(index=False))
-        _reg(tablas_consola, "rho_por_fold", df_rho)
+        _reg(tablas_consola, f"rho_por_fold_{CONDICIONAR_POR}", df_rho)
         try:
-            ruta_rho = DIR_MODO / f"rho_por_fold_{tag}_{fecha_hoy}.csv"
+            # El sufijo del modo va en el nombre: sin el, correr calendario
+            # despues de regimen el mismo dia sobrescribe el CSV con el que hay
+            # que comparar.
+            ruta_rho = (DIR_MODO /
+                        f"rho_por_fold_{CONDICIONAR_POR}_{tag}_{fecha_hoy}.csv")
             df_rho.to_csv(ruta_rho, index=False)
             logger.info(f"  CSV rho por fold: {ruta_rho.name}")
         except Exception as _e_rho_csv:
