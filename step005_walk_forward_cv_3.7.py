@@ -4810,6 +4810,7 @@ def evaluar_banco(banco: str):
 
     resultados_test   = []
     resultados_val    = []
+    rho_rows          = []   # una fila por fold: phi_s (rho_s_val) y rho_ij por regimen
     por_h_test        = []
     por_h_val         = []
     importancias_folds = []
@@ -5173,6 +5174,13 @@ def evaluar_banco(banco: str):
         _rho_s_val = None
         _rho_ij    = None   # rho transversal; queda None si la entidad no tiene
                             # contraparte (SISTEMA) o falta su parquet
+        # None (no False): distingue "nunca se evaluo" (ESTIMAR_RHO_EN_VAL=False,
+        # o año_corte_regimen=None) de "se evaluo y no esta degenerado" (False).
+        # Sin esto, un fold que no entra al bloque de abajo dejaba la variable
+        # SIN DEFINIR, y Python conservaba el valor de una iteracion previa del
+        # bucle de folds en vez de fallar — un bug latente que el reporte
+        # consolidado habria heredado en silencio.
+        _fold_degenerado = None
         if ESTIMAR_RHO_EN_VAL and USAR_FEATURE_REGIMEN and año_corte_regimen is not None:
             # Nivel 3 (exclusión): si el fold HMM es degenerado (state collapse),
             # la clasificación de régimen en VAL no es confiable — los pares
@@ -5328,6 +5336,30 @@ def evaluar_banco(banco: str):
                     _rho_s_val = {s: RHO_DEFAULT_VAL for s in range(_n_estados_de(None))}
             except Exception as _e_rho:
                 logger.warning(f"  [RHO_VAL] Error estimando rho en VAL: {_e_rho}")
+
+        # Fila para el reporte consolidado — SIEMPRE una por fold, fuera de
+        # todos los if de arriba: incluye tambien los folds sin regimen
+        # (ESTIMAR_RHO_EN_VAL=False), degenerados, o sin contraparte, para que
+        # el CSV final sea la lista completa de folds y no solo los que
+        # tuvieron exito (que es exactamente el caso que se investigo antes,
+        # donde un fold fallaba en silencio total y no habia forma de verlo).
+        _fila_rho = {
+            "fold": fold["fold"], "banco": banco,
+            "año_corte_regimen": año_corte_regimen,
+            "banco_regimen": _banco_del_regimen(banco),
+            "fold_degenerado": _fold_degenerado,
+        }
+        if _rho_s_val:
+            for s, v in _rho_s_val.items():
+                _fila_rho[f"phi_s{s}"] = v
+        if _rho_ij:
+            _fila_rho["contraparte"]    = _rho_ij.get("contraparte")
+            _fila_rho["rho_ij_global"]  = _rho_ij.get("global")
+            _fila_rho["n_pares_rho_ij"] = _rho_ij.get("n_pares")
+            for s, v in _rho_ij.items():
+                if isinstance(s, int):
+                    _fila_rho[f"rho_ij_s{s}"] = v
+        rho_rows.append(_fila_rho)
 
         if GUARDAR_PREDS_TEST and not SOLO_REGENERAR_PLOTS:
             _regimen_hmm_test   = (X_test["regimen_hmm"].values
@@ -5692,6 +5724,24 @@ def evaluar_banco(banco: str):
         _reg(tablas_consola, "por_h_VAL",  df_por_h_v)
     if prom_t:
         _reg(tablas_consola, "promedios_TEST", pd.Series(prom_t, name="valor"))
+
+    # ── Reporte consolidado de phi_s / rho_ij por fold ───────────────────────
+    # rho_rows trae una fila por fold SIEMPRE (ver el punto de acumulacion mas
+    # arriba), asi que fold_degenerado=True o columnas phi_s*/rho_ij* ausentes
+    # tambien quedan visibles — es deliberado, para que la tabla final muestre
+    # el estado real de cada fold en vez de solo los que tuvieron rho_ij.
+    df_rho = pd.DataFrame(rho_rows) if rho_rows else pd.DataFrame()
+    if not df_rho.empty:
+        logger.info(f"\n  Correlaciones por fold (phi_s / rho_ij):")
+        logger.info("\n" + df_rho.to_string(index=False))
+        _reg(tablas_consola, "rho_por_fold", df_rho)
+        try:
+            ruta_rho = DIR_MODO / f"rho_por_fold_{tag}_{fecha_hoy}.csv"
+            df_rho.to_csv(ruta_rho, index=False)
+            logger.info(f"  CSV rho por fold: {ruta_rho.name}")
+        except Exception as _e_rho_csv:
+            logger.warning(f"  No se pudo guardar rho_por_fold csv: {_e_rho_csv}")
+
     try:
         guardar_tablas_excel(tablas_consola, DIR_MODO, tag, fecha_hoy)
     except Exception as _e_xls:
