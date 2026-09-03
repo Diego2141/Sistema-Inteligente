@@ -69,6 +69,16 @@ BASE_SISTEMA = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente"
 BANCO        = "SISTEMA"
 MODELO       = "expanding"
 
+# Entidad de la que salen las ETIQUETAS de regimen. DEBE coincidir con
+# BANCO_REGIMEN de step005_walk_forward_cv_3.7.py: la columna regimen_hmm de
+# preds_test se usa aca como estado_inicial de la cadena de Markov, y la matriz
+# de transicion que la propaga tiene que ser la del MISMO HMM. Un estado "2" de
+# SISTEMA no significa lo mismo que un "2" de FOCO_BBVA — son ajustes distintos,
+# con medias y covarianzas propias, aunque ambos esten ordenados por volatilidad.
+# Mezclarlos daria paths de regimen sin sentido, sin ningun error visible.
+# None → cada entidad usa su propia transmat (comportamiento anterior).
+BANCO_REGIMEN = "SISTEMA"
+
 # Debe coincidir EXACTAMENTE con el DIR_MODO de step005_walk_forward_cv_4.py
 # (se construye ahí como DIR_OUTPUT / f"{MODELO_CV}_{modo}_{ventanas}";
 # pega aquí el valor resultante de esa corrida — ej. con MODELO_CV="xgb",
@@ -258,7 +268,8 @@ def main():
         except Exception:
             _seed_offset = 0
         try:
-            A = cargar_transmat(BANCO, año_corte)
+            A = cargar_transmat(BANCO if BANCO_REGIMEN is None else BANCO_REGIMEN,
+                                año_corte)
         except (FileNotFoundError, ValueError) as e:
             logger.warning(f"  año_corte_regimen={año_corte}: {e} — grupo omitido "
                            f"({df_grupo['fecha_t'].nunique()} orígenes afectados).")

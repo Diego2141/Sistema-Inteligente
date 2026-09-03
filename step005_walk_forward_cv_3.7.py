@@ -139,6 +139,34 @@ USAR_FEATURE_REGIMEN = True
 # Solo regenera cuando hace falta: si el parquet ya tiene un bloque por cada
 # train_end, no reajusta nada.
 HMM_INTERNO = True
+
+# ── De QUE entidad sale el ESTADO del regimen ────────────────────────────────
+# "SISTEMA" → el estado del HMM se toma del sistema agregado para TODAS las
+#             entidades, incluidas FOCO_*/RESTO_*. Es lo que pide la
+#             metodologia de agregacion por grupos: la matriz R(s_h) es una
+#             correlacion ENTRE grupos, asi que el subindice del regimen es
+#             s_h (uno por horizonte), no s_{i,h} (uno por grupo). Con un
+#             regimen propio por entidad, phi_FOCO(2) y phi_RESTO(2) se
+#             estimarian sobre conjuntos de dias DISTINTOS y combinarlos en la
+#             misma Sigma_e(2) no tendria sentido.
+#             Ademas desbloquea el caso practico: el HMM de SISTEMA es estable
+#             (diag_ok=True en 8/8 cortes, estados balanceados 25-40%),
+#             mientras que el de una entidad individual como FOCO_BBVA sale
+#             degenerado en todos los folds — tiene 10.0% de dias con flujo
+#             exactamente cero (vs 0.3% en SISTEMA) por ser un solo banco que
+#             algunos dias no opera, y esos ceros dispersos (rachas de 1.4 dias
+#             en promedio) rompen la persistencia del HMM.
+# None      → cada entidad usa su propio estado (comportamiento anterior).
+#
+# LIMITACION conocida y aceptada por el equipo: si FOCO y RESTO tienen flujos
+# que se compensan, el agregado puede verse tranquilo mientras cada entidad
+# esta individualmente tensionada. Verificable comparando la sigma de la
+# entidad en dias que SISTEMA etiqueta "calma" vs "severo".
+#
+# regimen_sigma NO se ve afectado: sigue saliendo de la propia entidad, porque
+# es la escala que estandariza z_t = flujo_t/sigma_t de ESA entidad.
+BANCO_REGIMEN = "SISTEMA"
+
 # Carpeta donde step005_validar_hmm*.py guarda estados_regimen_hmm_<banco>.parquet
 # y transmat_hmm_<banco>.parquet (DIR_OUTPUT de ese script).
 DIR_REGIMEN_HMM = BASE_SISTEMA / "2. Output"
@@ -1233,6 +1261,19 @@ def _ruta_estados_regimen(banco: str) -> Path:
     return DIR_REGIMEN_HMM / f"estados_regimen_hmm_{banco}.parquet"
 
 
+def _banco_del_regimen(banco: str) -> str:
+    """
+    Entidad de la que sale el ESTADO del regimen para `banco` (ver BANCO_REGIMEN).
+
+    Con BANCO_REGIMEN=None cada entidad usa el suyo, que es el comportamiento
+    anterior. Con "SISTEMA" todas comparten el del agregado — necesario para que
+    phi_i(s) y rho_ij(s) queden definidos sobre la MISMA particion de dias, que
+    es lo que la ecuacion Sigma_e = R o. (11' - phi phi') exige para ser
+    coherente.
+    """
+    return banco if BANCO_REGIMEN is None else BANCO_REGIMEN
+
+
 # Entidades cuyos regimenes ya se generaron en ESTA corrida — evita repetir el
 # ajuste cuando BANCOS_A_EVALUAR trae varias y cada evaluar_banco lo pide.
 _hmm_generado: set[str] = set()
@@ -1314,6 +1355,11 @@ def asegurar_regimenes_hmm(bancos: list[str], folds: list[dict]) -> None:
         contra = _banco_contraparte(b)
         if contra is not None:
             requeridos.update({contra, "SISTEMA"})
+    # La fuente del estado (BANCO_REGIMEN) siempre hace falta, aunque no se
+    # evalue ni sea contraparte de nadie: sin su parquet, reemplazar_regimen_fold
+    # y _estimar_rho_val_fold se quedan sin etiquetas.
+    if BANCO_REGIMEN is not None:
+        requeridos.add(BANCO_REGIMEN)
 
     pendientes = [b for b in sorted(requeridos)
                   if b not in _hmm_generado and not _cortes_cubren_folds(b, train_ends)]
@@ -1745,8 +1791,17 @@ def reemplazar_regimen_fold(df_fold: pd.DataFrame, train_end: pd.Timestamp,
     if not USAR_FEATURE_REGIMEN:
         return df_fold, None
 
-    df_estados = _cargar_estados_regimen_disco(banco)
+    # El ESTADO sale de BANCO_REGIMEN (por defecto SISTEMA); la SIGMA sigue
+    # saliendo de la propia entidad. No es una asimetria arbitraria: el estado
+    # es una propiedad del mercado —compartida, para que R(s) entre grupos este
+    # bien definida— mientras que sigma es la escala que estandariza el flujo de
+    # ESTA entidad en z_t = flujo_t/sigma_t. Usar la sigma del agregado para
+    # normalizar el flujo de un banco individual mezclaria escalas distintas.
+    _banco_est = _banco_del_regimen(banco)
+    df_estados = _cargar_estados_regimen_disco(_banco_est)
     if df_estados is None:
+        logger.warning(f"  [REGIMEN] Sin parquet de regimen de {_banco_est} "
+                       f"(fuente de estado para {banco}) — se omite el feature.")
         return df_fold, None
 
     año_corte = _elegir_año_corte_regimen(df_estados, train_end)
@@ -1757,7 +1812,31 @@ def reemplazar_regimen_fold(df_fold: pd.DataFrame, train_end: pd.Timestamp,
 
     bloque = df_estados[df_estados["año_corte"] == año_corte]
     serie_estado = bloque.drop_duplicates("fecha").set_index("fecha")["estado"]
-    serie_sigma  = bloque.drop_duplicates("fecha").set_index("fecha")["sigma"]
+
+    # sigma: parquet de la ENTIDAD. Su bloque se elige con el mismo train_end,
+    # asi que normalmente cae en el mismo año_corte — asegurar_regimenes_hmm
+    # genera todas las entidades con las mismas fechas_corte. Si difieren (p.ej.
+    # un parquet viejo con otra grilla), se avisa en vez de emparejar en silencio
+    # dos bloques que cubren periodos distintos.
+    if _banco_est == banco:
+        serie_sigma = bloque.drop_duplicates("fecha").set_index("fecha")["sigma"]
+    else:
+        df_prop = _cargar_estados_regimen_disco(banco)
+        if df_prop is None:
+            logger.warning(f"  [REGIMEN] Sin parquet de {banco} para regimen_sigma "
+                           f"— la columna queda en NaN (se imputa con la mediana "
+                           f"de TRAIN como cualquier otro feature con huecos).")
+            serie_sigma = pd.Series(dtype=float)
+        else:
+            año_corte_prop = _elegir_año_corte_regimen(df_prop, train_end)
+            if año_corte_prop != año_corte:
+                logger.warning(
+                    f"  [REGIMEN] año_corte del estado ({_banco_est}: {año_corte}) "
+                    f"!= del sigma ({banco}: {año_corte_prop}). Se usa cada uno "
+                    f"con su propio bloque; revisar que ambos parquets se hayan "
+                    f"generado con las mismas fechas_corte.")
+            serie_sigma = (df_prop[df_prop["año_corte"] == año_corte_prop]
+                           .drop_duplicates("fecha").set_index("fecha")["sigma"])
 
     df_fold = df_fold.copy()
     df_fold["regimen_hmm"]   = df_fold["fecha_t"].map(serie_estado)
@@ -5100,7 +5179,12 @@ def evaluar_banco(banco: str):
             # (z_{t-1}, z_t) estarían mal etiquetados por régimen y el rho_s
             # resultante sería basura. Se omite la estimación y se usa el
             # fallback del orquestador (columnas rho_s_* ausentes → fallback).
-            _pkl_path_diag = DIR_REGIMEN_HMM / f"modelo_hmm_{banco}_{año_corte_regimen}.pkl"
+            # El pickle a inspeccionar es el del HMM cuyas etiquetas se estan
+            # usando (BANCO_REGIMEN), no el de la entidad evaluada: si el
+            # regimen sale de SISTEMA, es la estabilidad de ESE ajuste la que
+            # determina si las etiquetas son confiables.
+            _pkl_path_diag = (DIR_REGIMEN_HMM /
+                              f"modelo_hmm_{_banco_del_regimen(banco)}_{año_corte_regimen}.pkl")
             _fold_degenerado = False
             if _pkl_path_diag.exists() and HMM_EXCLUIR_FOLDS_DEGENERADOS_WF:
                 try:
@@ -5145,15 +5229,38 @@ def evaluar_banco(banco: str):
                 # para el feature de XGBoost. Nada se reclasifica ni se
                 # vuelve a estimar aqui: estado, sigma y flujo por fecha ya
                 # estan en estados_regimen_hmm_<banco>.parquet.
+                # Igual que en reemplazar_regimen_fold: el ESTADO de
+                # BANCO_REGIMEN, el flujo y la sigma de la propia entidad. Asi
+                # phi_FOCO(s) y phi_RESTO(s) quedan estratificados por la MISMA
+                # particion de dias, que es lo que Sigma_e(s) necesita para ser
+                # coherente entre grupos.
+                _banco_est_rho  = _banco_del_regimen(banco)
                 _df_estados_rho = _cargar_estados_regimen_disco(banco)
+                _df_est_regimen = (_df_estados_rho if _banco_est_rho == banco
+                                   else _cargar_estados_regimen_disco(_banco_est_rho))
 
-                if _df_estados_rho is not None:
-                    _bloque_rho = (
+                if _df_estados_rho is not None and _df_est_regimen is not None:
+                    _flujo_sigma = (
                         _df_estados_rho[_df_estados_rho["año_corte"] == año_corte_regimen]
                         .drop_duplicates("fecha")
-                        .set_index("fecha")[["estado", "sigma", "flujo"]]
+                        .set_index("fecha")[["sigma", "flujo"]]
                         .sort_index()
                     )
+                    _estado_ext = (
+                        _df_est_regimen[_df_est_regimen["año_corte"] == año_corte_regimen]
+                        .drop_duplicates("fecha")
+                        .set_index("fecha")["estado"]
+                    )
+                    # join interno: solo fechas con dato en AMBAS fuentes. Con
+                    # BANCO_REGIMEN=None es la misma fuente y el join es la
+                    # identidad, asi que el comportamiento anterior no cambia.
+                    _bloque_rho = _flujo_sigma.join(_estado_ext, how="inner")
+                    _bloque_rho = _bloque_rho[["estado", "sigma", "flujo"]].sort_index()
+                    if _banco_est_rho != banco:
+                        logger.info(
+                            f"    [RHO_VAL] estado de {_banco_est_rho}, "
+                            f"flujo/sigma de {banco}: {len(_bloque_rho):,} fechas "
+                            f"en comun (de {len(_flujo_sigma):,} de la entidad)")
                     if not _bloque_rho.empty:
                         _rho_s_val = _estimar_rho_val_fold(
                             _bloque_rho,
