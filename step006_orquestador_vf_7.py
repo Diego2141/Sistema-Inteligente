@@ -275,6 +275,34 @@ def main():
                            f"({df_grupo['fecha_t'].nunique()} orígenes afectados).")
             continue
 
+        # ── Guard: los rho_s_* tienen que estar indexados por los MISMOS
+        # estados que simula la cadena de Markov ─────────────────────────────
+        # La trayectoria de regimen se muestrea de A (NxN del HMM) y con cada
+        # estado s se elige rho_por_regimen[s]. Si preds_test trae mas (o menos)
+        # rho_s_* que estados tiene A, los dos indices dejan de significar lo
+        # mismo y NADA truena: la recursion AR(1) recibe un float valido y
+        # devuelve paths plausibles con el rho equivocado. Casos que esto ataja:
+        #   - preds_test de una corrida de step005 con CONDICIONAR_POR=
+        #     "calendario": trae 4 columnas rho_s_0..rho_s_3 (los baldes
+        #     resto/apertura/cierre/transicion) mientras A sigue siendo la
+        #     transmat 3x3 del HMM. Aplicaria phi(apertura) en los dias que el
+        #     HMM llama "moderado" y nunca usaria phi(transicion). El modo
+        #     calendario todavia NO esta soportado aca: falta reemplazar el
+        #     muestreo de A por el balde deterministico de t+h.
+        #   - mezclar preds_test de una corrida con N_ESTADOS=2 y transmat de
+        #     una con N_ESTADOS=3 (o al reves).
+        if _tiene_rho_val and _n_estados_rho != len(A):
+            logger.error(
+                f"  año_corte_regimen={año_corte}: preds_test trae "
+                f"{_n_estados_rho} columnas rho_s_* pero la transmat de "
+                f"{BANCO if BANCO_REGIMEN is None else BANCO_REGIMEN} tiene "
+                f"{len(A)} estados — grupo omitido "
+                f"({df_grupo['fecha_t'].nunique()} orígenes afectados). "
+                f"Si viene de step005 con CONDICIONAR_POR='calendario', ese "
+                f"modo aun no esta soportado aqui. Si no, regenera preds_test "
+                f"y transmat con el mismo N_ESTADOS.")
+            continue
+
         estado_por_origen = (
             df_grupo.drop_duplicates("fecha_t")
             .set_index("fecha_t")["regimen_hmm"]
@@ -319,16 +347,17 @@ def main():
  
         # Acumular para reporte
         diag_A = np.diag(A)
-        rho_regimen_rows.append({
-            "año_corte_regimen": str(año_corte),
-            "n_origenes":        df_grupo["fecha_t"].nunique(),
-            "rho_s_0":           rho_por_regimen.get(0, np.nan),
-            "rho_s_1":           rho_por_regimen.get(1, np.nan),
-            "rho_s_2":           rho_por_regimen.get(2, np.nan),
-            "diag_A_0":          float(diag_A[0]) if len(diag_A) > 0 else np.nan,
-            "diag_A_1":          float(diag_A[1]) if len(diag_A) > 1 else np.nan,
-            "diag_A_2":          float(diag_A[2]) if len(diag_A) > 2 else np.nan,
-        })
+        # Las columnas se derivan de cuantos estados hay (no fijas en 0/1/2):
+        # con la version fija, una corrida con mas estados perdia el ultimo rho
+        # en el reporte en silencio. El guard de arriba ya garantiza que
+        # rho_por_regimen y diag_A tienen el mismo largo.
+        _fila_reg = {"año_corte_regimen": str(año_corte),
+                     "n_origenes":        df_grupo["fecha_t"].nunique()}
+        for _s in range(max(len(diag_A), len(rho_por_regimen))):
+            _fila_reg[f"rho_s_{_s}"] = rho_por_regimen.get(_s, np.nan)
+            _fila_reg[f"diag_A_{_s}"] = (float(diag_A[_s])
+                                         if _s < len(diag_A) else np.nan)
+        rho_regimen_rows.append(_fila_reg)
         
         distribuciones_grupo = fitear_distribuciones_por_horizonte(
             df_grupo, taus=None, n_jobs=N_JOBS)

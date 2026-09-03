@@ -1529,6 +1529,14 @@ def _n_estados_de(df, col: str = "estado", default: int = 3) -> int:
     puede venir de una corrida con N_ESTADOS=2 o 3 (ver step005_validar_hmm*.py).
     Si no hay datos de dónde inferir (df vacío/None), usa `default`.
     """
+    # En modo calendario los estratos son SIEMPRE los 4 baldes CAL_*, por
+    # construccion. Sin este corto-circuito los caminos de fallback devolvian 3
+    # (el default, o max(estado)+1 leido del parquet HMM crudo, que trae el
+    # estado del HMM y no el balde) y un fold que cayera al fallback habria
+    # escrito phi_s0..phi_s2 mientras el resto escribia phi_s0..phi_s3: dos
+    # significados distintos para la misma columna dentro del mismo CSV.
+    if CONDICIONAR_POR == "calendario":
+        return 4
     if df is not None and col in getattr(df, "columns", []) and len(df) > 0:
         return int(df[col].max()) + 1
     return default
@@ -1572,20 +1580,17 @@ def _etiquetas_calendario(idx) -> pd.Series:
     """
     Mapea cada fecha a uno de los 4 baldes CAL_* segun su posicion en el mes.
 
-    Devuelve una Series {fecha -> int} indexada por el `idx` recibido (ordenado
-    y sin duplicados). Es una funcion PURA del indice: no lee ningun parquet, no
-    depende del HMM y no puede degenerar — esa es toda la gracia del modo
-    calendario.
+    Devuelve una Series {fecha -> int} SOLO para las fechas de meses COMPLETOS
+    (ver abajo); las de meses incompletos no aparecen en el resultado. Es una
+    funcion PURA del indice: no lee ningun parquet, no depende del HMM y no
+    puede degenerar — esa es toda la gracia del modo calendario.
 
     La posicion se deriva RANKEANDO las fechas observadas dentro de cada mes
     calendario, no de un bdate_range sintetico. Motivo: el eje del parquet de
     regimen es el calendario real del flujo (feriados peruanos ya excluidos), y
     reconstruirlo aqui obligaria a duplicar la lista de feriados que vive en
     step001 — que es exactamente como se desincronizan dos copias de la misma
-    regla. Consecuencia a tener presente: un hueco en la serie corre la posicion
-    de los dias siguientes de ese mes en uno. Por eso el llamador arma el indice
-    de referencia UNA sola vez (union con el bloque de SISTEMA) y reusa la misma
-    Series para las dos entidades, en vez de recalcular por entidad.
+    regla.
 
         ddc = dias_desde_cierre_mes (0 = primer habil del mes)
         dam = dias_al_cierre_mes    (0 = ultimo  habil del mes)
@@ -1595,10 +1600,33 @@ def _etiquetas_calendario(idx) -> pd.Series:
     Precedencia: transicion > cierre > apertura > resto. En un mes corto donde
     las ventanas de cierre y apertura se tocarian, cierre gana — es la cola que
     manda en q01 y la que motiva el ejercicio.
+
+    MESES INCOMPLETOS
+    -----------------
+    Rankear sobre las fechas observadas asume que el mes esta entero. Si no lo
+    esta, la ultima fecha observada recibe dam=0 y queda etiquetada "transicion"
+    aunque caiga a mitad de mes. Medido sobre un bloque 2021-03-15..2024-05-14:
+    2024-05-13 y 2024-05-14 salian "transicion". No es un detalle cosmetico —
+    son las fechas MAS RECIENTES, y el ponderador EWMA (tau=100) es justamente
+    el que mas peso les da, asi que el sesgo entra por donde mas pesa.
+
+    Los bloques de estados_regimen_hmm_<banco>.parquet arrancan en HMM_INICIO y
+    cortan en el train_end del fold, ninguna de las dos fechas alineada a un
+    limite de mes, asi que el caso es la norma y no la excepcion.
+
+    Un mes se considera completo si tiene al menos (habiles Lun-Vie del mes) -
+    MAX_FERIADOS_MES fechas observadas. El conteo Lun-Vie es ciego a feriados
+    —por eso la tolerancia— pero solo se lo usa para DECIDIR si el mes entra,
+    nunca para posicionar: la posicion sigue saliendo del ranking observado, que
+    si es exacto con feriados. El criterio se aplica a TODOS los meses, no solo
+    a los dos extremos, asi que tambien descarta un mes con un hueco grande de
+    datos en el medio.
     """
+    MAX_FERIADOS_MES = 4   # Peru no llega a 4 feriados en un mismo mes; deja
+                           # pasar meses enteros y frena los truncados/con hueco.
     idx = pd.DatetimeIndex(pd.Index(idx).unique()).sort_values()
     if len(idx) == 0:
-        return pd.Series(dtype="int64")
+        return pd.Series(dtype="int64", name="estado")
 
     _mes = pd.PeriodIndex(idx, freq="M")
     _df  = pd.DataFrame({"mes": _mes}, index=idx)
@@ -1606,11 +1634,17 @@ def _etiquetas_calendario(idx) -> pd.Series:
     tot  = _df.groupby("mes")["mes"].transform("size").values
     dam  = (tot - 1 - ddc)                                       # 0 = ultimo habil
 
+    # Habiles Lun-Vie que DEBERIA tener el mes calendario de cada fecha.
+    _ini = _mes.start_time.values.astype("datetime64[D]")
+    _fin = (_mes.end_time.values.astype("datetime64[D]") + np.timedelta64(1, "D"))
+    _esperados = np.busday_count(_ini, _fin)
+    completo = tot >= (_esperados - MAX_FERIADOS_MES)
+
     lab = np.full(len(idx), CAL_RESTO, dtype=int)
     lab[ddc < CAL_N_APERTURA] = CAL_APERTURA
     lab[dam < CAL_N_CIERRE]   = CAL_CIERRE
     lab[(dam < CAL_N_TRANS_FIN) | (ddc < CAL_N_TRANS_INI)] = CAL_TRANSICION
-    return pd.Series(lab, index=idx, name="estado")
+    return pd.Series(lab[completo], index=idx[completo], name="estado")
 
 
 def _estimar_rho_val_fold(clasif: pd.DataFrame,
@@ -5444,17 +5478,24 @@ def evaluar_banco(banco: str):
                                 _idx_ref_cal = _idx_ref_cal.union(
                                     pd.DatetimeIndex(_bl_s_cal["fecha"].unique()))
                         _est_cond_cal = _etiquetas_calendario(_idx_ref_cal)
-                        _bloque_rho = _bloque_rho.copy()
-                        # La union garantiza cobertura total del bloque, asi que
-                        # el reindex no puede dejar NaN y el astype(int) que hace
-                        # _estimar_rho_val_fold sobre "estado" es seguro.
+                        # _etiquetas_calendario NO cubre los meses incompletos
+                        # (bloque truncado en HMM_INICIO/train_end, o con hueco
+                        # de datos): esas fechas no tienen posicion en el mes
+                        # confiable, asi que salen del bloque en vez de entrar
+                        # con una etiqueta inventada. Se descartan aqui, antes
+                        # del astype(int), que con NaN reventaria.
+                        _n_antes_cal = len(_bloque_rho)
+                        _bloque_rho = _bloque_rho.loc[
+                            _bloque_rho.index.isin(_est_cond_cal.index)].copy()
                         _bloque_rho["estado"] = (
                             _est_cond_cal.reindex(_bloque_rho.index).astype(int).values)
                         _cnt_cal = _bloque_rho["estado"].value_counts().sort_index()
                         _nom_cal = _nombres_calendario()
                         logger.info(
                             "    [CALENDARIO] baldes sobre "
-                            f"{len(_idx_ref_cal):,} fechas de referencia: "
+                            f"{len(_bloque_rho):,} fechas "
+                            f"(-{_n_antes_cal - len(_bloque_rho)} de meses "
+                            f"incompletos, de {len(_idx_ref_cal):,} de referencia): "
                             + ", ".join(f"{_nom_cal[int(_s)]}={int(_n)}"
                                         for _s, _n in _cnt_cal.items()))
 
