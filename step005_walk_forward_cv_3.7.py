@@ -1350,6 +1350,8 @@ def _banco_del_regimen(banco: str) -> str:
 # Entidades cuyos regimenes ya se generaron en ESTA corrida — evita repetir el
 # ajuste cuando BANCOS_A_EVALUAR trae varias y cada evaluar_banco lo pide.
 _hmm_generado: set[str] = set()
+_hmm_inicio_avisado: bool = False   # el aviso de HMM_INICIO se emite una vez
+                                    # por corrida, no una por entidad
 
 
 def _cortes_cubren_folds(banco: str, train_ends: list) -> bool:
@@ -1417,6 +1419,41 @@ def asegurar_regimenes_hmm(bancos: list[str], folds: list[dict]) -> None:
         return
 
     train_ends = [pd.Timestamp(f["train_end"]) for f in folds]
+
+    # ── HMM_INICIO: el unico parametro de v5 que sigue MORDIENDO ────────────
+    # Pasar fechas_corte deja inertes primer_ventana y paso_avance (asi lo dice
+    # hmm_evolucion y asi lo hace su rama `if fechas_corte is not None`), pero
+    # HMM_INICIO se aplica siempre: es el `inicio` con el que arranca TODO
+    # bloque. Si el train de un fold empieza antes, esas filas se quedan sin
+    # etiqueta de regimen y reemplazar_regimen_fold las deja en NaN, que luego
+    # se imputan con la mediana de TRAIN como cualquier otro hueco — sin que
+    # nada en el log diga que un tramo del train no tiene regimen.
+    #
+    # Mismo criterio que _cortes_cubren_folds: convertir el desalineamiento
+    # silencioso en un aviso. No se aborta ni se corrige: HMM_INICIO es una
+    # decision de v5 (arranca en el regimen vigente, post-quiebre 2018-19) y
+    # puede ser deliberado que el train sea mas largo que la serie clasificada.
+    global _hmm_inicio_avisado
+    if not _hmm_inicio_avisado:
+        _hmm_inicio_avisado = True
+        try:
+            from step005_validar_hmm_v5 import HMM_INICIO as _hmm_ini
+            _ini = pd.Timestamp(_hmm_ini)
+            _starts = [pd.Timestamp(f["train_start"]) for f in folds
+                       if f.get("train_start") is not None]
+            if _starts and min(_starts) < _ini:
+                logger.warning(
+                    f"  [HMM] HMM_INICIO={_hmm_ini} de step005_validar_hmm_v5.py "
+                    f"es POSTERIOR al train_start mas temprano "
+                    f"({min(_starts).date()}): los bloques de regimen empiezan "
+                    f"en HMM_INICIO, asi que ~{np.busday_count(min(_starts).date(), _ini.date()):,} "
+                    f"dias habiles de TRAIN quedan sin etiqueta de regimen y se "
+                    f"imputan con la mediana de TRAIN. Es esperable si HMM_INICIO "
+                    f"se eligio para cubrir solo el regimen vigente "
+                    f"(post-quiebre 2018-19); si no, bajarlo alli.")
+        except Exception as _e_ini:
+            logger.debug(f"  [HMM] No se pudo chequear HMM_INICIO "
+                         f"({type(_e_ini).__name__}: {_e_ini}).")
 
     # Entidades cuyo REGIMEN hace falta, que no son solo las que se evaluan:
     #   - la contraparte, porque rho_ij correlaciona los dos lados
