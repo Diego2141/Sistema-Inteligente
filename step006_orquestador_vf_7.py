@@ -291,6 +291,22 @@ def main():
         #     muestreo de A por el balde deterministico de t+h.
         #   - mezclar preds_test de una corrida con N_ESTADOS=2 y transmat de
         #     una con N_ESTADOS=3 (o al reves).
+        # Chequeo EXPLICITO primero: la columna condicionar_por dice sobre que
+        # esta estratificado el subindice s. El chequeo por conteo de abajo es
+        # el respaldo para parquets viejos que no la traen.
+        _cond_por = (str(df_grupo["condicionar_por"].iloc[0])
+                     if "condicionar_por" in df_grupo.columns else None)
+        if _cond_por is not None and _cond_por != "regimen":
+            logger.error(
+                f"  año_corte_regimen={año_corte}: preds_test viene de una "
+                f"corrida de step005 con CONDICIONAR_POR='{_cond_por}' — los "
+                f"rho_s_* estan estratificados por eso y no por el estado del "
+                f"HMM que muestrea A. Grupo omitido "
+                f"({df_grupo['fecha_t'].nunique()} orígenes afectados). Ese "
+                f"modo aun no esta soportado aqui: falta reemplazar el muestreo "
+                f"de A por el balde deterministico de t+h.")
+            continue
+
         if _tiene_rho_val and _n_estados_rho != len(A):
             logger.error(
                 f"  año_corte_regimen={año_corte}: preds_test trae "

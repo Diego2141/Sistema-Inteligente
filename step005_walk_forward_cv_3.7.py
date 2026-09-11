@@ -981,6 +981,14 @@ def _guardar_preds_test(preds, y_real, h_arr, fechas_t,
     if rho_s_val is not None:
         for s in sorted(rho_s_val.keys()):
             df[f"rho_s_{s}"] = float(rho_s_val[s])
+        # Sobre QUE esta estratificado el subindice s de rho_s_*. Viaja en el
+        # parquet para que step006 no tenga que INFERIRLO contando columnas:
+        # contar funciona para el caso realista (4 baldes vs transmat 3x3) pero
+        # falla justo cuando mas caro sale — con N_ESTADOS=4 en
+        # step005_validar_hmm_v5.py los dos indices tienen el mismo largo, el
+        # guard por conteo pasa, y los baldes de calendario se aplicarian como
+        # si fueran estados del HMM sin que nada avise.
+        df["condicionar_por"] = CONDICIONAR_POR
     if rho_ij:
         # Constantes por fold, igual que rho_s_*. Nombres: rho_ij (global),
         # rho_ij_s<estado> (condicional) y n_pares_rho_ij para poder juzgar
