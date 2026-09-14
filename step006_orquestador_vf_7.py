@@ -43,8 +43,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from scipy.stats import norm as _norm_dist
+
 from step006_simulacion_paths_vf6 import (
     pipeline_simulacion,
+    simular_regimen_path,
+    calcular_percentiles_acumulado,
     backtest_completo,
     backtest_flujo_neto_completo,
     cargar_preds_test_reales,
@@ -66,8 +70,74 @@ logger = logging.getLogger(__name__)
 ###############################################################################
 
 BASE_SISTEMA = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente")
-BANCO        = "SISTEMA"
 MODELO       = "expanding"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# BOTON: N=1 (SISTEMA) o N=2 (simulacion CONJUNTA por grupos)
+# ═════════════════════════════════════════════════════════════════════════════
+# False → una sola entidad, el motor vigente. Es el caso N=1 del paper
+#         ("Simulacion conjunta de flujos netos por grupos del sistema
+#         financiero", seccion 6.2): con N=1 la ecuacion (5) entrega
+#         sigma_e^2 = 1 - phi^2 y la recursion (4) se reduce a
+#         z_h = phi*z_{h-1} + sqrt(1-phi^2)*w_h, que es literalmente
+#         simular_un_path() de step006_simulacion_paths_vf6.py. El propio paper
+#         lo dice: "el esquema es una extension estricta del motor vigente, no
+#         un reemplazo". Con False NADA cambia respecto de antes de este boton.
+#
+# True  → carga FOCO_<P> y RESTO_<P> y los simula JUNTOS, siguiendo el
+#         algoritmo P1-P5 de la seccion 6. El objeto de decision es el sistema
+#         agregado, asi que no hay ENTIDAD que elegir: entran las dos.
+#
+# POR QUE NO SE PUEDE "CORRER DOS VECES Y SUMAR" — es la razon por la que este
+# boton cambia el flujo de control y no solo la configuracion. En el paso P2 el
+# ruido eta_h es UN VECTOR de N componentes sorteado una sola vez y multiplicado
+# por L(s_h) = chol(Sigma_e(s_h)); ahi, y solo ahi, entra rho_ij al sistema. Dos
+# corridas independientes con semillas distintas producen rho_ij = 0 efectivo,
+# sin importar que rho_ij se haya estimado. Y sumar los percentiles de cada
+# corrida es el error de no-aditividad que el paper descarta en su seccion 2.
+PARTICIONES = False
+
+# Solo se leen con PARTICIONES=True. Se declaran igual aca para que la
+# configuracion viva en un unico lugar, mismo criterio que step005.
+PARTICION = "globales"    # "bbva" | "globales" — debe coincidir con step005
+
+# Geometria del fold de la corrida de step005 que se quiere leer. NO reconfigura
+# nada: solo reconstruye el nombre del subnivel de carpeta que step005 crea con
+# PARTICIONES=True (dirs_de_banco -> etiqueta_corrida). Si en step005 cambia
+# VENTANA_VAL_AÑOS o VENTANA_TEST_AÑOS, hay que reflejarlo aca o el loader
+# apunta a una carpeta que no existe.
+VENTANA_VAL_AÑOS  = 1
+VENTANA_TEST_AÑOS = 0.5
+
+
+def _fmt_anios(x: float) -> str:
+    """0.5 -> '0.5', 1.0 -> '1'. Copiado literal de step005_walk_forward_cv_3.7."""
+    return f"{x:g}"
+
+
+def etiqueta_corrida(banco: str) -> str:
+    """
+    Identidad de la corrida: entidad + geometria del fold. Ej: FOCO_BBVA_1_0.5
+
+    Replica etiqueta_corrida() de step005_walk_forward_cv_3.7.py, que es la que
+    define el subnivel de carpeta donde viven los preds_test con
+    PARTICIONES=True. Las dos definiciones tienen que moverse juntas.
+    """
+    return f"{banco}_{_fmt_anios(VENTANA_VAL_AÑOS)}_{_fmt_anios(VENTANA_TEST_AÑOS)}"
+
+
+# Grupos que entran a la simulacion. Con PARTICIONES=False es ["SISTEMA"] y
+# BANCO queda en "SISTEMA" igual que antes; con True son las DOS caras de la
+# particion, en orden fijo (FOCO primero) para que el indice i de phi_i, de las
+# filas/columnas de R y del vector Z sea siempre el mismo.
+if not PARTICIONES:
+    GRUPOS = ["SISTEMA"]
+    BANCO  = "SISTEMA"
+else:
+    GRUPOS = [f"FOCO_{PARTICION.upper()}", f"RESTO_{PARTICION.upper()}"]
+    # Etiqueta del agregado para nombres de archivo de salida. No es una entidad
+    # de step005: es la suma S_h = sum_i X_{i,h} de la ecuacion (1) del paper.
+    BANCO  = f"CONJUNTO_{PARTICION.upper()}"
 
 # Entidad de la que salen las ETIQUETAS de regimen. DEBE coincidir con
 # BANCO_REGIMEN de step005_walk_forward_cv_3.7.py: la columna regimen_hmm de
@@ -83,14 +153,36 @@ BANCO_REGIMEN = "SISTEMA"
 # (se construye ahí como DIR_OUTPUT / f"{MODELO_CV}_{modo}_{ventanas}";
 # pega aquí el valor resultante de esa corrida — ej. con MODELO_CV="xgb",
 # EXPANDING=True, VENTANA_TRAIN_AÑOS=5, VENTANA_VAL_AÑOS=0.5, VENTANA_TEST_AÑOS=1):
-DIR_MODO = (BASE_SISTEMA / "2. Output" / "step005_wfcv_v3" / "xgb_qt_expanding_310.5")
+_DIR_MODO_BASE = (BASE_SISTEMA / "2. Output" / "step005_wfcv_v3" / "xgb_qt_expanding_310.5")
+
+
+def dir_modo_de(banco: str) -> Path:
+    """
+    Carpeta donde step005 dejo los preds_test de esa entidad.
+
+    Con PARTICIONES=False es _DIR_MODO_BASE a secas — identico al literal que
+    habia antes. Con True, step005 agrega un subnivel por entidad
+    (dirs_de_banco: dm = _DIR_BASE / etiqueta_corrida(banco)), y sin replicarlo
+    aca el glob de cargar_preds_test_reales busca en la carpeta PADRE. Eso no
+    siempre falla: si ahi quedaron preds_test de una corrida vieja de SISTEMA,
+    los encuentra y simula SISTEMA en silencio creyendo simular la particion.
+    """
+    return _DIR_MODO_BASE / etiqueta_corrida(banco) if PARTICIONES else _DIR_MODO_BASE
+
+
+DIR_MODO = dir_modo_de(GRUPOS[0])
 
 # Carpeta donde step005_validar_hmm_*.py guardó transmat_hmm_<banco>.parquet
 # (su DIR_OUTPUT — normalmente la misma "2. Output" del proyecto).
 DIR_REGIMEN_HMM = BASE_SISTEMA / "2. Output"
 
 # Salida de este orquestador
-DIR_SALIDA = BASE_SISTEMA / "2. Output" / "step006_simulacion" / "xgb_qt_expanding_310.5"
+# _SUF_SALIDA: subnivel por corrida. Con PARTICIONES=False es "" y las rutas
+# quedan EXACTAMENTE como estaban; con True separa las salidas del conjunto de
+# las de SISTEMA, que comparten nombre de archivo y se pisarian.
+_SUF_SALIDA = etiqueta_corrida(BANCO) if PARTICIONES else ""
+DIR_SALIDA = (BASE_SISTEMA / "2. Output" / "step006_simulacion" /
+              "xgb_qt_expanding_310.5" / _SUF_SALIDA)
 
 # Columna de Prophet en df_preds, si tu 'target' es un RESIDUO de Prophet que
 # hay que sumar de vuelta. None si 'target'/'y_realizado' ya es el flujo
@@ -115,7 +207,8 @@ SEED = 42
 
 # ── Fan charts de flujo acumulado (uno por día de origen) ───────────────────
 GENERAR_FANCHARTS    = True
-DIR_FLUJOS_ACUMULADOS = BASE_SISTEMA / "2. Output" / "flujos_acumulados" / "xgb_qt_expanding_310.5"
+DIR_FLUJOS_ACUMULADOS = (BASE_SISTEMA / "2. Output" / "flujos_acumulados" /
+                       "xgb_qt_expanding_310.5" / _SUF_SALIDA)
 N_PATHS_FANCHART      = 100  # paths por origen (default aumentado para aprovechar
                                # la paralelización — con 8 cores el tiempo de cómputo
                                # es comparable al anterior con 1000 paths serial)
@@ -126,12 +219,14 @@ BANDAS_FANCHART       = None   # None = usa BANDAS_FANCHART_DEFAULT de
 # Los percentiles se extraen analíticamente de las AzzaliniT ya fiteadas —
 # no requieren simulación adicional. Las bandas pueden no ser monótonas en h.
 GENERAR_FANCHARTS_NETO = True
-DIR_FLUJOS_NETOS       = BASE_SISTEMA / "2. Output" / "flujos_netos" / "xgb_qt_expanding_310.5"
+DIR_FLUJOS_NETOS = (BASE_SISTEMA / "2. Output" / "flujos_netos" /
+                  "xgb_qt_expanding_310.5" / _SUF_SALIDA)
 
 # ── Fanchart INTEGRADO (3 filas: neto XGBoost crudo / neto distribución / ────
 #     acumulado simulado) — imagen adicional, NO reemplaza las anteriores.
 GENERAR_FANCHARTS_INTEGRADO = True
-DIR_FLUJOS_INTEGRADOS       = BASE_SISTEMA / "2. Output" / "flujos_integrados" / "xgb_qt_expanding_310.5"
+DIR_FLUJOS_INTEGRADOS = (BASE_SISTEMA / "2. Output" / "flujos_integrados" /
+                       "xgb_qt_expanding_310.5" / _SUF_SALIDA)
 
 # ── Backtest extendido: taus evaluados ───────────────────────────────────────
 # TAU_BACKTEST_ACUM : tau existente del backtest acumulado (no cambia).
@@ -196,7 +291,497 @@ def _detectar_n_estados_rho(columnas) -> int | None:
     return len(indices)
 
 
+###############################################################################
+# Algebra de la simulacion conjunta (paper, secciones 4 y 5)
+#
+# Vive aca y no en step006_simulacion_paths_vf6.py por dos razones: (a) son
+# funciones PURAS —numpy y nada mas— que se validan sin tocar la unidad H:, y
+# (b) el modulo de simulacion ya es el motor N=1 y conviene no moverlo mientras
+# el conjunto este en prueba. Si el modo conjunto se consolida, el lugar natural
+# de estas cuatro funciones es el modulo.
+###############################################################################
+
+def construir_sigma_e(phi, R) -> np.ndarray:
+    """
+    Ecuacion (5) del paper:  Sigma_e = R (x) (11' - phi phi')
+
+    elemento a elemento:  (Sigma_e)_ij = rho_ij * (1 - phi_i*phi_j)
+                          (Sigma_e)_ii = 1 - phi_i^2
+
+    (x) es el producto de Hadamard. Sigma_e NO es un parametro libre: queda
+    determinada al exigir que el VAR(1) sea estacionario con matriz de
+    correlacion contemporanea igual a R. Esa calibracion es lo que garantiza
+    Var(Z_{i,h}) = 1 para todo h, y de ahi que U = Phi_N(Z) sea exactamente
+    uniforme y que las marginales simuladas reproduzcan F_{i,h} sin sesgo. Si
+    Sigma_e se fija de otro modo, la varianza latente deriva con el horizonte
+    (seccion 4).
+    """
+    phi = np.asarray(phi, dtype=float).ravel()
+    R   = np.asarray(R, dtype=float)
+    if R.shape != (len(phi), len(phi)):
+        raise ValueError(f"R debe ser {len(phi)}x{len(phi)}, es {R.shape}")
+    return R * (np.ones_like(R) - np.outer(phi, phi))
+
+
+def cota_rho_n2(phi_1: float, phi_2: float) -> float:
+    """
+    Ecuacion (7): cota cerrada sobre |rho_12| para que Sigma_e sea PSD con N=2.
+
+        |rho_12| <= sqrt((1 - phi_1^2)(1 - phi_2^2)) / (1 - phi_1*phi_2)
+
+    Vale exactamente 1 cuando phi_1 == phi_2 —o sea NO restringe— y se estrecha
+    a medida que las persistencias divergen. Por eso el problema puede pasar
+    inadvertido con dos grupos de comportamiento parecido y aparecer al
+    generalizar a N>2 (Cuadro 1 del paper).
+
+    Solo informativa/diagnostica: la verificacion operativa es lambda_min.
+    """
+    num = np.sqrt(max((1.0 - phi_1**2) * (1.0 - phi_2**2), 0.0))
+    den = 1.0 - phi_1 * phi_2
+    if den <= 1e-12:
+        return 0.0
+    return float(min(num / den, 1.0))
+
+
+def lambda_estrella(phi, R, tol: float = 1e-6) -> float:
+    """
+    Ecuacion (8): encogimiento sobre R hasta que Sigma_e sea PSD.
+
+        R(lam) = lam*R + (1-lam)*I
+        lam*   = max{ lam en (0,1] : lambda_min(Sigma_e(lam)) >= 0 }
+
+    resuelto por biseccion. Devuelve 1.0 si Sigma_e ya es PSD con R sin tocar.
+
+    Se prefiere al truncamiento espectral (Sigma_e = P max(D,0) P') porque lam*
+    es UN numero interpretable y reportable —el factor de atenuacion uniforme
+    aplicado a la correlacion transversal— en vez de una deformacion arbitraria
+    de la estructura.
+
+    Que lam* resulte bajo es informacion sustantiva, no un detalle numerico:
+    indica que la restriccion de Phi diagonal (supuesto A2) es demasiado rigida
+    para los datos, y sugiere pasar a un VAR(1) completo.
+
+    Validado contra el ejemplo del paper: N=3, phi=(0.90,0.50,0.10),
+    rho=(0.7,0.6,0.5) -> lambda_min(Sigma_e) = -0.114 y lam* = 0.72.
+    """
+    R = np.asarray(R, dtype=float)
+    I = np.eye(len(R))
+
+    def _lmin(lam: float) -> float:
+        return float(np.linalg.eigvalsh(construir_sigma_e(phi, lam * R + (1 - lam) * I)).min())
+
+    if _lmin(1.0) >= 0.0:
+        return 1.0
+    # lam=0 da R=I -> Sigma_e = diag(1-phi_i^2), PSD siempre que |phi_i|<1, asi
+    # que la biseccion tiene solucion garantizada dentro de [0, 1].
+    lo, hi = 0.0, 1.0
+    while hi - lo > tol:
+        mid = 0.5 * (lo + hi)
+        if _lmin(mid) >= 0.0:
+            lo = mid
+        else:
+            hi = mid
+    return lo
+
+
+def preparar_bloques_conjuntos(phi_por_s: dict, R_por_s: dict,
+                              etiqueta: str = "") -> dict:
+    """
+    Precomputo del algoritmo (seccion 6): una sola vez por fold.
+
+    Para cada regimen s: Sigma_e(s) por (5), verificacion PSD, eventual
+    encogimiento (8), y L(s) = chol(Sigma_e(s)). Ademas L0 = chol(R) del regimen
+    inicial, para la inicializacion estacionaria del paso P1.
+
+    Parametros
+    ----------
+    phi_por_s : {s: array (N,)}  — phi_i(s) por grupo, en el orden de GRUPOS.
+    R_por_s   : {s: array (N,N)} — matriz de correlacion transversal por regimen.
+
+    Devuelve
+    --------
+    {"Phi": {s: array (N,)}, "L": {s: array (N,N)}, "L0": array (N,N),
+     "lam": {s: float}, "lmin": {s: float}, "cota": {s: float|None}}
+
+    La verificacion PSD es OBLIGATORIA antes de simular, no opcional: la matriz
+    11' - phi phi' de (5) no es PSD en general, de modo que el teorema de Schur
+    sobre productos de Hadamard no aplica y Sigma_e puede no admitir Cholesky.
+    """
+    Phi, L, lam, lmin, cota = {}, {}, {}, {}, {}
+    for s in sorted(phi_por_s):
+        phi = np.asarray(phi_por_s[s], dtype=float).ravel()
+        R   = np.asarray(R_por_s[s], dtype=float)
+        N   = len(phi)
+        if np.any(np.abs(phi) >= 1.0):
+            raise ValueError(f"|phi_i| >= 1 en el regimen {s}: {phi} — "
+                             f"la condicion (2) exige |phi_i| < 1.")
+        lmin[s] = float(np.linalg.eigvalsh(construir_sigma_e(phi, R)).min())
+        cota[s] = cota_rho_n2(phi[0], phi[1]) if N == 2 else None
+        lam[s]  = lambda_estrella(phi, R)
+        if lam[s] < 1.0:
+            R = lam[s] * R + (1 - lam[s]) * np.eye(N)
+            logger.warning(
+                f"  [CONJ]{etiqueta} regimen {s}: Sigma_e NO era PSD "
+                f"(lambda_min={lmin[s]:+.4f}) — encogimiento (8) con "
+                f"lambda*={lam[s]:.4f}. Un lambda* bajo indica que Phi diagonal "
+                f"(supuesto A2) es demasiado rigida para estos datos y sugiere "
+                f"un VAR(1) completo.")
+        Phi[s] = phi
+        # jitter minimo: con lambda_min == 0 exacto (el borde que deja la
+        # biseccion) Cholesky puede fallar por redondeo.
+        Se = construir_sigma_e(phi, R)
+        try:
+            L[s] = np.linalg.cholesky(Se)
+        except np.linalg.LinAlgError:
+            L[s] = np.linalg.cholesky(Se + 1e-10 * np.eye(N))
+        _txt_cota = f" cota(7)={cota[s]:.3f}" if cota[s] is not None else ""
+        logger.info(f"  [CONJ]{etiqueta} regimen {s}: phi={np.round(phi, 4).tolist()} "
+                    f"lambda_min={lmin[s]:+.4f} lambda*={lam[s]:.4f}{_txt_cota}")
+
+    s0 = sorted(R_por_s)[0]
+    R0 = np.asarray(R_por_s[s0], dtype=float)
+    if lam[s0] < 1.0:
+        R0 = lam[s0] * R0 + (1 - lam[s0]) * np.eye(len(R0))
+    try:
+        L0 = np.linalg.cholesky(R0)
+    except np.linalg.LinAlgError:
+        L0 = np.linalg.cholesky(R0 + 1e-10 * np.eye(len(R0)))
+    return {"Phi": Phi, "L": L, "L0": L0, "lam": lam, "lmin": lmin, "cota": cota}
+
+
+def simular_un_path_conjunto(fecha_t, horizontes, regimenes_path, bloques,
+                             distribuciones, grupos, rng) -> np.ndarray:
+    """
+    Pasos P1-P4 del algoritmo, para una replica j.
+
+    P1  Z_{h0-1} = L0 @ xi,            xi ~ N(0, I_N)   (inicio estacionario)
+    P2  Z_h      = Phi(s_h) * Z_{h-1} + L(s_h) @ eta_h, eta_h ~ N(0, I_N)
+    P3  U_{i,h}  = Phi_N(Z_{i,h})
+    P4  X_{i,h}  = F^-1_{i,h}(U_{i,h})   con la marginal PROPIA de ese par (i,h)
+
+    Devuelve array (N, H) en escala de flujos. La AGREGACION (P5) la hace el
+    llamador, porque necesita acumular por ventana.
+
+    Por que Phi(s) se aplica como producto elemento a elemento y no como
+    matriz: Phi = diag(phi_1..phi_N) por el supuesto A2 (sin efectos cruzados
+    con rezago), asi que Phi @ Z == phi * Z y el producto matricial seria
+    trabajo de mas.
+
+    eta_h es UN sorteo de N componentes compartido por los grupos: es el unico
+    punto donde rho_ij entra al sistema, via L(s_h) = chol(Sigma_e(s_h)).
+    Sortear un eta por grupo destruiria la dependencia transversal.
+    """
+    N, H = len(grupos), len(horizontes)
+    _s_fb = sorted(bloques["Phi"])[0]
+
+    Z_todos = np.empty((N, H))
+    z = bloques["L0"] @ rng.standard_normal(N)              # P1
+    W = rng.standard_normal((H, N))                         # un eta_h por horizonte
+    for k in range(H):
+        s = int(regimenes_path[k])
+        # Un regimen sin bloque solo puede pasar si la transmat tiene mas estados
+        # que rho_s_* en preds_test; el guard de main() lo descarta antes, esto
+        # es el cinturon.
+        phi = bloques["Phi"].get(s, bloques["Phi"][_s_fb])
+        L   = bloques["L"].get(s,   bloques["L"][_s_fb])
+        z   = phi * z + L @ W[k]                            # P2
+        Z_todos[:, k] = z
+
+    U = _norm_dist.cdf(Z_todos)                             # P3, vectorizado
+    X = np.zeros((N, H))
+    _ft = pd.Timestamp(fecha_t)
+    for i, g in enumerate(grupos):
+        for k in range(H):
+            dist = distribuciones.get((g, _ft, int(horizontes[k])))
+            if dist is not None:                            # P4
+                X[i, k] = float(dist.ppf(np.clip(U[i, k], 1e-7, 1.0 - 1e-7))[0])
+    return X
+
+
+def simular_paths_origen_conjunto(
+    fecha_t, df_por_grupo: dict, distribuciones: dict, estado_inicial: int,
+    matriz_transicion: np.ndarray, bloques: dict, n_paths: int,
+    ventanas: list, grupos: list, seed: int = 42,
+) -> dict:
+    """
+    Paso P5 y ecuacion (9): agrega los grupos DENTRO de cada replica y devuelve
+    la distribucion del acumulado del SISTEMA por ventana.
+
+        S_h^(j) = sum_i X_{i,h}^(j)          (agregacion transversal)
+        C_{h0:h}^(j) = sum_{k=h0}^{h} S_k^(j)  (acumulacion temporal)
+
+    El orden de las operaciones es la esencia del metodo (seccion 6): se suma
+    primero —dentro de la replica, donde la dependencia ya esta incorporada— y
+    el cuantil se toma despues, sobre las J replicas. Invertir el orden
+    reintroduce el error de no-aditividad de cuantiles.
+
+    La trayectoria de regimen se sortea UNA vez por replica y se comparte entre
+    los grupos: es el s_h de un solo subindice del supuesto A3.
+
+    Devuelve {ventana: array (n_paths,)} — igual que simular_paths_origen del
+    modulo, asi que calcular_percentiles_acumulado se reusa sin cambios.
+    """
+    # Grilla de horizontes comun: ya viene alineada por el inner join del loader,
+    # asi que basta tomarla del primer grupo.
+    horizontes = (df_por_grupo[grupos[0]]
+                  .sort_values("h")["h"].values.astype(int))
+    H = len(horizontes)
+    acum = {v: np.empty(n_paths) for v in ventanas}
+    idx_por_v = {v: np.where(horizontes <= v)[0] for v in ventanas}
+
+    for p in range(n_paths):
+        rng_p = np.random.default_rng(seed + p)
+        regimenes = simular_regimen_path(
+            estado_inicial, matriz_transicion, H, rng_p)      # P0 (compartido)
+        X = simular_un_path_conjunto(
+            fecha_t, horizontes, regimenes, bloques,
+            distribuciones, grupos, rng_p)                    # P1-P4
+        S = X.sum(axis=0)                                     # P5, S_h
+        for v in ventanas:
+            i_v = idx_por_v[v]
+            acum[v][p] = float(S[i_v].sum()) if len(i_v) else 0.0
+    return acum
+
+
+def cargar_preds_de_grupos(grupos: list) -> dict:
+    """
+    Carga el preds_test de cada grupo desde SU carpeta y los alinea sobre la
+    grilla comun (fecha_t, h) por INNER JOIN.
+
+    El inner join no es defensivo, es la condicion A5 del paper puesta en
+    practica: la suma S_h = sum_i X_{i,h} solo identifica al sistema si los
+    grupos particionan exhaustivamente. Un origen presente en FOCO y ausente en
+    RESTO no es agregable — sumar ahi seria reportar medio sistema como si fuera
+    el total.
+
+    Guard: si en la carpeta de un grupo no hay preds_test suyos, aborta listando
+    lo que si hay. Sin el guard, cargar_preds_test_reales glob-ea en esa carpeta
+    y, si quedaron archivos de otra entidad con el patron, los levanta en
+    silencio (ver dir_modo_de).
+    """
+    out = {}
+    for g in grupos:
+        d = dir_modo_de(g)
+        if not d.exists():
+            raise FileNotFoundError(
+                f"No existe la carpeta {d} para el grupo {g}. Con "
+                f"PARTICIONES=True step005 escribe en un subnivel "
+                f"etiqueta_corrida(banco) = '{etiqueta_corrida(g)}'; verifica "
+                f"que VENTANA_VAL_AÑOS={VENTANA_VAL_AÑOS} y "
+                f"VENTANA_TEST_AÑOS={VENTANA_TEST_AÑOS} coincidan con la "
+                f"corrida de step005. Subcarpetas presentes en "
+                f"{_DIR_MODO_BASE}: "
+                f"{sorted(p.name for p in _DIR_MODO_BASE.glob('*') if p.is_dir())}")
+        if not list(d.glob(f"preds_test_fold*_{g}_*.parquet")):
+            raise FileNotFoundError(
+                f"No hay preds_test_fold*_{g}_*.parquet en {d}. Archivos de "
+                f"preds presentes: "
+                f"{sorted(p.name for p in d.glob('preds_test_fold*.parquet'))[:8]}")
+        df = cargar_preds_test_reales(d, g)
+        logger.info(f"  {g}: {len(df):,} filas | {df['fecha_t'].nunique()} origenes "
+                    f"| folds {sorted(df['fold'].unique())}")
+        out[g] = df
+
+    # Grilla comun (fecha_t, h): interseccion sobre TODOS los grupos.
+    claves = None
+    for g in grupos:
+        k = set(zip(out[g]["fecha_t"], out[g]["h"].astype(int)))
+        claves = k if claves is None else (claves & k)
+    if not claves:
+        raise ValueError("Los grupos no comparten ningun par (fecha_t, h) — "
+                         "no hay nada que agregar. Revisa que las corridas de "
+                         "step005 usen la MISMA geometria de folds.")
+    for g in grupos:
+        n0 = len(out[g])
+        m = [(ft, int(h)) in claves for ft, h in zip(out[g]["fecha_t"], out[g]["h"])]
+        out[g] = out[g].loc[m].sort_values(["fecha_t", "h"]).reset_index(drop=True)
+        if len(out[g]) != n0:
+            logger.warning(f"  {g}: {n0 - len(out[g]):,} de {n0:,} filas quedan "
+                           f"fuera de la grilla comun (A5: la suma solo "
+                           f"identifica al sistema si los grupos particionan)")
+    logger.info(f"  grilla comun: {len(claves):,} pares (fecha_t, h) | "
+                f"{len(set(ft for ft, _ in claves)):,} origenes")
+    return out
+
+
+def _leer_phi_rho_de_grupo(df_grupo: pd.DataFrame, n_estados: int) -> tuple:
+    """
+    Extrae phi_i(s) y rho_ij(s) de las columnas constantes por fold que escribe
+    step005 (ver _guardar_preds_test): rho_s_0..rho_s_{n-1} y rho_ij / rho_ij_s*.
+
+    Devuelve ({s: phi}, {s: rho_ij}) con rho_ij cayendo al global cuando el
+    condicional de ese regimen no existe — misma politica que
+    _estimar_rho_transversal, que omite un estado con menos pares que el minimo
+    y deja que se use el global.
+    """
+    fila = df_grupo.drop_duplicates("año_corte_regimen").iloc[0]
+    phi = {s: float(fila[f"rho_s_{s}"]) for s in range(n_estados)}
+    rho_global = float(fila["rho_ij"]) if "rho_ij" in df_grupo.columns else 0.0
+    rho = {}
+    for s in range(n_estados):
+        col = f"rho_ij_s{s}"
+        v = fila[col] if col in df_grupo.columns else np.nan
+        rho[s] = float(v) if pd.notna(v) else rho_global
+    return phi, rho
+
+
+def main_conjunto():
+    """
+    Modo PARTICIONES=True — algoritmo P1-P5 del paper sobre N grupos.
+
+    Estructura, igual que main(): se agrupa por año_corte_regimen porque cada
+    fold del walk-forward puede haber usado un bloque HMM distinto, y se simula
+    cada grupo con SU transmat. La diferencia es que dentro de cada
+    año_corte_regimen los N grupos se simulan JUNTOS.
+
+    No genera fan charts: los tres generadores del modulo estan escritos para
+    una entidad (rho_por_regimen escalar) y adaptarlos es trabajo aparte. La
+    salida es el parquet de percentiles del acumulado del SISTEMA, que es el
+    objeto de decision de la ecuacion (1).
+    """
+    DIR_SALIDA.mkdir(parents=True, exist_ok=True)
+    logger.info(f"MODO CONJUNTO — N={len(GRUPOS)} grupos: {GRUPOS}")
+
+    preds = cargar_preds_de_grupos(GRUPOS)
+
+    # n_estados y coherencia de modo: los guards de main() aplicados a cada grupo
+    n_est = {g: _detectar_n_estados_rho(preds[g].columns) for g in GRUPOS}
+    if any(v is None for v in n_est.values()):
+        logger.error(f"Faltan columnas rho_s_* en algun grupo: {n_est}. Corre "
+                     f"step005 con ESTIMAR_RHO_EN_VAL=True.")
+        return
+    if len(set(n_est.values())) != 1:
+        logger.error(f"Los grupos traen distinto numero de rho_s_*: {n_est} — "
+                     f"vienen de corridas con N_ESTADOS distinto. Regenera.")
+        return
+    n_estados = next(iter(n_est.values()))
+    for g in GRUPOS:
+        cp = (str(preds[g]["condicionar_por"].iloc[0])
+              if "condicionar_por" in preds[g].columns else None)
+        if cp is not None and cp != "regimen":
+            logger.error(f"{g}: preds_test viene con CONDICIONAR_POR='{cp}'. Los "
+                         f"rho_s_* estan estratificados por eso y no por el "
+                         f"estado del HMM que muestrea A — modo no soportado.")
+            return
+
+    resultados, filas_diag = [], []
+    for año_corte, df_ref in preds[GRUPOS[0]].groupby("año_corte_regimen"):
+        try:
+            _seed_offset = int(str(año_corte).replace("-", "")) % 100_000
+        except Exception:
+            _seed_offset = 0
+        try:
+            A = cargar_transmat(BANCO_REGIMEN if BANCO_REGIMEN else GRUPOS[0], año_corte)
+        except (FileNotFoundError, ValueError) as e:
+            logger.warning(f"  año_corte_regimen={año_corte}: {e} — grupo omitido.")
+            continue
+        if n_estados != len(A):
+            logger.error(f"  año_corte_regimen={año_corte}: {n_estados} columnas "
+                         f"rho_s_* contra transmat de {len(A)} estados — omitido.")
+            continue
+
+        # Sub-df de cada grupo para ESTE año_corte
+        dfg = {g: preds[g][preds[g]["año_corte_regimen"] == año_corte] for g in GRUPOS}
+        if any(d.empty for d in dfg.values()):
+            logger.warning(f"  año_corte_regimen={año_corte}: algun grupo sin filas "
+                           f"— omitido.")
+            continue
+
+        # ── phi_i(s) por grupo y R(s) ────────────────────────────────────────
+        phi_rho = {g: _leer_phi_rho_de_grupo(dfg[g], n_estados) for g in GRUPOS}
+        if any(np.isnan(list(phi_rho[g][0].values())).any() for g in GRUPOS):
+            logger.error(f"  año_corte_regimen={año_corte}: rho_s_* con NaN en "
+                         f"algun grupo — omitido (probable mezcla de preds_test "
+                         f"de una corrida sin ESTIMAR_RHO_EN_VAL).")
+            continue
+        phi_por_s, R_por_s = {}, {}
+        for s in range(n_estados):
+            phi_por_s[s] = np.array([phi_rho[g][0][s] for g in GRUPOS], dtype=float)
+            # rho_ij es SIMETRICO y se verifico identico desde las dos caras, asi
+            # que se toma del primer grupo. Con N>2 habria que leer la matriz
+            # completa; con N=2 un escalar la determina.
+            r = phi_rho[GRUPOS[0]][1][s]
+            R = np.eye(len(GRUPOS))
+            R[0, 1] = R[1, 0] = r
+            R_por_s[s] = R
+
+        bloques = preparar_bloques_conjuntos(
+            phi_por_s, R_por_s, etiqueta=f" año_corte={año_corte}")
+        for s in range(n_estados):
+            filas_diag.append({
+                "año_corte_regimen": str(año_corte), "regimen": s,
+                **{f"phi_{g}": float(phi_por_s[s][i]) for i, g in enumerate(GRUPOS)},
+                "rho_ij": float(R_por_s[s][0, 1]),
+                "lambda_min_sigma_e": bloques["lmin"][s],
+                "lambda_estrella": bloques["lam"][s],
+                "cota_ec7": bloques["cota"][s],
+                "diag_A": float(np.diag(A)[s]) if s < len(A) else np.nan,
+            })
+
+        # ── Marginales por GRUPO: clave (grupo, fecha_t, h) ──────────────────
+        distribuciones = {}
+        for g in GRUPOS:
+            logger.info(f"  año_corte_regimen={año_corte}: fiteando marginales de {g} "
+                        f"({len(dfg[g]):,} pares)...")
+            for (ft, h), d in fitear_distribuciones_por_horizonte(
+                    dfg[g], taus=None, n_jobs=N_JOBS).items():
+                distribuciones[(g, ft, h)] = d
+
+        estado_por_origen = (df_ref.drop_duplicates("fecha_t")
+                             .set_index("fecha_t")["regimen_hmm"].astype(int))
+        ventanas = [v for v in VENTANAS if v >= int(dfg[GRUPOS[0]]["h"].min())]
+
+        origenes = sorted(dfg[GRUPOS[0]]["fecha_t"].unique())
+        logger.info(f"  año_corte_regimen={año_corte}: simulando {len(origenes)} "
+                    f"origenes x {N_PATHS} replicas, "
+                    f"diag(A)={np.diag(A).round(3).tolist()}")
+        for i_o, ft in enumerate(origenes):
+            df_por_grupo = {g: dfg[g][dfg[g]["fecha_t"] == ft] for g in GRUPOS}
+            acum = simular_paths_origen_conjunto(
+                ft, df_por_grupo, distribuciones,
+                estado_inicial=int(estado_por_origen.get(ft, 0)),
+                matriz_transicion=A, bloques=bloques, n_paths=N_PATHS,
+                ventanas=ventanas, grupos=GRUPOS, seed=SEED + _seed_offset + i_o)
+            # y realizado del SISTEMA = suma de los grupos, por ventana
+            real = {}
+            for v in ventanas:
+                tot = 0.0
+                for g in GRUPOS:
+                    d = df_por_grupo[g]
+                    tot += float(d.loc[d["h"] <= v, "y_realizado"].sum()) \
+                        if "y_realizado" in d.columns else np.nan
+                real[v] = tot
+            for v, tmap in calcular_percentiles_acumulado(acum).items():
+                for tau, val in tmap.items():
+                    resultados.append({"fecha_t": ft, "ventana": v, "tau": tau,
+                                       "percentil_acum": val,
+                                       "y_realizado_acum": real.get(v, np.nan)})
+            if (i_o + 1) % 25 == 0:
+                logger.info(f"    origen {i_o+1}/{len(origenes)}")
+
+    if not resultados:
+        logger.error("Ningun año_corte_regimen pudo simularse.")
+        return
+
+    df_sim = pd.DataFrame(resultados)
+    ruta = DIR_SALIDA / f"simulacion_paths_{BANCO}.parquet"
+    df_sim.to_parquet(ruta, index=False)
+    logger.info(f"Simulacion conjunta: {len(df_sim):,} filas -> {ruta.name}")
+
+    df_diag = pd.DataFrame(filas_diag)
+    ruta_d = DIR_SALIDA / f"diagnostico_sigma_e_{BANCO}.csv"
+    df_diag.to_csv(ruta_d, index=False)
+    logger.info("\n" + df_diag.to_string(index=False))
+    logger.info(f"Diagnostico Sigma_e / lambda*: {ruta_d.name}")
+    if (df_diag["lambda_estrella"] < 1.0).any():
+        logger.warning(
+            "  Algun regimen necesito encogimiento (8). Un lambda* bajo indica "
+            "que Phi diagonal (A2) es demasiado rigida — considerar VAR(1) completo.")
+
+
 def main():
+    if PARTICIONES:
+        return main_conjunto()
     DIR_SALIDA.mkdir(parents=True, exist_ok=True)
 
     # ── 1. Cargar predicciones TEST reales (todos los folds, sin duplicados) ──
