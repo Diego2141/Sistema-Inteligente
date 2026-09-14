@@ -203,29 +203,41 @@ CONDICIONAR_POR = "regimen"
 # que las columnas phi_s0..phi_s3 / rho_ij_s0..rho_ij_s3 del CSV se lean igual
 # en los dos modos y las dos corridas sean comparables columna a columna.
 CAL_RESTO      = 0   # interior del mes
-CAL_APERTURA   = 1   # apertura, ya pasado el cambio de mes
-CAL_CIERRE     = 2   # ventana de cierre, sin llegar al cambio de mes
-CAL_TRANSICION = 3   # el CAMBIO de mes: ultimos habiles de M + primeros de M+1
+CAL_APERTURA   = 1   # apertura del mes = la RECUPERACION tras el cierre
+CAL_CIERRE     = 2   # ventana de cierre, SIN el ultimo dia habil
+CAL_TRANSICION = 3   # el ULTIMO dia habil del mes, solo
 
 # Anchos de cada ventana, en dias HABILES. La precedencia al asignar es
-# transicion > cierre > apertura > resto, asi que la transicion se recorta de
-# los extremos de las otras dos y la particion nunca se solapa.
+# transicion > cierre > apertura > resto, asi que la transicion se recorta del
+# extremo del cierre y la particion nunca se solapa.
 #
-# La transicion existe como balde propio porque es el unico tramo donde
-# conviven los dos anclajes de la familia *_pos: el sistema esta retirando
-# contra el cierre de M y depositando contra la apertura de M+1 en dias
-# consecutivos. Meterlo dentro de "cierre" o de "apertura" promedia dos
-# comportamientos de signo opuesto — exactamente el error que las dos anclas
-# (dias_al_cierre_mes para q01, dias_desde_cierre_mes para q99) existen para
-# evitar.
-CAL_N_TRANS_FIN = 2   # ultimos N habiles de M         → transicion
-CAL_N_TRANS_INI = 2   # primeros N habiles de M+1      → transicion
-CAL_N_CIERRE    = 5   # ultimos N habiles de M         → cierre (misma
-                      # definicion de "ventana de cierre" que usan los tres
-                      # hallazgos del negocio; los 2 ultimos se los lleva
-                      # transicion, asi que cierre queda con dam in {2,3,4})
-CAL_N_APERTURA  = 5   # primeros N habiles de M        → apertura (idem:
-                      # ddc in {2,3,4})
+# POR QUE LA TRANSICION ES UN SOLO DIA
+# El ultimo dia habil del mes es el punto mas hondo del camino, no uno mas de la
+# ventana de cierre: es donde se liquida la posicion de encaje. Y lo que viene
+# DESPUES no es mas de lo mismo sino su opuesto — la recuperacion, el sistema
+# volviendo a depositar. Por eso:
+#
+#   - Promediarlo con los otros 4 dias de la ventana de cierre diluye la
+#     profundidad del punto extremo con dias de retiro mas suave.
+#   - Y meter en el MISMO balde el ultimo dia de M junto con los primeros de M+1
+#     —como hacia la version anterior, con CAL_N_TRANS_FIN=2 y
+#     CAL_N_TRANS_INI=2— promedia comportamientos de SIGNO OPUESTO: retiro
+#     profundo y deposito de recuperacion en la misma celda. Ese es exactamente
+#     el error que las dos anclas de la familia *_pos (dias_al_cierre_mes para
+#     q01, dias_desde_cierre_mes para q99) existen para evitar.
+#
+# Asi que la transicion NO cruza el limite de mes: es dam=0 y nada mas. La
+# recuperacion vive entera en "apertura", que es su nombre correcto.
+CAL_N_TRANS_FIN = 1   # ultimos N habiles de M    → transicion  (dam in {0})
+CAL_N_TRANS_INI = 0   # primeros N habiles de M+1 → transicion. 0 = la
+                      # recuperacion NO entra aca, va a apertura. Subirlo a 2
+                      # reconstruye el balde "a caballo" de la version anterior.
+CAL_N_CIERRE    = 5   # ultimos N habiles de M    → cierre (misma definicion de
+                      # "ventana de cierre" que usan los tres hallazgos del
+                      # negocio; el ultimo se lo lleva transicion, asi que
+                      # cierre queda con dam in {1,2,3,4})
+CAL_N_APERTURA  = 5   # primeros N habiles de M   → apertura, ddc in {0,..,4}
+                      # completos, porque CAL_N_TRANS_INI=0 no le saca ninguno
 
 if CONDICIONAR_POR not in ("regimen", "calendario"):
     raise ValueError(
@@ -1645,6 +1657,17 @@ def _etiquetas_calendario(idx) -> pd.Series:
     Precedencia: transicion > cierre > apertura > resto. En un mes corto donde
     las ventanas de cierre y apertura se tocarian, cierre gana — es la cola que
     manda en q01 y la que motiva el ejercicio.
+
+    Con la configuracion vigente (CAL_N_TRANS_FIN=1, CAL_N_TRANS_INI=0) los
+    baldes quedan, sobre el reloj habil del mes:
+
+        apertura    ddc in {0..4}      la recuperacion
+        resto       el interior
+        cierre      dam in {1..4}      retiro creciente
+        transicion  dam == 0           el ultimo dia habil, el punto mas hondo
+
+    y la transicion NO cruza el limite de mes: cada mes aporta exactamente un
+    dia a ese balde.
 
     MESES INCOMPLETOS
     -----------------
