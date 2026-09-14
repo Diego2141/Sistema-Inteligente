@@ -228,16 +228,36 @@ CAL_TRANSICION = 3   # el ULTIMO dia habil del mes, solo
 #
 # Asi que la transicion NO cruza el limite de mes: es dam=0 y nada mas. La
 # recuperacion vive entera en "apertura", que es su nombre correcto.
-CAL_N_TRANS_FIN = 1   # ultimos N habiles de M    → transicion  (dam in {0})
-CAL_N_TRANS_INI = 0   # primeros N habiles de M+1 → transicion. 0 = la
-                      # recuperacion NO entra aca, va a apertura. Subirlo a 2
-                      # reconstruye el balde "a caballo" de la version anterior.
-CAL_N_CIERRE    = 5   # ultimos N habiles de M    → cierre (misma definicion de
-                      # "ventana de cierre" que usan los tres hallazgos del
-                      # negocio; el ultimo se lo lleva transicion, asi que
-                      # cierre queda con dam in {1,2,3,4})
-CAL_N_APERTURA  = 5   # primeros N habiles de M   → apertura, ddc in {0,..,4}
-                      # completos, porque CAL_N_TRANS_INI=0 no le saca ninguno
+# CADA CONSTANTE ES EL ANCHO DE SU PROPIO BALDE, no un recorte del extremo del
+# mes. O sea: el numero que se escribe es la cantidad de dias que el balde
+# recibe, ya descontada la transicion. Antes CAL_N_CIERRE=5 significaba "ultimos
+# 5 habiles" y la transicion se llevaba uno, asi que cierre terminaba con 4 —
+# para tener 5 habia que escribir 6. Con esta definicion los baldes se componen
+# sin aritmetica mental y sin solaparse:
+#
+#     transicion  dam in [0, FIN)
+#     cierre      dam in [FIN, FIN + CIERRE)
+#     apertura    ddc in [INI, INI + APERTURA)
+#     resto       lo que queda en el medio
+CAL_N_TRANS_FIN = 1   # dias del balde transicion tomados del cierre de M
+                      #   → dam in {0}
+CAL_N_TRANS_INI = 0   # dias del balde transicion tomados de la apertura de M+1.
+                      # 0 = la recuperacion NO entra aca, va a apertura. Subirlo
+                      # a 2 reconstruye el balde "a caballo" de la version vieja.
+CAL_N_CIERRE    = 5   # dias del balde cierre  → dam in {1,2,3,4,5}
+CAL_N_APERTURA  = 5   # dias del balde apertura → ddc in {0,1,2,3,4}
+
+# El mes habil mas corto del calendario peruano tiene 19 ruedas; si los cuatro
+# baldes pidieran mas que eso, cierre y apertura se solaparian y la precedencia
+# decidiria en silencio cual gana. Mejor abortar al configurar.
+_CAL_DIAS_PEDIDOS = (CAL_N_TRANS_FIN + CAL_N_CIERRE
+                     + CAL_N_TRANS_INI + CAL_N_APERTURA)
+if _CAL_DIAS_PEDIDOS > 19:
+    raise ValueError(
+        f"Los baldes de calendario piden {_CAL_DIAS_PEDIDOS} dias habiles "
+        f"(transicion {CAL_N_TRANS_FIN}+{CAL_N_TRANS_INI}, cierre "
+        f"{CAL_N_CIERRE}, apertura {CAL_N_APERTURA}) y el mes habil mas corto "
+        f"tiene 19. Cierre y apertura se solaparian en los meses cortos.")
 
 if CONDICIONAR_POR not in ("regimen", "calendario"):
     raise ValueError(
@@ -1663,7 +1683,7 @@ def _etiquetas_calendario(idx) -> pd.Series:
 
         apertura    ddc in {0..4}      la recuperacion
         resto       el interior
-        cierre      dam in {1..4}      retiro creciente
+        cierre      dam in {1..5}      retiro creciente
         transicion  dam == 0           el ultimo dia habil, el punto mas hondo
 
     y la transicion NO cruza el limite de mes: cada mes aporta exactamente un
@@ -1708,9 +1728,13 @@ def _etiquetas_calendario(idx) -> pd.Series:
     _esperados = np.busday_count(_ini, _fin)
     completo = tot >= (_esperados - MAX_FERIADOS_MES)
 
+    # Cada constante CAL_N_* es el ANCHO de su balde, asi que los limites se
+    # suman: cierre arranca donde termina la transicion, no en el borde del mes.
+    # Se escribe igual por precedencia (transicion sobreescribe al final) para
+    # que un mes corto tenga una resolucion definida en vez de indices negativos.
     lab = np.full(len(idx), CAL_RESTO, dtype=int)
-    lab[ddc < CAL_N_APERTURA] = CAL_APERTURA
-    lab[dam < CAL_N_CIERRE]   = CAL_CIERRE
+    lab[ddc < CAL_N_TRANS_INI + CAL_N_APERTURA] = CAL_APERTURA
+    lab[dam < CAL_N_TRANS_FIN + CAL_N_CIERRE]   = CAL_CIERRE
     lab[(dam < CAL_N_TRANS_FIN) | (ddc < CAL_N_TRANS_INI)] = CAL_TRANSICION
     return pd.Series(lab[completo], index=idx[completo], name="estado")
 
