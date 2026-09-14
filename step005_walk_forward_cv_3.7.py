@@ -1740,7 +1740,9 @@ def _estimar_rho_val_fold(clasif: pd.DataFrame,
                       para que cuenten como "par" valido (evita correlacionar
                       observaciones separadas por feriados largos o huecos
                       de datos como si fueran consecutivas).
-    rho_default    : piso conservador si ningun regimen tiene pares suficientes.
+    rho_default    : ULTIMO recurso del fallback, solo si ni el pool de todos
+                      los pares sin estratificar junta MIN_PARES_RHO_REGIMEN.
+                      No es un piso: ver la jerarquia de fallback mas abajo.
     tau_ewma_pares : vida-media (dias habiles) del peso exponencial sobre
                       los pares. tau=100 pondera muy suave.
 
@@ -1789,6 +1791,35 @@ def _estimar_rho_val_fold(clasif: pd.DataFrame,
     pares_por_s  = {}
     rho_estimado = {}   # solo los que tienen >= min_pares
 
+    def _pearson_pond(pesos, pz_prev, pz_cur) -> float:
+        """
+        Correlacion de Pearson ponderada — formula estandar. El prefactor (1-K)
+        de los pesos se cancela aqui (aparece tanto en numerador como en
+        denominador), por eso no se aplica al construirlos.
+
+        Extraida a funcion para que el pooled de abajo use EXACTAMENTE el mismo
+        estimador que los estratos, en vez de una copia que pueda divergir.
+        """
+        w  = np.asarray(pesos, dtype=float)
+        zp = np.asarray(pz_prev, dtype=float)
+        zc = np.asarray(pz_cur,  dtype=float)
+        w_sum = w.sum()
+        if w_sum <= 0:
+            return 0.0
+        mu_p  = np.sum(w * zp) / w_sum
+        mu_c  = np.sum(w * zc) / w_sum
+        cov   = np.sum(w * (zp - mu_p) * (zc - mu_c)) / w_sum
+        var_p = np.sum(w * (zp - mu_p) ** 2) / w_sum
+        var_c = np.sum(w * (zc - mu_c) ** 2) / w_sum
+        denom = np.sqrt(var_p * var_c)
+        rho = float(cov / denom) if denom > 1e-12 else 0.0
+        return float(np.clip(rho, -0.98, 0.98))
+
+    # Pool de TODOS los pares validos, sin estratificar. Se acumula en la misma
+    # pasada (cada par pertenece a exactamente un estado, porque n_estados sale
+    # de r_arr.max()+1, asi que la union de los estratos es el total).
+    pool_prev, pool_cur, pool_w = [], [], []
+
     for s in range(n_estados):
         pz_prev, pz_cur, pesos = [], [], []
         for i in range(1, len(z_arr)):
@@ -1802,32 +1833,60 @@ def _estimar_rho_val_fold(clasif: pd.DataFrame,
             t_dias = np.busday_count(f_arr[i].date(), fecha_mas_reciente.date())
             pesos.append(K ** t_dias)
         pares_por_s[s] = (pz_prev, pz_cur, pesos)
+        pool_prev += pz_prev
+        pool_cur  += pz_cur
+        pool_w    += pesos
 
         if len(pz_prev) >= min_pares:
-            w  = np.asarray(pesos, dtype=float)
-            zp = np.asarray(pz_prev, dtype=float)
-            zc = np.asarray(pz_cur,  dtype=float)
-            w_sum = w.sum()
-            # Correlacion de Pearson ponderada — formula estandar, el
-            # prefactor (1-K) de los pesos se cancela aqui (aparece tanto
-            # en numerador como denominador), por eso no se aplica arriba.
-            mu_p  = np.sum(w * zp) / w_sum
-            mu_c  = np.sum(w * zc) / w_sum
-            cov   = np.sum(w * (zp - mu_p) * (zc - mu_c)) / w_sum
-            var_p = np.sum(w * (zp - mu_p) ** 2) / w_sum
-            var_c = np.sum(w * (zc - mu_c) ** 2) / w_sum
-            denom = np.sqrt(var_p * var_c)
-            rho = float(cov / denom) if denom > 1e-12 else 0.0
-            rho = float(np.clip(rho, -0.98, 0.98))
-            rho_estimado[s] = rho
+            rho_estimado[s] = _pearson_pond(pesos, pz_prev, pz_cur)
 
-    # Fallback: max de los rhos POSITIVOS estimados, con piso rho_default.
-    # Razon: la persistencia genuina es positiva; una rho negativa estimada
-    # es estadisticamente posible pero no es un prior valido para el fallback
-    # de un regimen con pocos datos. Si todos los estimados son negativos
-    # (inusual), el piso rho_default (0.3) prevalece como conservador.
-    _rhos_positivos = [r for r in rho_estimado.values() if r > 0]
-    fallback = max(_rhos_positivos + [rho_default])
+    # phi POOLED: el mismo estimador sin estratificar. Se calcula y se loguea
+    # siempre, no solo cuando hace de fallback, porque es la referencia natural
+    # para juzgar si el condicionamiento aporta: si los phi_s estan todos
+    # alrededor del pooled dentro de su error de muestreo, estratificar no
+    # agrega nada y lo unico que hace es repartir los pares en mas celdas.
+    rho_pooled = (_pearson_pond(pool_w, pool_prev, pool_cur)
+                  if len(pool_prev) >= min_pares else None)
+    if rho_pooled is not None:
+        logger.info(f"    [RHO_VAL] pooled (sin estratificar): rho={rho_pooled:+.3f} "
+                    f"n_pares={len(pool_prev)}")
+
+    # ── Fallback para un regimen sin pares suficientes ───────────────────────
+    # CONSERVADOR = phi mas grande ALGEBRAICAMENTE, no el de mayor magnitud.
+    # Medido: Var(sum_{h=1..H} Z_h) de un AR(1) estacionario es monotona
+    # CRECIENTE en phi sobre todo (-1, 1) — a H=75, sd va de 1.56 en phi=-0.95
+    # a 46.70 en phi=+0.95. Asi que mas |phi| con phi<0 da MENOS dispersion del
+    # acumulado, o sea MENOS requerimiento de liquidez: anticonservador.
+    #
+    # La version anterior era  max([r for r in estimados if r > 0] + [0.3])  con
+    # el comentario "la persistencia genuina es positiva". Ese prior es falso en
+    # esta serie: FOCO_GLOBALES mide phi(moderado) = -0.373 +- 0.081, negativo en
+    # los 4 folds, y phi(severo) negativo en los 4 tambien. Con todos los
+    # estimados negativos el filtro `r > 0` deja la lista vacia y el piso 0.3
+    # entra por la ventana: +0.3 donde el dato dice -0.37. No subestima el riesgo
+    # (infla la dispersion), pero mete una dinamica que los datos no tienen —
+    # un path que pasa de revertir a persistir porque cambio la etiqueta, y un
+    # signo dado vuelta en el termino cruzado rho_ij*(1 - phi_i*phi_j) de
+    # Sigma_e, que ensucia tambien la covarianza entre grupos.
+    #
+    # Jerarquia, de mas a menos informada:
+    #   1. max algebraico de los phi_s que SI se estimaron — conserva la
+    #      intencion conservadora del diseno original, pero acotada a valores
+    #      que los datos respaldan, sin inventar un piso.
+    #   2. phi pooled — cuando ningun estrato llego al minimo. Es literalmente
+    #      "no tengo datos para estratificar": mismos pares, mismo estimador,
+    #      sin la particion. No puede salir con el signo equivocado.
+    #   3. rho_default — ultimo recurso, cuando ni el pooled junta min_pares.
+    if rho_estimado:
+        fallback   = max(rho_estimado.values())
+        _regla_fb  = f"max algebraico de los {len(rho_estimado)} estimados"
+    elif rho_pooled is not None:
+        fallback   = rho_pooled
+        _regla_fb  = f"pooled sobre {len(pool_prev)} pares sin estratificar"
+    else:
+        fallback   = rho_default
+        _regla_fb  = (f"rho_default — ni el pooled junta {min_pares} pares "
+                      f"({len(pool_prev)} disponibles)")
 
     rho_por_s = {}
     for s in range(n_estados):
@@ -1840,7 +1899,8 @@ def _estimar_rho_val_fold(clasif: pd.DataFrame,
         else:
             rho_por_s[s] = fallback
             logger.info(f"    [RHO_VAL] {nombres_s[s]:8s} (s={s}): "
-                        f"rho={fallback:+.3f} [FALLBACK — solo {n_pares} pares < minimo={min_pares}]")
+                        f"rho={fallback:+.3f} [FALLBACK — solo {n_pares} pares "
+                        f"< minimo={min_pares}; regla: {_regla_fb}]")
 
     logger.info(f"    [RHO_VAL] resumen fold -> {rho_por_s}")
     return rho_por_s
