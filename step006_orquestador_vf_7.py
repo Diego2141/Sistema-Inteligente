@@ -8,7 +8,8 @@ Glue code que conecta los outputs REALES de:
   - step005_validar_hmm_ewma.py (o la variante con winsor/EWMA que dejaste
     fija) → transmat_hmm_<banco>.parquet.
 
-con el módulo step006_simulacion_paths.py (skew-t + cópula AR(1) + backtest
+con el módulo step006_simulacion_paths_vf7.py (PCHIP+GPD + cópula AR(1) +
+backtest
 de 3 piezas). No reimplementa nada de la simulación/backtest — solo arma los
 inputs correctos y llama a las funciones de ese módulo.
 
@@ -45,7 +46,27 @@ import pandas as pd
 
 from scipy.stats import norm as _norm_dist
 
-from step006_simulacion_paths_vf6 import (
+# vf7, no vf6. Verificado por AST: vf7 = vf6 + backtest y NADA mas. Son
+# identicas las tres clases de marginal (PchipGPD, AzzaliniT, SplitT),
+# simular_regimen_path, simular_un_path, simular_paths_origen,
+# pipeline_simulacion, calcular_percentiles_acumulado,
+# fitear_distribuciones_por_horizonte, cargar_preds_test_reales y los tres
+# generadores de fanchart; tampoco cambio ninguna constante existente.
+# vf7 AGREGA solo herramienta de backtest: _lag_newey_west_auto (ancho de
+# banda Newey-West 1994), _wilson (intervalo de Wilson para una proporcion,
+# reemplaza Wald que se degrada cerca de 0 y 1) y anderson_darling_uniforme
+# (A^2 para H0: u~U(0,1) — scipy.stats.anderson NO trae dist="uniform"), y
+# reescribe backtest_completo / backtest_flujo_neto_completo /
+# backtest_pieza1_violaciones / backtest_pieza3_pit / _print_backtest.
+#
+# Por que importa: main() llama a backtest_completo, asi que con vf6 se
+# corria el backtest viejo teniendo el mejorado en disco. Y las tres
+# funciones nuevas son exactamente las que hacen falta para diagnosticar el
+# coverage por debajo del nominal (83.0% en RESTO_GLOBALES contra 90%):
+# Wilson dice si la brecha es significativa, Newey-West corrige por el
+# racimo de excedencias, y Anderson-Darling sobre el PIT es la version
+# afilada de la validacion V1 del paper.
+from step006_simulacion_paths_vf7 import (
     pipeline_simulacion,
     simular_regimen_path,
     calcular_percentiles_acumulado,
@@ -80,7 +101,7 @@ MODELO       = "expanding"
 #         financiero", seccion 6.2): con N=1 la ecuacion (5) entrega
 #         sigma_e^2 = 1 - phi^2 y la recursion (4) se reduce a
 #         z_h = phi*z_{h-1} + sqrt(1-phi^2)*w_h, que es literalmente
-#         simular_un_path() de step006_simulacion_paths_vf6.py. El propio paper
+#         simular_un_path() de step006_simulacion_paths_vf7.py. El propio paper
 #         lo dice: "el esquema es una extension estricta del motor vigente, no
 #         un reemplazo". Con False NADA cambia respecto de antes de este boton.
 #
@@ -198,7 +219,7 @@ N_JOBS   = -1                 # procesos paralelos para fitear skew-t/PIT
                               # (-1 = todos los cores; 1 = serial). El fit de
                               # cada skew-t es ~0.2s — sobre miles de filas el
                               # cómputo serial es impracticable, ver
-                              # step006_simulacion_paths.py.
+                              # step006_simulacion_paths_vf7.py.
 TAU_BACKTEST = 0.05           # cuantil usado para la pieza 1/2 del backtest
 H_REFERENCIA_RHO = None      # horizonte para estimar ρ_s; None = autodetecta el
                               # mínimo h presente en los datos (revisa el log al
@@ -213,7 +234,7 @@ N_PATHS_FANCHART      = 100  # paths por origen (default aumentado para aprovech
                                # la paralelización — con 8 cores el tiempo de cómputo
                                # es comparable al anterior con 1000 paths serial)
 BANDAS_FANCHART       = None   # None = usa BANDAS_FANCHART_DEFAULT de
-                               # step006_simulacion_paths.py (P40-60 ... P01-99)
+                               # step006_simulacion_paths_vf7.py (P40-60 ... P01-99)
 
 # ── Fan charts de flujo neto diario (sin acumulación) ────────────────────────
 # Los percentiles se extraen analíticamente de las AzzaliniT ya fiteadas —
@@ -294,7 +315,7 @@ def _detectar_n_estados_rho(columnas) -> int | None:
 ###############################################################################
 # Algebra de la simulacion conjunta (paper, secciones 4 y 5)
 #
-# Vive aca y no en step006_simulacion_paths_vf6.py por dos razones: (a) son
+# Vive aca y no en step006_simulacion_paths_vf7.py por dos razones: (a) son
 # funciones PURAS —numpy y nada mas— que se validan sin tocar la unidad H:, y
 # (b) el modulo de simulacion ya es el motor N=1 y conviene no moverlo mientras
 # el conjunto este en prueba. Si el modo conjunto se consolida, el lugar natural

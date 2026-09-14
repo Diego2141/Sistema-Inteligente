@@ -1,7 +1,40 @@
 # -*- coding: utf-8 -*-
 """
-step006_simulacion_paths.py
+step006_simulacion_paths_vf7.py
 Simulación de paths acumulados sobre predicciones cuantílicas de step005.
+
+═══════════════════════════════════════════════════════════════════════════════
+QUÉ CAMBIA RESPECTO DE vf6  (verificado por AST, no por el número de versión)
+═══════════════════════════════════════════════════════════════════════════════
+vf7 = vf6 + BACKTEST. El motor de simulación no se tocó.
+
+IDÉNTICO a vf6:
+  - las tres clases de marginal: PchipGPD, AzzaliniT, SplitT
+  - simular_regimen_path, simular_un_path, simular_paths_origen
+  - pipeline_simulacion, calcular_percentiles_acumulado
+  - fitear_distribuciones_por_horizonte, cargar_preds_test_reales
+  - los tres generadores de fan chart
+  - todas las constantes existentes, con los mismos valores
+
+NUEVO — tres funciones y dos constantes, todas de backtest:
+  _lag_newey_west_auto     ancho de banda automático de Newey-West (1994),
+                           kernel de Bartlett
+  _wilson                  intervalo de Wilson para una proporción; reemplaza
+                           a Wald, que se deforma cerca de 0 y 1
+  anderson_darling_uniforme  A² y p-valor para H0: u ~ U(0,1). Suple que
+                           scipy.stats.anderson NO tiene dist="uniform"
+  _AD_CRIT_UNIF, _AD_SIG_UNIF   tabla de valores críticos de ese test
+
+REESCRITO: backtest_completo, backtest_flujo_neto_completo,
+           backtest_pieza1_violaciones, backtest_pieza3_pit, _print_backtest
+
+Por qué importa: step006_orquestador_vf_7.py llama a backtest_completo, así que
+mientras importaba vf6 corría el backtest viejo teniendo el mejorado en disco.
+Y las tres funciones nuevas son justo las que hacen falta para diagnosticar el
+coverage por debajo del nominal (83.0% medido en RESTO_GLOBALES contra 90%):
+Wilson dice si la brecha es significativa, Newey-West corrige por el racimo de
+excedencias, y Anderson-Darling sobre el PIT es la versión afilada de la
+validación V1 del paper de agregación por grupos.
 
 ═══════════════════════════════════════════════════════════════════════════════
 FLUJO

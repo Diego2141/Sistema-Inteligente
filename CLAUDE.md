@@ -50,11 +50,56 @@ step001_build_feature_matrix_v2.py     →  1. Data/Clean/matriz_features_partic
         │                                  (formato largo: una fila por banco × fecha_t × h)
         ↓
 step005_walk_forward_cv_4.py           →  XGBoost por horizonte, walk-forward CV
+step005_walk_forward_cv_3.7.py         →  la que tiene PARTICIONES + HMM interno
         │                                  produce los heatmaps Block PERM de importancia
+        │                                  y preds_test_fold*_<banco>_*.parquet
+        ├→ step005_validar_hmm_v5.py       régimen HMM (la llama cv_3.7 solo)
         ├→ aux_fanchart_cv4_direct.py      fan charts
-        ├→ step006_simulacion_paths_v2.py  simulación de trayectorias
+        ├→ step006_orquestador_vf_7.py     simulación de trayectorias → MCO
+        │      └→ step006_simulacion_paths_vf7.py   (el motor que importa)
+        │            └→ generar_video_fancharts.py  ensambla los PNG en video
         └→ step006_cqr_calibration.py      calibración conforme
 ```
+
+### El objeto de decisión y sus dos etapas
+
+`step005` produce **marginales**: `q01..q99` de `D−R` por `(banco, fecha_t, h)`.
+`step006` produce la **conjunta**: acopla esas marginales con una cópula gaussiana
+AR(1) y acumula. Los dos insumos de dependencia los estima `step005` en
+VALIDACIÓN y viajan en `preds_test`:
+
+| columna | qué es | quién la consume |
+|---|---|---|
+| `rho_s_0..rho_s_{n-1}` | `φ_i(s)` — autocorrelación temporal (D1) | la recursión AR(1) |
+| `rho_ij`, `rho_ij_s*` | `ρ_ij(s)` — correlación entre grupos (D2) | solo el modo conjunto |
+| `condicionar_por` | sobre qué está estratificado el subíndice `s` | los guards de step006 |
+
+La metodología está en *"Simulación conjunta de flujos netos por grupos del
+sistema financiero"*: `Σ_e = R ⊙ (11ᵀ − φφᵀ)` (ec. 5), cota cerrada para N=2
+(ec. 7), encogimiento `R(λ) = λR + (1−λ)I` (ec. 8), algoritmo P1-P5. Las cuatro
+funciones que lo implementan viven en `step006_orquestador_vf_7.py`, no en el
+módulo de simulación, y son puras — se validan sin acceso a `H:`.
+
+### Botones que cambian qué se estima o se simula
+
+| archivo | botón | qué hace |
+|---|---|---|
+| `step005_..._3.7` | `PARTICIONES` | FOCO/RESTO en vez de SISTEMA |
+| | `BANCO_REGIMEN` | de qué entidad sale el estado (`"SISTEMA"`) |
+| | `HMM_INTERNO` | ajusta el HMM por su cuenta, alineado a los folds |
+| | `CONDICIONAR_POR` | `"regimen"` (HMM) o `"calendario"` (4 baldes) |
+| | `MODO_DEBUG` | corrida de ~10 min en vez de ~60 |
+| `step006_orq_vf_7` | `PARTICIONES` | N=1 (SISTEMA) o N=2 (conjunta, P1-P5) |
+
+Dos límites conocidos de esos botones:
+
+- **`CONDICIONAR_POR="calendario"` no está soportado en `step006`.** La
+  trayectoria de régimen se muestrea de la transmat del HMM, así que los 4
+  baldes de calendario no tienen con qué propagarse. Un guard en el orquestador
+  lo aborta leyendo la columna `condicionar_por`; falta reemplazar el muestreo
+  de `A` por el balde determinista de `t+h`.
+- **`PARTICIONES=True` en `step006` no genera fan charts.** Los tres generadores
+  esperan `rho_por_regimen` escalar.
 
 ### Convención de versiones: hay muchas, importa cuál
 
@@ -67,8 +112,32 @@ vigente.** Las versiones en uso son:
 - **`step005_walk_forward_cv_4.py`** — es la que referencian los `aux_*` activos
   (`aux_fanchart_cv4_direct.py`, `aux_comparar_cv4_configs.py`,
   `aux_importancia_calendario.py`, entre otros).
+- **`step006_orquestador_vf_7.py`** + **`step006_simulacion_paths_vf7.py`** —
+  el orquestador importa el módulo de simulación; ojo que la numeración de los
+  dos archivos **no está alineada** entre sí y estuvo desfasada un tiempo (el
+  orquestador `vf_7` importaba `vf6`).
+- **`step005_validar_hmm_v5.py`** — la llama internamente
+  `step005_walk_forward_cv_3.7.py` con `HMM_INTERNO=True`.
 
-Para confirmar cuál está vigente: `grep -l "cv4\|cv_4" aux_*.py`.
+Para confirmar cuál está vigente: `grep -l "cv4\|cv_4" aux_*.py`, y para el
+módulo de simulación `grep -n "simulacion_paths" step006_orquestador_vf_7.py`.
+
+**El `grep` es necesario pero no suficiente: también hay que mirar lo que NO
+está commiteado.** `step006_simulacion_paths_vf7.py` existió sin versionar
+mientras el orquestador importaba `vf6`, así que el grep devolvía `vf6` y era
+la respuesta correcta a la pregunta equivocada. Antes de concluir que una
+versión no existe:
+
+```bash
+git status --short          # los untracked son parte del inventario
+git ls-files | grep <step>  # lo que sí está versionado
+```
+
+Y para comparar dos versiones sin leer miles de líneas, diffear la **superficie**
+(clases, funciones y constantes de nivel superior) con un recorrido del AST, no
+el texto completo: `vf6` y `vf7` difieren en 239 líneas, y el AST muestra en dos
+segundos que son 3 funciones y 2 constantes nuevas, 5 funciones reescritas, y que
+todo el motor de simulación es idéntico.
 
 ## Arquitectura de `step001`: matriz de features
 
@@ -222,6 +291,21 @@ python -m pyflakes step001_build_feature_matrix_v2.py   # debe dar 0 "undefined 
 
 Es el paso 0 de `aux_verificar_particion.py`.
 
+**Verificar que `pyflakes` esté instalado antes de confiar en su salida.** No
+está en todos los entornos (`pip install pyflakes`). Si no está, `python -m
+pyflakes` falla con `No module named pyflakes` y cualquier `grep -c "undefined
+name"` sobre esa salida devuelve 0 — indistinguible de "pasó". Un `|| echo OK`
+como fallback lo vuelve peor. Confirmar con `python -m pyflakes --version`
+primero. Esto ya causó una sesión entera de verificaciones reportadas como
+hechas que nunca corrieron.
+
+**Ejercitar la función de producción con un *stub* en vez de reimplementarla.**
+Para verificar la recursión latente de `step006` (V1 y V2 del paper: que
+`Var(Z)=1` y que se recuperen `φ_i` y `ρ_ij`) hay que inspeccionar los `Z`, que
+la función no devuelve. La solución es inyectar una marginal identidad
+(`ppf = Φ⁻¹`), con lo que `X == Z` exactamente y se audita el espacio latente
+**a través** del código real, sin copiar la recursión al test.
+
 ## Artifacts publicados: leerlos por fragmento, nunca completos
 
 Dos entregables vivos, con su fuente versionada en el repo:
@@ -292,6 +376,29 @@ proporciones explotan sin que el comportamiento haya cambiado. La convención de
 repo es marcar esos casos (con `‡` o dejándolos vacíos) en vez de mostrar un
 1.800% que se lee como dato en vez de como denominador chico.
 
+**El MCO todavía NO se calcula en ninguna parte.** Es el objeto formal del
+sistema según la primera sección de este archivo, pero `step006` acumula
+`flujos[h <= v].sum()` — el acumulado **al** horizonte, no el mínimo del camino.
+No hay `np.minimum.accumulate` ni equivalente en `step006_simulacion_paths_vf7.py`
+ni en el orquestador. Medido sobre paths AR(1) con drift: el MCO es **~5% más
+hondo** que el acumulado al horizonte.
+
+Y ojo con el atajo: `VENTANAS = [2..75]` cubre todos los horizontes, así que
+tienta tomar el mínimo sobre `ventana` de los percentiles ya calculados. **Es el
+mismo error de no-aditividad en otro disfraz** — `min_v q_τ(acum_v) ≠
+q_τ(min_v acum_v)`; medido, subestima 5%. El MCO hay que calcularlo **dentro**
+del bucle de réplicas, no derivarlo después.
+
+**"Conservador" en un AR(1) es el φ más grande ALGEBRAICAMENTE, no el de mayor
+magnitud.** `Var(Σ_{h=1..H} Z_h)` es monótona creciente en φ sobre todo `(-1, 1)`:
+a H=75 la sd va de 1.56 en φ=−0.95 a 46.70 en φ=+0.95. Con φ<0 más magnitud da
+**menos** dispersión del acumulado, o sea menos requerimiento de liquidez. El
+fallback de `_estimar_rho_val_fold` tuvo el bug espejo: filtraba a los φ
+positivos con el comentario "la persistencia genuina es positiva" y caía a un
+piso de +0.3 cuando todos los estimados eran negativos — que es el caso real
+(ver contexto de negocio). Hoy la jerarquía es: max algebraico de los estimados
+→ φ pooled sin estratificar → `rho_default`.
+
 ## Contexto de negocio que explica el diseño
 
 Tres hallazgos sostienen las decisiones de features:
@@ -308,6 +415,68 @@ Tres hallazgos sostienen las decisiones de features:
 
 **Ventana de cierre** = últimos 5 días hábiles del mes, misma definición en los
 tres hallazgos.
+
+### Cuarto hallazgo: el grupo FOCO revierte, el RESTO no
+
+Medido sobre las dos particiones, con φ estimado en VAL por fold:
+
+| | FOCO | RESTO |
+|---|---|---|
+| GLOBALES, moderado | **−0.373 ± 0.081** (negativo en 4/4 folds) | +0.002 |
+| GLOBALES, severo | −0.230 (4/4 negativo) | −0.051 |
+| BBVA, moderado | **−0.416** | +0.010 |
+| BBVA, severo | −0.329 | +0.197 |
+
+`φ_FOCO(moderado)` es el parámetro más estable de toda la tabla. No es ruido:
+es **reversión a la media**, tesorería de ida y vuelta (deposita un día, retira
+al siguiente). El grupo RESTO es ~ruido blanco a rezago 1.
+
+Verificado que no es artefacto de `z = flujo/σ_EWMA`: con flujos iid simulados
+(normal, t₃, y con 10% de ceros), `φ(z)` sale en `−0.003 ± 0.023`, y una
+reversión real de −0.35 se recupera como −0.32. La normalización **no** fabrica
+autocorrelación; si acaso atenúa ~7%.
+
+Consecuencia directa sobre el requerimiento: la reversión **comprime** el
+acumulado. A H=63, sd 5.54 contra 7.94 de una serie iid — **30% menos**. Quien
+sume cuantiles día a día está sobreestimando fuerte el requerimiento de FOCO.
+
+**`ρ_ij` es negativa y estable**: −0.0413 ± 0.0138 en GLOBALES, negativa en los
+4 folds. Los dos grupos se **compensan**: agregar reduce el requerimiento frente
+a sumar las partes. Es el resultado opuesto al de BBVA en la ventana de cierre y
+vale decirlo explícito al reportar.
+
+**Condicionar `ρ_ij` por régimen HMM agrega ruido, no señal** (GLOBALES):
+`|sd/media|` = 0.33 en el global contra 1.22, 2.28 y 36.3 en los condicionales,
+y los tres cambian de signo entre folds mientras el global nunca. Es lo que
+motivó el botón `CONDICIONAR_POR`.
+
+### Coverage por debajo del nominal — el problema abierto que domina
+
+Contra un 90% nominal:
+
+| entidad | coverage | implica |
+|---|---|---|
+| FOCO_GLOBALES | 88.8% (bajando 91→86 por fold) | intervalos 3% angostos |
+| RESTO_GLOBALES | **83.0%** (peor fold 76.8%) | intervalos **20%** angostos |
+
+Con sesgo VAL−TEST de +3 a +6 pp: Optuna elige hiperparámetros que rinden en VAL
+y no transfieren. Importa **direccionalmente**: la skew-t de `step006` se ajusta
+a esos cuantiles, así que cada día simulado sale de una distribución 20% angosta
+y el requerimiento sale corto. Es el sentido equivocado del error.
+
+Puesto al lado de los otros sesgos medidos, todos hacia subestimar:
+
+| fuente | magnitud |
+|---|---|
+| **coverage insuficiente (RESTO)** | **~20%** |
+| MCO no calculado | ~5% |
+| Pearson vs normal scores en la ρ de la cópula | ~5% |
+| atenuación EWMA | ~7% |
+
+El primero domina por un factor de 4, y `step006_cqr_calibration.py` es la
+herramienta que le corresponde. Los tres estadísticos nuevos de
+`step006_simulacion_paths_vf7.py` (Wilson, Newey-West, Anderson-Darling sobre el
+PIT) son los que diagnostican si la brecha es significativa.
 
 Consecuencia metodológica: la serie tiene **dos quiebres de régimen** en 15 años
 (2018-19 y 2022), así que la muestra efectiva del régimen vigente es corta. Toda
