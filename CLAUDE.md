@@ -41,6 +41,19 @@ sintéticos.
 No hay `requirements.txt`. Dependencias en uso: `pandas`, `numpy`, `xgboost`,
 `pyarrow`, `matplotlib`, `scipy`, `statsmodels`, `openpyxl`, y opcionalmente
 `hmmlearn`/`scikit-learn` (si faltan, `hmm_estado` queda en NaN sin romper).
+`generar_video_fancharts.py` necesita además `imageio` + `imageio-ffmpeg`, y solo
+esos dos: si falta el segundo, `imageio` cae en otro plugin y el error que emite
+(`TiffWriter.write() got an unexpected keyword argument fps`) no dice nada sobre
+la causa — por eso el script lo verifica antes de escribir.
+
+**`multiprocessing` en Windows usa `spawn`, no `fork`.** Cada worker es un
+`python.exe` nuevo que reimporta numpy/scipy/pandas desde cero: ~150-250 MB de
+*commit charge* por worker. Con `N_JOBS = -1` en una máquina de 16 cores eso son
+~4 GB extra, y si el archivo de paginación es chico Windows no crea el proceso y
+tira `OSError: [WinError 1455] El archivo de paginación es demasiado pequeño`.
+No es falta de RAM libre: el límite de commit es RAM + pagefile. Arreglo sin
+permisos: `N_JOBS = 4`. Es el mismo orden de magnitud al que aterriza
+`get_max_workers_optuna()` de `step005`.
 
 ## Pipeline
 
