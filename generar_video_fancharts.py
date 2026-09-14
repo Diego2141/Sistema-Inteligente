@@ -2,9 +2,29 @@
 """
 generar_video_fancharts.py
 ============================
-Ensambla todos los fan charts PNG guardados por step006_orquestador.py
-(carpeta flujos_acumulados) en un video que avanza día por día, en orden
-cronológico de fecha de origen.
+Ensambla los fan charts PNG que guarda step006_orquestador_vf_7.py en un video
+que avanza día por día, en orden cronológico de fecha de origen.
+
+step006 produce TRES familias de fan chart, cada una en su carpeta y con su
+propio prefijo de archivo:
+
+    GENERAR_FANCHARTS            flujos_acumulados/   fanchart_<banco>_*.png
+    GENERAR_FANCHARTS_NETO       flujos_netos/        fanchart_neto_<banco>_*.png
+    GENERAR_FANCHARTS_INTEGRADO  flujos_integrados/   fanchart_integrado_<banco>_*.png
+
+Este script arma un video por cada tipo que se le pida en TIPOS_FANCHART.
+
+POR QUÉ LOS TRES SALEN DE UNA SOLA ENTRADA DE CONFIGURACIÓN
+La versión anterior tenía las tres cosas escritas por separado: una constante
+DIR_FLUJOS_ACUMULADOS que en realidad apuntaba a flujos_integrados, un patrón
+de regex con "fanchart_integrado_" hardcodeado, y un RUTA_VIDEO que no decía de
+qué tipo era. Cambiar de tipo exigía editar tres lugares y era fácil editar uno
+solo — el resultado era un FileNotFoundError cuyo mensaje, además, nombraba un
+patrón 'fanchart_integrado_<banco>_f1_*.png' que no existía en ningún glob y
+mandaba a activar GENERAR_FANCHARTS cuando los PNG que buscaba los produce
+GENERAR_FANCHARTS_INTEGRADO. Ahora la carpeta, el prefijo del archivo y el
+nombre del video se derivan de la misma entrada del dict _CFG, así que no
+pueden desincronizarse.
 
 Requiere: pip install imageio imageio-ffmpeg
 
@@ -32,32 +52,73 @@ logger = logging.getLogger(__name__)
 BASE_SISTEMA = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente")
 BANCO        = "SISTEMA"
 
-# Misma carpeta donde step006_orquestador.py guardó los PNGs
-DIR_FLUJOS_ACUMULADOS = BASE_SISTEMA / "2. Output" / "flujos_integrados" / "xgb_qt_expanding_310.5" 
+# Debe coincidir con el subdirectorio que usa step006_orquestador_vf_7.py al
+# guardar los PNG (ahí se construye como f"{MODELO_CV}_{modo}_{ventanas}").
+ETIQUETA_CORRIDA = "xgb_qt_expanding_310.5"
 
-# Video de salida (en la misma carpeta, por defecto)
-RUTA_VIDEO = DIR_FLUJOS_ACUMULADOS / f"video_{BANCO}.mp4"
+# Qué videos armar. Lista, no un valor único: step006 genera las TRES familias de
+# PNG en una sola corrida, así que lo natural es armar los tres videos también.
+# Se puede reducir a ["integrado"] para reproducir el comportamiento anterior.
+TIPOS_FANCHART = ["acumulado", "neto", "integrado"]
+
+# tipo -> (carpeta de step006, prefijo del nombre de archivo).
+# Única fuente de esos dos datos: de acá salen la ruta, el patrón del glob y el
+# nombre del video, así que no pueden quedar apuntando a cosas distintas.
+# Los prefijos son los que step006_simulacion_paths_vf7.py usa al hacer savefig:
+#   fanchart_{banco}_{YYYYMMDD}.png            (acumulado simulado)
+#   fanchart_neto_{banco}_{YYYYMMDD}.png       (flujo neto diario, sin acumular)
+#   fanchart_integrado_{banco}_{YYYYMMDD}.png  (3 filas: neto crudo/dist/acum)
+_CFG = {
+    "acumulado": ("flujos_acumulados", "fanchart",           "GENERAR_FANCHARTS"),
+    "neto":      ("flujos_netos",      "fanchart_neto",      "GENERAR_FANCHARTS_NETO"),
+    "integrado": ("flujos_integrados", "fanchart_integrado", "GENERAR_FANCHARTS_INTEGRADO"),
+}
+
+_tipos_malos = [t for t in TIPOS_FANCHART if t not in _CFG]
+if _tipos_malos:
+    raise ValueError(f"TIPOS_FANCHART contiene {_tipos_malos}, que no existen. "
+                     f"Opciones: {sorted(_CFG)}")
 
 FPS = 4   # cuadros por segundo — 4 = ~0.25s por día de origen.
           # Subir (p.ej. 8-10) parta un avance más rápido; bajar (p.ej. 1-2)
           # para poder leer cada cuadro con calma.
 
 
+def dir_frames_de(tipo: str) -> Path:
+    """Carpeta donde step006 dejó los PNG de ese tipo de fan chart."""
+    return BASE_SISTEMA / "2. Output" / _CFG[tipo][0] / ETIQUETA_CORRIDA
+
+
+def ruta_video_de(tipo: str, banco: str = BANCO) -> Path:
+    """
+    Video de salida, junto a sus frames. El tipo va EN EL NOMBRE: antes los tres
+    habrían quedado como video_SISTEMA.mp4 y el último habría pisado a los otros
+    dos si alguna vez compartían carpeta.
+    """
+    return dir_frames_de(tipo) / f"video_{tipo}_{banco}.mp4"
+
+
 ###############################################################################
 # Ensamblado
 ###############################################################################
 
-def listar_pngs_ordenados(dir_flujos: Path, banco: str) -> list[Path]:
+def listar_pngs_ordenados(dir_flujos: Path, banco: str,
+                          prefijo: str = "fanchart_integrado") -> list[Path]:
     """
-    Lista los PNG fanchart_<banco>_<YYYYMMDD>.png ordenados por fecha
-    (extraída del nombre de archivo, no por orden alfabético del filesystem
-    — aunque en este caso coinciden porque el formato YYYYMMDD ya ordena
-    correctamente como texto).
+    Lista los PNG <prefijo>_<banco>_<YYYYMMDD>.png ordenados por fecha, extraída
+    del nombre de archivo y no del orden alfabético del filesystem — aunque en
+    este caso coinciden, porque YYYYMMDD ya ordena correctamente como texto.
+
+    El regex hace match ANCLADO (re.match sobre el nombre completo + \\.png), así
+    que el prefijo "fanchart" del acumulado no captura por accidente los
+    "fanchart_neto_..." ni los "fanchart_integrado_...": después de "fanchart_"
+    el regex exige el nombre del banco, no otra palabra. De todos modos las tres
+    familias viven en carpetas distintas, así que esto es cinturón y tirantes.
     """
-    patron = re.compile(rf"fanchart_integrado_{re.escape(banco)}_(\d{{8}})\.png")
+    patron = re.compile(rf"{re.escape(prefijo)}_{re.escape(banco)}_(\d{{8}})\.png")
     archivos = []
-    for ruta in dir_flujos.glob(f"fanchart_integrado_{banco}_*.png"):
-        m = patron.match(ruta.name)
+    for ruta in dir_flujos.glob(f"{prefijo}_{banco}_*.png"):
+        m = patron.fullmatch(ruta.name)
         if m:
             archivos.append((m.group(1), ruta))
     archivos.sort(key=lambda t: t[0])   # YYYYMMDD ordena correctamente como string
@@ -86,19 +147,38 @@ def _verificar_imageio_ffmpeg() -> None:
         )
 
 
-def generar_video(dir_flujos: Path = DIR_FLUJOS_ACUMULADOS,
+def generar_video(tipo: str = "integrado",
                   banco: str = BANCO,
-                  ruta_salida: Path = RUTA_VIDEO,
+                  dir_flujos: Path | None = None,
+                  ruta_salida: Path | None = None,
                   fps: int = FPS) -> Path:
+    """
+    Arma el video de UN tipo de fan chart. dir_flujos y ruta_salida se derivan
+    de `tipo` si no se pasan: así el llamador normal no puede combinar una
+    carpeta con el patrón de otro tipo.
+    """
+    if tipo not in _CFG:
+        raise ValueError(f"tipo={tipo!r} invalido. Opciones: {sorted(_CFG)}")
+    _carpeta, _prefijo, _flag = _CFG[tipo]
+    dir_flujos  = dir_frames_de(tipo) if dir_flujos is None else Path(dir_flujos)
+    ruta_salida = ruta_video_de(tipo, banco) if ruta_salida is None else Path(ruta_salida)
+
     _verificar_imageio_ffmpeg()
 
-    rutas = listar_pngs_ordenados(dir_flujos, banco)
+    rutas = listar_pngs_ordenados(dir_flujos, banco, prefijo=_prefijo)
     if not rutas:
+        # El mensaje nombra el patrón REAL que se buscó y el flag REAL que
+        # produce esos PNG — antes mencionaba un 'fanchart_integrado_..._f1_*'
+        # inexistente y mandaba a activar GENERAR_FANCHARTS incluso cuando los
+        # frames los genera GENERAR_FANCHARTS_INTEGRADO.
         raise FileNotFoundError(
-            f"No se encontraron PNGs 'fanchart_integrado_{banco}_f1_*.png' en {dir_flujos}. "
-            f"Corre primero step006_orquestador.py con GENERAR_FANCHARTS=True.")
+            f"No se encontraron PNGs '{_prefijo}_{banco}_<YYYYMMDD>.png' en "
+            f"{dir_flujos}. Corre primero step006_orquestador_vf_7.py con "
+            f"{_flag}=True. Si la carpeta existe pero está vacía, revisá que "
+            f"ETIQUETA_CORRIDA={ETIQUETA_CORRIDA!r} y BANCO={banco!r} coincidan "
+            f"con esa corrida.")
 
-    logger.info(f"{len(rutas)} fan charts encontrados — "
+    logger.info(f"[{tipo}] {len(rutas)} fan charts encontrados — "
                f"desde {rutas[0].name} hasta {rutas[-1].name}")
     logger.info(f"Ensamblando video a {fps} fps "
                f"(~{len(rutas)/fps:.1f}s de duración)...")
@@ -126,9 +206,37 @@ def generar_video(dir_flujos: Path = DIR_FLUJOS_ACUMULADOS,
         )
         raise
 
-    logger.info(f"Video guardado: {ruta_salida}")
+    logger.info(f"[{tipo}] Video guardado: {ruta_salida}")
     return ruta_salida
 
 
+def generar_videos(tipos: list | None = None, banco: str = BANCO,
+                   fps: int = FPS) -> dict:
+    """
+    Arma un video por cada tipo pedido y devuelve {tipo: ruta | None}.
+
+    Un tipo sin frames NO aborta la corrida: se avisa y se sigue con los otros.
+    Antes, un FileNotFoundError en el primer tipo mataba todo, de modo que con
+    los tres flags activos en step006 pero uno de los tres sin generar (o con
+    otro BANCO), se perdían los dos videos que sí se podían armar.
+    """
+    tipos = list(TIPOS_FANCHART if tipos is None else tipos)
+    _verificar_imageio_ffmpeg()      # una vez, no una por tipo
+    out = {}
+    for tipo in tipos:
+        try:
+            out[tipo] = generar_video(tipo=tipo, banco=banco, fps=fps)
+        except FileNotFoundError as e:
+            logger.warning(f"[{tipo}] sin frames — se omite. {e}")
+            out[tipo] = None
+
+    hechos = [t for t, r in out.items() if r is not None]
+    faltan = [t for t, r in out.items() if r is None]
+    logger.info(f"Videos generados ({len(hechos)}/{len(tipos)}): {hechos or '—'}")
+    if faltan:
+        logger.warning(f"Sin generar: {faltan}")
+    return out
+
+
 if __name__ == "__main__":
-    generar_video()
+    generar_videos()
