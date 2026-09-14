@@ -38,7 +38,26 @@ import re
 import logging
 from pathlib import Path
 
-import imageio.v2 as imageio
+# Import compatible con imageio viejo y nuevo.
+#
+# `imageio.v2` recién existe en versiones relativamente nuevas. Anaconda suele
+# traer un imageio antiguo arrastrado por scikit-image, y ahí
+# `import imageio.v2 as imageio` falla con
+#     ModuleNotFoundError: No module named 'imageio.v2'
+# que es fácil de confundir con "imageio no está instalado" cuando en realidad
+# está: lo que falta es el submódulo.
+#
+# La API de nivel superior (`imread` / `imwrite` / `get_writer`) es exactamente
+# la que `v2` expone, así que el fallback no cambia el comportamiento — solo
+# emite un DeprecationWarning en las versiones nuevas. Verificado: las dos rutas
+# producen el mismo mp4 con format="FFMPEG" + codec="libx264".
+#
+# Se prefiere `v2` cuando está disponible para no depender de un default que
+# ImageIO v3 va a cambiar.
+try:
+    import imageio.v2 as imageio            # imageio >= ~2.10
+except ModuleNotFoundError:
+    import imageio                          # imageio viejo: misma API, sin v2
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s",
                     datefmt="%Y-%m-%d %H:%M:%S")
@@ -145,6 +164,16 @@ def _verificar_imageio_ffmpeg() -> None:
             "    pip install imageio-ffmpeg\n\n"
             "y volver a correr este script."
         )
+    # La version de imageio no se exige, porque el import del tope ya cae a la
+    # API legacy si falta el submodulo v2. Pero se loguea: si algo raro pasa con
+    # el writer, el numero de version es el primer dato que uno quiere ver, y en
+    # Anaconda es comun tener un imageio viejo arrastrado por scikit-image.
+    _v = getattr(imageio, "__version__", None)
+    if _v is None:
+        import imageio as _base
+        _v = getattr(_base, "__version__", "desconocida")
+    logger.info(f"imageio {_v} | imageio-ffmpeg {imageio_ffmpeg.__version__} | "
+                f"API {'v2' if hasattr(imageio, 'imread') and imageio.__name__.endswith('v2') else 'legacy'}")
 
 
 def generar_video(tipo: str = "integrado",
