@@ -68,6 +68,7 @@ from scipy.stats import norm as _norm_dist
 # afilada de la validacion V1 del paper.
 from step006_simulacion_paths_vf7 import (
     pipeline_simulacion,
+    graficar_fanchart_origen,
     simular_regimen_path,
     calcular_percentiles_acumulado,
     backtest_completo,
@@ -122,6 +123,21 @@ PARTICIONES = False
 # configuracion viva en un unico lugar, mismo criterio que step005.
 PARTICION = "globales"    # "bbva" | "globales" — debe coincidir con step005
 
+# Solo se lee con PARTICIONES=False: QUE entidad corre el motor N=1.
+#
+# Existe porque antes de este boton BANCO era un string libre y se le podia
+# poner "FOCO_BBVA" para correr N=1 sobre esa entidad y obtener SUS fan charts.
+# Al derivar BANCO de PARTICIONES esa flexibilidad se perdio: False forzaba
+# SISTEMA. ENTIDAD la devuelve, con los mismos valores que usa step005.
+#
+# Con PARTICIONES=True este valor se ignora: el modo conjunto corre las DOS
+# caras de la particion por definicion, no hay entidad que elegir.
+#
+# Para que sirve en la practica: main_conjunto() no genera fan charts (los tres
+# generadores del modulo esperan rho_por_regimen escalar), asi que si se quiere
+# el fan chart de FOCO o de RESTO por separado hay que correrlos en N=1.
+ENTIDAD = "SISTEMA"       # "SISTEMA" | "FOCO" | "RESTO"
+
 # Geometria del fold de la corrida de step005 que se quiere leer. NO reconfigura
 # nada: solo reconstruye el nombre del subnivel de carpeta que step005 crea con
 # PARTICIONES=True (dirs_de_banco -> etiqueta_corrida). Si en step005 cambia
@@ -152,13 +168,29 @@ def etiqueta_corrida(banco: str) -> str:
 # particion, en orden fijo (FOCO primero) para que el indice i de phi_i, de las
 # filas/columnas de R y del vector Z sea siempre el mismo.
 if not PARTICIONES:
-    GRUPOS = ["SISTEMA"]
-    BANCO  = "SISTEMA"
+    if ENTIDAD == "SISTEMA":
+        BANCO = "SISTEMA"
+    elif ENTIDAD in ("FOCO", "RESTO"):
+        BANCO = f"{ENTIDAD}_{PARTICION.upper()}"
+    else:
+        raise ValueError(f"ENTIDAD={ENTIDAD!r} no es valida. Opciones: "
+                         f"'SISTEMA', 'FOCO', 'RESTO'.")
+    GRUPOS = [BANCO]
 else:
     GRUPOS = [f"FOCO_{PARTICION.upper()}", f"RESTO_{PARTICION.upper()}"]
     # Etiqueta del agregado para nombres de archivo de salida. No es una entidad
     # de step005: es la suma S_h = sum_i X_{i,h} de la ecuacion (1) del paper.
     BANCO  = f"CONJUNTO_{PARTICION.upper()}"
+
+# ¿Los preds_test viven en un subnivel de carpeta, o en la base?
+#
+# Lo decide la corrida de STEP005 que los produjo, no esta config: step005
+# agrega el subnivel etiqueta_corrida(banco) cuando SU PARTICIONES=True
+# (dirs_de_banco). Y FOCO_*/RESTO_* solo existen si step005 corrio con
+# particiones, asi que cualquier entidad que no sea SISTEMA implica subnivel.
+# SISTEMA es el unico ambiguo —puede venir de una corrida con o sin
+# particiones— y para ese caso manda PARTICIONES.
+_CON_SUBNIVEL = PARTICIONES or ENTIDAD != "SISTEMA"
 
 # Entidad de la que salen las ETIQUETAS de regimen. DEBE coincidir con
 # BANCO_REGIMEN de step005_walk_forward_cv_3.7.py: la columna regimen_hmm de
@@ -188,7 +220,7 @@ def dir_modo_de(banco: str) -> Path:
     siempre falla: si ahi quedaron preds_test de una corrida vieja de SISTEMA,
     los encuentra y simula SISTEMA en silencio creyendo simular la particion.
     """
-    return _DIR_MODO_BASE / etiqueta_corrida(banco) if PARTICIONES else _DIR_MODO_BASE
+    return _DIR_MODO_BASE / etiqueta_corrida(banco) if _CON_SUBNIVEL else _DIR_MODO_BASE
 
 
 DIR_MODO = dir_modo_de(GRUPOS[0])
@@ -198,10 +230,11 @@ DIR_MODO = dir_modo_de(GRUPOS[0])
 DIR_REGIMEN_HMM = BASE_SISTEMA / "2. Output"
 
 # Salida de este orquestador
-# _SUF_SALIDA: subnivel por corrida. Con PARTICIONES=False es "" y las rutas
-# quedan EXACTAMENTE como estaban; con True separa las salidas del conjunto de
-# las de SISTEMA, que comparten nombre de archivo y se pisarian.
-_SUF_SALIDA = etiqueta_corrida(BANCO) if PARTICIONES else ""
+# _SUF_SALIDA: subnivel por corrida. Con PARTICIONES=False y ENTIDAD="SISTEMA"
+# es "" y las rutas quedan EXACTAMENTE como estaban. En cualquier otro caso
+# separa las salidas —del conjunto o de una entidad de particion— de las de
+# SISTEMA, que comparten nombre de archivo y se pisarian.
+_SUF_SALIDA = etiqueta_corrida(BANCO) if _CON_SUBNIVEL else ""
 DIR_SALIDA = (BASE_SISTEMA / "2. Output" / "step006_simulacion" /
               "xgb_qt_expanding_310.5" / _SUF_SALIDA)
 
@@ -564,6 +597,85 @@ def simular_paths_origen_conjunto(
     return acum
 
 
+def simular_fanchart_origen_conjunto(
+    fecha_t, horizontes, estado_inicial, matriz_transicion, bloques,
+    distribuciones, grupos, n_paths, seed: int = 42,
+) -> np.ndarray:
+    """
+    Version conjunta de simular_fanchart_origen del modulo: devuelve el
+    acumulado del SISTEMA (suma de los grupos) en CADA horizonte.
+
+    Devuelve array (n_paths, len(horizontes)); columna k = distribucion de
+    C_{h0:h_k} = sum_{j<=k} sum_i X_{i,h_j}. Es el mismo shape y el mismo
+    significado que espera graficar_fanchart_origen, asi que el graficador se
+    reusa SIN tocarlo — lo unico que cambia es de donde salen los paths.
+
+    La suma entre grupos ocurre DENTRO de la replica, antes del cumsum, que es
+    el orden que exige la seccion 6 del paper. Un fan chart armado a partir de
+    los percentiles de FOCO y de RESTO por separado seria el error de
+    no-aditividad dibujado.
+    """
+    H = len(horizontes)
+    acumulados = np.empty((n_paths, H))
+    for p in range(n_paths):
+        rng_p = np.random.default_rng(seed + p)
+        regimenes = simular_regimen_path(
+            estado_inicial, matriz_transicion, H, rng_p)
+        X = simular_un_path_conjunto(
+            fecha_t, horizontes, regimenes, bloques,
+            distribuciones, grupos, rng_p)
+        acumulados[p, :] = np.cumsum(X.sum(axis=0))
+    return acumulados
+
+
+def generar_fancharts_conjunto(
+    dfg: dict, distribuciones: dict, estado_por_origen, matriz_transicion,
+    bloques: dict, grupos: list, dir_salida: Path, banco: str,
+    n_paths: int, seed: int = 42, bandas=None,
+) -> list:
+    """
+    Un fan chart PNG por origen, con la banda del acumulado CONJUNTO.
+
+    Serial a proposito, no por descuido: los tres generadores del modulo
+    paralelizan con multiprocessing, y en Windows eso es spawn —cada worker
+    reimporta numpy/scipy/pandas y cuesta ~150-250 MB de commit charge— que es
+    justo lo que hizo fallar esta corrida con WinError 1455. Con
+    N_PATHS_FANCHART (100 por defecto, no los 10.000 de la simulacion) el costo
+    serial es chico y no vale arriesgar el pagefile.
+    """
+    dir_salida.mkdir(parents=True, exist_ok=True)
+    g0 = grupos[0]
+    origenes = sorted(dfg[g0]["fecha_t"].unique())
+    logger.info(f"  [fanchart_conj] {len(origenes)} origenes x {n_paths} paths "
+                f"-> {dir_salida}")
+    rutas = []
+    for i_o, ft in enumerate(origenes):
+        ft = pd.Timestamp(ft)
+        sub0 = dfg[g0][dfg[g0]["fecha_t"] == ft].sort_values("h")
+        horizontes = sub0["h"].values.astype(int)
+        acum = simular_fanchart_origen_conjunto(
+            ft, horizontes, int(estado_por_origen.get(ft, 0)),
+            matriz_transicion, bloques, distribuciones, grupos,
+            n_paths=n_paths, seed=seed + i_o)
+
+        # Realizado del SISTEMA: se suman los grupos por horizonte y recien
+        # despues se acumula — mismo orden que en la simulacion.
+        y_real = np.zeros(len(horizontes), dtype=float)
+        for g in grupos:
+            sg = dfg[g][dfg[g]["fecha_t"] == ft].sort_values("h")
+            if "y_realizado" in sg.columns and len(sg) == len(horizontes):
+                y_real += sg["y_realizado"].values.astype(float)
+        y_acum = dict(zip(horizontes.tolist(), np.cumsum(y_real).tolist()))
+
+        rutas.append(graficar_fanchart_origen(
+            ft, horizontes, acum, y_acum, dir_salida,
+            banco=banco, bandas=bandas))
+        if (i_o + 1) % 25 == 0:
+            logger.info(f"    [fanchart_conj] {i_o+1}/{len(origenes)}")
+    logger.info(f"  [fanchart_conj] {len(rutas)} imagenes generadas")
+    return rutas
+
+
 def cargar_preds_de_grupos(grupos: list) -> dict:
     """
     Carga el preds_test de cada grupo desde SU carpeta y los alinea sobre la
@@ -655,10 +767,12 @@ def main_conjunto():
     cada grupo con SU transmat. La diferencia es que dentro de cada
     año_corte_regimen los N grupos se simulan JUNTOS.
 
-    No genera fan charts: los tres generadores del modulo estan escritos para
-    una entidad (rho_por_regimen escalar) y adaptarlos es trabajo aparte. La
-    salida es el parquet de percentiles del acumulado del SISTEMA, que es el
-    objeto de decision de la ecuacion (1).
+    Genera el fan chart del acumulado CONJUNTO (GENERAR_FANCHARTS) con
+    generar_fancharts_conjunto, que reusa graficar_fanchart_origen del modulo
+    sin tocarlo. NO genera los de flujo neto ni el integrado: esos dos leen los
+    percentiles de las marginales de UNA entidad, y en el conjunto la marginal
+    del agregado no existe en forma cerrada — hay que simularla, que es
+    justamente lo que hace el acumulado.
     """
     DIR_SALIDA.mkdir(parents=True, exist_ok=True)
     logger.info(f"MODO CONJUNTO — N={len(GRUPOS)} grupos: {GRUPOS}")
@@ -779,6 +893,17 @@ def main_conjunto():
                                        "y_realizado_acum": real.get(v, np.nan)})
             if (i_o + 1) % 25 == 0:
                 logger.info(f"    origen {i_o+1}/{len(origenes)}")
+
+        if GENERAR_FANCHARTS:
+            # El fan chart del CONJUNTO: la banda del acumulado de FOCO+RESTO
+            # con la dependencia ya incorporada. Es el unico grafico que muestra
+            # lo que aporta el metodo — sin el, el modo conjunto produce un
+            # parquet de numeros y nada que mirar.
+            generar_fancharts_conjunto(
+                dfg, distribuciones, estado_por_origen, A, bloques, GRUPOS,
+                dir_salida=DIR_FLUJOS_ACUMULADOS, banco=BANCO,
+                n_paths=N_PATHS_FANCHART, seed=SEED + _seed_offset,
+                bandas=BANDAS_FANCHART)
 
     if not resultados:
         logger.error("Ningun año_corte_regimen pudo simularse.")
