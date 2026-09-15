@@ -138,6 +138,30 @@ PARTICION = "globales"    # "bbva" | "globales" — debe coincidir con step005
 # el fan chart de FOCO o de RESTO por separado hay que correrlos en N=1.
 ENTIDAD = "SISTEMA"       # "SISTEMA" | "FOCO" | "RESTO"
 
+# ── Sobre QUE estan estratificados los phi_i(s) y rho_ij(s) que se van a usar ─
+# "auto"       → lo toma de la columna condicionar_por de preds_test.
+# "regimen"    → declara que son estados del HMM (se muestrea la cadena de Markov).
+# "calendario" → declara que son baldes de posicion en el mes (s_h deterministo,
+#                sin cadena de Markov; requiere la columna balde_th).
+#
+# El valor declarado se CONTRASTA contra lo que dicen los datos y, si no
+# coinciden, la corrida aborta. La verificacion no es burocracia: el subindice s
+# de rho_s_* significa cosas distintas en los dos modos, y aplicar el indice
+# equivocado no produce ningun error visible — se aplicaria phi(cierre) en los
+# dias que el HMM llama "moderado" y nunca phi(transicion), devolviendo paths
+# plausibles con el significado cambiado. Justo el caso que este guard atajo la
+# primera vez que aparecio.
+#
+# Declararlo explicitamente (en vez de "auto") deja el modo a la vista en la
+# cabecera del archivo y convierte un preds_test inesperado en un aborto
+# inmediato en lugar de una corrida silenciosa en el otro modo.
+CONDICIONAR_POR = "auto"
+
+if CONDICIONAR_POR not in ("auto", "regimen", "calendario"):
+    raise ValueError(
+        f"CONDICIONAR_POR={CONDICIONAR_POR!r} invalido — debe ser 'auto', "
+        f"'regimen' o 'calendario'.")
+
 # Geometria del fold de la corrida de step005 que se quiere leer. NO reconfigura
 # nada: solo reconstruye el nombre del subnivel de carpeta que step005 crea con
 # PARTICIONES=True (dirs_de_banco -> etiqueta_corrida). Si en step005 cambia
@@ -875,9 +899,24 @@ def main_conjunto():
                      f"dias diferentes y Sigma_e dejaria de significar lo que la "
                      f"derivacion dice. Regenera los dos con el mismo modo.")
         return
-    _MODO_COND = next(iter(_modos)) or "regimen"
+    _detectado = next(iter(_modos)) or "regimen"
+    if CONDICIONAR_POR == "auto":
+        _MODO_COND = _detectado
+    elif CONDICIONAR_POR != _detectado:
+        logger.error(
+            f"CONDICIONAR_POR='{CONDICIONAR_POR}' declarado en este archivo, pero "
+            f"preds_test dice '{_detectado}'. No se continua: el subindice s de "
+            f"rho_s_* significa cosas distintas en los dos modos, y usar el "
+            f"indice equivocado no da ningun error visible — aplicaria "
+            f"phi(cierre) en los dias que el HMM llama 'moderado'. Corregi "
+            f"CONDICIONAR_POR aca, o regenera preds_test con el step005 que "
+            f"corresponde.")
+        return
+    else:
+        _MODO_COND = CONDICIONAR_POR
     _CALENDARIO = _MODO_COND == "calendario"
-    logger.info(f"  condicionado por: {_MODO_COND}"
+    logger.info(f"  condicionado por: {_MODO_COND} "
+                f"({'declarado' if CONDICIONAR_POR != 'auto' else 'detectado'})"
                 + ("  (s_h DETERMINISTA: no se muestrea cadena de Markov, la "
                    "secuencia de baldes es la misma en todas las replicas)"
                    if _CALENDARIO else ""))
@@ -1124,9 +1163,16 @@ def main():
         #     "calendario": trae 4 columnas rho_s_0..rho_s_3 (los baldes
         #     resto/apertura/cierre/transicion) mientras A sigue siendo la
         #     transmat 3x3 del HMM. Aplicaria phi(apertura) en los dias que el
-        #     HMM llama "moderado" y nunca usaria phi(transicion). El modo
-        #     calendario todavia NO esta soportado aca: falta reemplazar el
-        #     muestreo de A por el balde deterministico de t+h.
+        #     HMM llama "moderado" y nunca usaria phi(transicion).
+        #
+        #     ASIMETRIA A TENER PRESENTE: el modo calendario SI esta soportado en
+        #     main_conjunto (secuencia_regimen con baldes_fijos), pero NO en esta
+        #     ruta N=1. La razon es que aca la simulacion la hace
+        #     pipeline_simulacion del modulo, que llama a simular_regimen_path
+        #     internamente y no expone por donde inyectar una secuencia fija.
+        #     Soportarlo exigiria tocar vf7, que es el motor vigente — trabajo
+        #     aparte. Con CONDICIONAR_POR="calendario" y PARTICIONES=False la
+        #     corrida aborta aca, a proposito.
         #   - mezclar preds_test de una corrida con N_ESTADOS=2 y transmat de
         #     una con N_ESTADOS=3 (o al reves).
         # Chequeo EXPLICITO primero: la columna condicionar_por dice sobre que
@@ -1134,7 +1180,8 @@ def main():
         # el respaldo para parquets viejos que no la traen.
         _cond_por = (str(df_grupo["condicionar_por"].iloc[0])
                      if "condicionar_por" in df_grupo.columns else None)
-        if _cond_por is not None and _cond_por != "regimen":
+        _esperado = "regimen" if CONDICIONAR_POR == "auto" else CONDICIONAR_POR
+        if _cond_por is not None and _cond_por != _esperado:
             logger.error(
                 f"  año_corte_regimen={año_corte}: preds_test viene de una "
                 f"corrida de step005 con CONDICIONAR_POR='{_cond_por}' — los "
