@@ -257,17 +257,41 @@ def dir_modo_de(banco: str) -> Path:
     """
     sub  = _DIR_MODO_BASE / etiqueta_corrida(banco)
     pat  = f"preds_test_fold*_{banco}_*.parquet"
+
+    # Candidatas EN ORDEN DE PRIORIDAD.
+    #
+    # step005 separa los modos en un subnivel cond_<modo> (dirs_de_banco), y
+    # regimen —el caso historico— no lleva subnivel. Asi que el botón de este
+    # archivo no solo declara el modo: tambien elige DONDE buscar.
+    #   CONDICIONAR_POR="calendario" -> primero cond_calendario/
+    #   "regimen"                    -> las carpetas sin subnivel de modo
+    #   "auto"                       -> las sin subnivel primero (el caso
+    #                                   historico) y cond_* despues, asi una
+    #                                   corrida de regimen nunca queda tapada
+    #                                   por una de calendario hecha despues.
+    _cands = []
+    if CONDICIONAR_POR == "calendario":
+        _cands += [sub / "cond_calendario", _DIR_MODO_BASE / "cond_calendario"]
+    _cands += [sub, _DIR_MODO_BASE]
+    if CONDICIONAR_POR == "auto":
+        _cands += [sub / "cond_calendario", _DIR_MODO_BASE / "cond_calendario"]
+
     try:
-        if sub.is_dir() and any(sub.glob(pat)):
-            return sub
-        if _DIR_MODO_BASE.is_dir() and any(_DIR_MODO_BASE.glob(pat)):
-            return _DIR_MODO_BASE
+        for c in _cands:
+            if c.is_dir() and any(c.glob(pat)):
+                if c.name.startswith("cond_"):
+                    logger.info(f"  preds de {banco} en el subnivel de modo "
+                                f"{c.name!r}")
+                return c
     except OSError as e:
         # La unidad de red puede no estar montada al importar el modulo (p.ej.
         # al correr un checklist). No es motivo para abortar el import: se cae
         # al comportamiento deducido y el error real aparece al cargar.
         logger.debug(f"  No se pudo inspeccionar {sub} ({type(e).__name__}: {e})")
-    return sub if (PARTICIONES or banco != "SISTEMA") else _DIR_MODO_BASE
+    # Nada en disco: se devuelve la candidata MAS especifica de esta config, para
+    # que el error de cargar_preds_de_grupos nombre donde deberian estar.
+    return _cands[0] if (PARTICIONES or banco != "SISTEMA"
+                         or CONDICIONAR_POR == "calendario") else _DIR_MODO_BASE
 
 
 DIR_MODO = dir_modo_de(GRUPOS[0])

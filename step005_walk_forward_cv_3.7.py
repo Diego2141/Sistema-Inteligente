@@ -854,8 +854,25 @@ def dirs_de_banco(banco: str) -> dict:
     Con True agrega un nivel por entidad, porque los diagnósticos que no llevan
     el banco en el nombre del archivo se sobrescribirían entre corridas de
     entidades distintas.
+
+    SUBNIVEL POR MODO DE CONDICIONAMIENTO
+    Los dos modos escriben `preds_test_fold*_<banco>_<fecha>.parquet`: el mismo
+    nombre. Sin separarlos, correr régimen un día y calendario al siguiente deja
+    los dos juegos en la misma carpeta, y `cargar_preds_test_reales` se queda con
+    **el más reciente por fold** — o sea que la corrida vieja desaparece del
+    pipeline sin ningún aviso. Peor para el experimento que motivó el botón: no
+    se pueden tener los dos a mano para comparar.
+
+    Con `cond_<modo>` los dos coexisten y step006 elige cuál leer.
+
+    El subnivel se agrega SOLO cuando CONDICIONAR_POR != "regimen", a propósito:
+    régimen sigue escribiendo donde escribió siempre, así que todos los
+    preds_test ya generados siguen encontrándose sin mover nada. Es la misma
+    asimetría de `_SUF_SALIDA` en step006 — el caso histórico no lleva sufijo.
     """
     dm = _DIR_BASE / etiqueta_corrida(banco) if PARTICIONES else _DIR_BASE
+    if CONDICIONAR_POR != "regimen":
+        dm = dm / f"cond_{CONDICIONAR_POR}"
     d = {"modo"          : dm,
          "modelos"       : dm / "modelos",
          "plots"         : dm / "plots",
