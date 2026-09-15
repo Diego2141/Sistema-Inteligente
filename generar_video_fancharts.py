@@ -69,11 +69,60 @@ logger = logging.getLogger(__name__)
 ###############################################################################
 
 BASE_SISTEMA = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente")
-BANCO        = "SISTEMA"
+
+# ── Los MISMOS botones que step006_orquestador_vf_7.py ──────────────────────
+# De acá sale BANCO y el subnivel de carpeta, en vez de escribirlos a mano.
+# Tienen que coincidir con los de la corrida de step006 que dejó los PNG.
+#
+# Antes BANCO era un literal y la ruta no sabía del subnivel _SUF_SALIDA que
+# step006 agrega con PARTICIONES=True o con una ENTIDAD de partición, así que
+# para el conjunto había que escribir a mano
+#     ETIQUETA_CORRIDA = "xgb_qt_expanding_310.5/CONJUNTO_BBVA_1_0.5"
+# metiendo una barra adentro de lo que debería ser un solo nivel. Funcionaba
+# por cómo pathlib parsea la cadena, pero era un remiendo.
+PARTICIONES = False
+PARTICION   = "globales"   # "bbva" | "globales"
+ENTIDAD     = "SISTEMA"    # "SISTEMA" | "FOCO" | "RESTO" — solo con PARTICIONES=False
+
+# Geometría del fold, para reconstruir etiqueta_corrida() igual que step005/006.
+VENTANA_VAL_AÑOS  = 1
+VENTANA_TEST_AÑOS = 0.5
 
 # Debe coincidir con el subdirectorio que usa step006_orquestador_vf_7.py al
 # guardar los PNG (ahí se construye como f"{MODELO_CV}_{modo}_{ventanas}").
 ETIQUETA_CORRIDA = "xgb_qt_expanding_310.5"
+
+
+def _fmt_anios(x: float) -> str:
+    """0.5 -> '0.5', 1.0 -> '1'. Misma regla que step005 y step006."""
+    return f"{x:g}"
+
+
+def etiqueta_corrida(banco: str) -> str:
+    """Identidad de la corrida: entidad + geometría. Ej: CONJUNTO_BBVA_1_0.5"""
+    return f"{banco}_{_fmt_anios(VENTANA_VAL_AÑOS)}_{_fmt_anios(VENTANA_TEST_AÑOS)}"
+
+
+if not PARTICIONES:
+    if ENTIDAD == "SISTEMA":
+        BANCO = "SISTEMA"
+    elif ENTIDAD in ("FOCO", "RESTO"):
+        BANCO = f"{ENTIDAD}_{PARTICION.upper()}"
+    else:
+        raise ValueError(f"ENTIDAD={ENTIDAD!r} no es valida. Opciones: "
+                         f"'SISTEMA', 'FOCO', 'RESTO'.")
+else:
+    # El conjunto: step006 nombra el agregado así (main_conjunto).
+    BANCO = f"CONJUNTO_{PARTICION.upper()}"
+
+# Mismo predicado que _SUF_SALIDA de step006, porque es la MISMA decisión:
+# dónde escribió esos PNG. Si los dos divergen, este script busca donde no es.
+_SUF = "" if (not PARTICIONES and ENTIDAD == "SISTEMA") else etiqueta_corrida(BANCO)
+
+# Con PARTICIONES=True solo existe la familia "acumulado": main_conjunto genera
+# únicamente ese fan chart (el neto y el integrado leen percentiles de la
+# marginal de UNA entidad, y la del agregado no existe en forma cerrada). Pedir
+# los otros dos no rompe nada —se omiten con un aviso— pero conviene saberlo.
 
 # Qué videos armar. Lista, no un valor único: step006 genera las TRES familias de
 # PNG en una sola corrida, así que lo natural es armar los tres videos también.
@@ -104,8 +153,31 @@ FPS = 4   # cuadros por segundo — 4 = ~0.25s por día de origen.
 
 
 def dir_frames_de(tipo: str) -> Path:
-    """Carpeta donde step006 dejó los PNG de ese tipo de fan chart."""
-    return BASE_SISTEMA / "2. Output" / _CFG[tipo][0] / ETIQUETA_CORRIDA
+    """
+    Carpeta donde step006 dejó los PNG de ese tipo de fan chart.
+
+    Se RESUELVE mirando el disco, igual que dir_modo_de() del orquestador y por
+    el mismo motivo: el subnivel lo decidió la corrida que escribió los PNG, y
+    esta config puede no reflejarla (frames viejos de antes del botón, o una
+    corrida hecha con otros flags). Prioridad:
+      1. el subnivel que corresponde a esta config, si tiene frames de ESE banco;
+      2. la carpeta base, si los tiene — cubre los PNG anteriores al botón;
+      3. si ninguna, el subnivel igual, para que el FileNotFoundError nombre la
+         carpeta donde deberían estar.
+    """
+    base = BASE_SISTEMA / "2. Output" / _CFG[tipo][0] / ETIQUETA_CORRIDA
+    sub  = base / _SUF if _SUF else base
+    pat  = f"{_CFG[tipo][1]}_{BANCO}_*.png"
+    try:
+        if sub.is_dir() and any(sub.glob(pat)):
+            return sub
+        if sub != base and base.is_dir() and any(base.glob(pat)):
+            logger.info(f"  [{tipo}] frames encontrados en la carpeta base, no en "
+                        f"{_SUF!r} — se usa {base}")
+            return base
+    except OSError as e:
+        logger.debug(f"  No se pudo inspeccionar {sub} ({type(e).__name__}: {e})")
+    return sub
 
 
 def ruta_video_de(tipo: str, banco: str = BANCO) -> Path:
