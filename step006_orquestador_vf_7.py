@@ -186,11 +186,8 @@ else:
 #
 # Lo decide la corrida de STEP005 que los produjo, no esta config: step005
 # agrega el subnivel etiqueta_corrida(banco) cuando SU PARTICIONES=True
-# (dirs_de_banco). Y FOCO_*/RESTO_* solo existen si step005 corrio con
-# particiones, asi que cualquier entidad que no sea SISTEMA implica subnivel.
-# SISTEMA es el unico ambiguo —puede venir de una corrida con o sin
-# particiones— y para ese caso manda PARTICIONES.
-_CON_SUBNIVEL = PARTICIONES or ENTIDAD != "SISTEMA"
+# (dirs_de_banco), y esta config no tiene forma de saber con que flags se corrio
+# aquello. Por eso no se adivina: se MIRA EL DISCO (ver dir_modo_de).
 
 # Entidad de la que salen las ETIQUETAS de regimen. DEBE coincidir con
 # BANCO_REGIMEN de step005_walk_forward_cv_3.7.py: la columna regimen_hmm de
@@ -211,16 +208,42 @@ _DIR_MODO_BASE = (BASE_SISTEMA / "2. Output" / "step005_wfcv_v3" / "xgb_qt_expan
 
 def dir_modo_de(banco: str) -> Path:
     """
-    Carpeta donde step005 dejo los preds_test de esa entidad.
+    Carpeta donde step005 dejo los preds_test de esa entidad. Se RESUELVE
+    mirando el disco, no derivando de la config.
 
-    Con PARTICIONES=False es _DIR_MODO_BASE a secas — identico al literal que
-    habia antes. Con True, step005 agrega un subnivel por entidad
-    (dirs_de_banco: dm = _DIR_BASE / etiqueta_corrida(banco)), y sin replicarlo
-    aca el glob de cargar_preds_test_reales busca en la carpeta PADRE. Eso no
-    siempre falla: si ahi quedaron preds_test de una corrida vieja de SISTEMA,
-    los encuentra y simula SISTEMA en silencio creyendo simular la particion.
+    POR QUE NO SE DEDUCE
+    step005 agrega un subnivel etiqueta_corrida(banco) cuando SU PARTICIONES=True
+    (dirs_de_banco). Esta config no sabe con que flags se corrio aquello, y la
+    deduccion "PARTICIONES or ENTIDAD != 'SISTEMA'" fallaba en un caso real: los
+    preds de SISTEMA generados por una corrida de step005 CON particiones quedan
+    en .../SISTEMA_1_0.5/, pero step006 con PARTICIONES=False los buscaba en la
+    base y no los encontraba.
+
+    Mirar el disco elimina la ambiguedad de raiz. Y no es solo comodidad: sin
+    esto, el glob de cargar_preds_test_reales que busca en la carpeta PADRE
+    puede levantar preds_test de una corrida vieja de OTRA entidad y simularla
+    en silencio, creyendo simular la que se pidio.
+
+    Prioridad y por que ese orden:
+      1. el subnivel, si existe y tiene preds de ESE banco — es el resultado de
+         la corrida mas especifica, la que se hizo con particiones;
+      2. la base, si tiene preds de ese banco;
+      3. si ninguna los tiene, el subnivel igual, para que el error de
+         cargar_preds_de_grupos liste la carpeta correcta.
     """
-    return _DIR_MODO_BASE / etiqueta_corrida(banco) if _CON_SUBNIVEL else _DIR_MODO_BASE
+    sub  = _DIR_MODO_BASE / etiqueta_corrida(banco)
+    pat  = f"preds_test_fold*_{banco}_*.parquet"
+    try:
+        if sub.is_dir() and any(sub.glob(pat)):
+            return sub
+        if _DIR_MODO_BASE.is_dir() and any(_DIR_MODO_BASE.glob(pat)):
+            return _DIR_MODO_BASE
+    except OSError as e:
+        # La unidad de red puede no estar montada al importar el modulo (p.ej.
+        # al correr un checklist). No es motivo para abortar el import: se cae
+        # al comportamiento deducido y el error real aparece al cargar.
+        logger.debug(f"  No se pudo inspeccionar {sub} ({type(e).__name__}: {e})")
+    return sub if (PARTICIONES or banco != "SISTEMA") else _DIR_MODO_BASE
 
 
 DIR_MODO = dir_modo_de(GRUPOS[0])
@@ -230,11 +253,15 @@ DIR_MODO = dir_modo_de(GRUPOS[0])
 DIR_REGIMEN_HMM = BASE_SISTEMA / "2. Output"
 
 # Salida de este orquestador
-# _SUF_SALIDA: subnivel por corrida. Con PARTICIONES=False y ENTIDAD="SISTEMA"
-# es "" y las rutas quedan EXACTAMENTE como estaban. En cualquier otro caso
-# separa las salidas —del conjunto o de una entidad de particion— de las de
-# SISTEMA, que comparten nombre de archivo y se pisarian.
-_SUF_SALIDA = etiqueta_corrida(BANCO) if _CON_SUBNIVEL else ""
+# _SUF_SALIDA: subnivel por corrida. A diferencia de dir_modo_de —que RESUELVE
+# donde dejo los preds una corrida ajena y por eso mira el disco— aca se DECIDE
+# donde escribir, asi que es una regla y no una deteccion.
+#
+# Con PARTICIONES=False y ENTIDAD="SISTEMA" es "" y las rutas quedan EXACTAMENTE
+# como estaban antes de los botones. En cualquier otro caso separa las salidas
+# —del conjunto o de una entidad de particion— de las de SISTEMA, que comparten
+# nombre de archivo y se pisarian.
+_SUF_SALIDA = "" if (not PARTICIONES and ENTIDAD == "SISTEMA") else etiqueta_corrida(BANCO)
 DIR_SALIDA = (BASE_SISTEMA / "2. Output" / "step006_simulacion" /
               "xgb_qt_expanding_310.5" / _SUF_SALIDA)
 
