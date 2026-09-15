@@ -1013,6 +1013,14 @@ def _guardar_preds_test(preds, y_real, h_arr, fechas_t,
     if rho_s_val is not None:
         for s in sorted(rho_s_val.keys()):
             df[f"rho_s_{s}"] = float(rho_s_val[s])
+        # En modo calendario viaja tambien el balde de t+h, porque alli s_h es
+        # DETERMINISTA y step006 no lo puede derivar sin el calendario de
+        # feriados (ver _baldes_th). Sin esta columna el modo calendario queda
+        # bloqueado aguas abajo por el guard del orquestador.
+        if CONDICIONAR_POR == "calendario":
+            _bth = _baldes_th(fechas_t, h_arr, banco)
+            if _bth is not None:
+                df["balde_th"] = _bth
         # Sobre QUE esta estratificado el subindice s de rho_s_*. Viaja en el
         # parquet para que step006 no tenga que INFERIRLO contando columnas:
         # contar funciona para el caso realista (4 baldes vs transmat 3x3) pero
@@ -1737,6 +1745,69 @@ def _etiquetas_calendario(idx) -> pd.Series:
     lab[dam < CAL_N_TRANS_FIN + CAL_N_CIERRE]   = CAL_CIERRE
     lab[(dam < CAL_N_TRANS_FIN) | (ddc < CAL_N_TRANS_INI)] = CAL_TRANSICION
     return pd.Series(lab[completo], index=idx[completo], name="estado")
+
+
+def _baldes_th(fechas_t, h_arr, banco: str) -> np.ndarray | None:
+    """
+    Balde de calendario de la fecha OBJETIVO t+h, uno por fila de preds_test.
+
+    Es el insumo que step006 necesita para el modo calendario: alli el
+    condicionante s_h es DETERMINISTA (la posicion en el mes de t+h se conoce
+    con certeza al decidir), asi que no hay cadena de Markov que muestrear —
+    pero hay que decirle cual es el balde de cada horizonte.
+
+    POR QUE SE CALCULA ACA Y NO EN step006
+    Avanzar h dias HABILES desde t necesita el calendario con feriados peruanos,
+    que vive en step001 (peru_bday). Reconstruirlo en step006 seria una tercera
+    copia de la misma lista de feriados — y el CLAUDE.md ya documenta como se
+    desincronizan dos copias de una regla.
+
+    La solucion no reconstruye nada: usa el EJE DE FECHAS del parquet de regimen,
+    que ES el calendario habil real del flujo (feriados ya excluidos, porque son
+    los dias en que efectivamente hubo rueda). Avanzar h posiciones sobre ese eje
+    ordenado da t+h exacto, sin lista de feriados de por medio.
+
+    Devuelve array de int con el balde por fila, o None si no se puede resolver
+    (sin parquet de regimen). Las filas cuyo t+h cae fuera del eje —horizontes
+    que se pasan del final de la serie— quedan en -1, y step006 las trata como
+    "sin balde" cayendo al de menor indice.
+    """
+    _df_ax = _cargar_estados_regimen_disco(_banco_del_regimen(banco))
+    if _df_ax is None or _df_ax.empty:
+        logger.warning(f"  [BALDE_TH] Sin parquet de regimen para "
+                       f"{_banco_del_regimen(banco)} — no se puede resolver el "
+                       f"eje habil, la columna balde_th no se escribe.")
+        return None
+
+    eje = pd.DatetimeIndex(sorted(pd.to_datetime(_df_ax["fecha"].unique())))
+    etiq = _etiquetas_calendario(eje)
+    if etiq.empty:
+        logger.warning("  [BALDE_TH] _etiquetas_calendario no devolvio ningun "
+                       "mes completo — balde_th no se escribe.")
+        return None
+
+    # pos de cada fecha_t en el eje, +h posiciones = t+h en dias habiles
+    pos_t = eje.get_indexer(pd.DatetimeIndex(pd.to_datetime(fechas_t)))
+    pos_th = pos_t + np.asarray(h_arr, dtype=int)
+    valido = (pos_t >= 0) & (pos_th >= 0) & (pos_th < len(eje))
+
+    # etiq puede no cubrir todo el eje (meses incompletos se excluyen), asi que
+    # el lookup se hace por reindex y lo no cubierto queda en -1 igual que lo
+    # fuera de rango. No se inventa un balde para una fecha sin posicion fiable.
+    lab_eje = etiq.reindex(eje).values            # NaN donde el mes no cerraba
+    out = np.full(len(pos_th), -1, dtype=int)
+    if valido.any():
+        cand = lab_eje[pos_th[valido]]
+        ok = pd.notna(cand)
+        idx_val = np.where(valido)[0]
+        out[idx_val[ok]] = cand[ok].astype(int)
+
+    n_malos = int((out < 0).sum())
+    if n_malos:
+        logger.info(f"  [BALDE_TH] {n_malos:,} de {len(out):,} filas sin balde "
+                    f"(t+h fuera del eje habil o en un mes incompleto) — quedan "
+                    f"en -1 y step006 las resuelve con el balde de menor indice.")
+    return out
 
 
 def _estimar_rho_val_fold(clasif: pd.DataFrame,

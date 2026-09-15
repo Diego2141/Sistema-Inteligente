@@ -554,6 +554,7 @@ def simular_un_path_conjunto(fecha_t, horizontes, regimenes_path, bloques,
     """
     N, H = len(grupos), len(horizontes)
     _s_fb = sorted(bloques["Phi"])[0]
+    regimenes_path = np.asarray(regimenes_path)
 
     Z_todos = np.empty((N, H))
     z = bloques["L0"] @ rng.standard_normal(N)              # P1
@@ -579,10 +580,41 @@ def simular_un_path_conjunto(fecha_t, horizontes, regimenes_path, bloques,
     return X
 
 
+def secuencia_regimen(estado_inicial, matriz_transicion, H, rng,
+                      baldes_fijos=None) -> np.ndarray:
+    """
+    La secuencia s_{h0..H} de una replica. Dos modos, y la diferencia es
+    metodologica, no de implementacion:
+
+    baldes_fijos=None  -> modo REGIMEN. s_h es latente: se muestrea de la cadena
+                          de Markov con simular_regimen_path. Cada replica tiene
+                          su propia trayectoria, y eso agrega varianza Monte
+                          Carlo sobre la del ruido.
+
+    baldes_fijos dado   -> modo CALENDARIO. s_h es DETERMINISTA: la posicion en
+                          el mes de t+h se conoce con certeza al decidir, asi que
+                          la secuencia es la MISMA en todas las replicas y no se
+                          sortea nada. Es la ventaja practica del calendario que
+                          motivo el boton: una fuente de ruido menos, y la
+                          matriz de transicion deja de hacer falta.
+
+    Un balde -1 (t+h fuera del eje habil o en un mes incompleto; ver _baldes_th
+    de step005) se resuelve con el bloque de menor indice, igual que hace
+    simular_un_path_conjunto con un estado sin bloque.
+    """
+    if baldes_fijos is None:
+        return simular_regimen_path(estado_inicial, matriz_transicion, H, rng)
+    b = np.asarray(baldes_fijos, dtype=int)
+    if len(b) != H:
+        raise ValueError(f"baldes_fijos tiene {len(b)} elementos y se esperaban "
+                         f"{H} (uno por horizonte).")
+    return b
+
+
 def simular_paths_origen_conjunto(
     fecha_t, df_por_grupo: dict, distribuciones: dict, estado_inicial: int,
     matriz_transicion: np.ndarray, bloques: dict, n_paths: int,
-    ventanas: list, grupos: list, seed: int = 42,
+    ventanas: list, grupos: list, seed: int = 42, baldes_fijos=None,
 ) -> dict:
     """
     Paso P5 y ecuacion (9): agrega los grupos DENTRO de cada replica y devuelve
@@ -612,8 +644,9 @@ def simular_paths_origen_conjunto(
 
     for p in range(n_paths):
         rng_p = np.random.default_rng(seed + p)
-        regimenes = simular_regimen_path(
-            estado_inicial, matriz_transicion, H, rng_p)      # P0 (compartido)
+        regimenes = secuencia_regimen(
+            estado_inicial, matriz_transicion, H, rng_p,
+            baldes_fijos=baldes_fijos)                        # P0 (compartido)
         X = simular_un_path_conjunto(
             fecha_t, horizontes, regimenes, bloques,
             distribuciones, grupos, rng_p)                    # P1-P4
@@ -626,7 +659,7 @@ def simular_paths_origen_conjunto(
 
 def simular_fanchart_origen_conjunto(
     fecha_t, horizontes, estado_inicial, matriz_transicion, bloques,
-    distribuciones, grupos, n_paths, seed: int = 42,
+    distribuciones, grupos, n_paths, seed: int = 42, baldes_fijos=None,
 ) -> np.ndarray:
     """
     Version conjunta de simular_fanchart_origen del modulo: devuelve el
@@ -646,8 +679,9 @@ def simular_fanchart_origen_conjunto(
     acumulados = np.empty((n_paths, H))
     for p in range(n_paths):
         rng_p = np.random.default_rng(seed + p)
-        regimenes = simular_regimen_path(
-            estado_inicial, matriz_transicion, H, rng_p)
+        regimenes = secuencia_regimen(
+            estado_inicial, matriz_transicion, H, rng_p,
+            baldes_fijos=baldes_fijos)
         X = simular_un_path_conjunto(
             fecha_t, horizontes, regimenes, bloques,
             distribuciones, grupos, rng_p)
@@ -658,7 +692,7 @@ def simular_fanchart_origen_conjunto(
 def generar_fancharts_conjunto(
     dfg: dict, distribuciones: dict, estado_por_origen, matriz_transicion,
     bloques: dict, grupos: list, dir_salida: Path, banco: str,
-    n_paths: int, seed: int = 42, bandas=None,
+    n_paths: int, seed: int = 42, bandas=None, col_balde: str | None = None,
 ) -> list:
     """
     Un fan chart PNG por origen, con la banda del acumulado CONJUNTO.
@@ -680,10 +714,12 @@ def generar_fancharts_conjunto(
         ft = pd.Timestamp(ft)
         sub0 = dfg[g0][dfg[g0]["fecha_t"] == ft].sort_values("h")
         horizontes = sub0["h"].values.astype(int)
+        _bf = (sub0[col_balde].values.astype(int)
+               if col_balde and col_balde in sub0.columns else None)
         acum = simular_fanchart_origen_conjunto(
             ft, horizontes, int(estado_por_origen.get(ft, 0)),
             matriz_transicion, bloques, distribuciones, grupos,
-            n_paths=n_paths, seed=seed + i_o)
+            n_paths=n_paths, seed=seed + i_o, baldes_fijos=_bf)
 
         # Realizado del SISTEMA: se suman los grupos por horizonte y recien
         # despues se acumula — mismo orden que en la simulacion.
@@ -817,14 +853,34 @@ def main_conjunto():
                      f"vienen de corridas con N_ESTADOS distinto. Regenera.")
         return
     n_estados = next(iter(n_est.values()))
+    _modos = set()
     for g in GRUPOS:
         cp = (str(preds[g]["condicionar_por"].iloc[0])
               if "condicionar_por" in preds[g].columns else None)
-        if cp is not None and cp != "regimen":
-            logger.error(f"{g}: preds_test viene con CONDICIONAR_POR='{cp}'. Los "
-                         f"rho_s_* estan estratificados por eso y no por el "
-                         f"estado del HMM que muestrea A — modo no soportado.")
+        _modos.add(cp)
+        if cp == "calendario" and "balde_th" not in preds[g].columns:
+            logger.error(
+                f"{g}: preds_test viene con CONDICIONAR_POR='calendario' pero sin "
+                f"la columna balde_th. Sin ella no se puede saber que balde le "
+                f"toca a cada horizonte: s_h es deterministo pero derivarlo aca "
+                f"exigiria reconstruir el calendario de feriados. Regenera con un "
+                f"step005 que incluya _baldes_th.")
             return
+        if cp is not None and cp not in ("regimen", "calendario"):
+            logger.error(f"{g}: CONDICIONAR_POR='{cp}' desconocido — no soportado.")
+            return
+    if len(_modos) > 1:
+        logger.error(f"Los grupos vienen de modos DISTINTOS: {sorted(_modos)}. "
+                     f"phi_i y rho_ij quedarian estratificados por particiones de "
+                     f"dias diferentes y Sigma_e dejaria de significar lo que la "
+                     f"derivacion dice. Regenera los dos con el mismo modo.")
+        return
+    _MODO_COND = next(iter(_modos)) or "regimen"
+    _CALENDARIO = _MODO_COND == "calendario"
+    logger.info(f"  condicionado por: {_MODO_COND}"
+                + ("  (s_h DETERMINISTA: no se muestrea cadena de Markov, la "
+                   "secuencia de baldes es la misma en todas las replicas)"
+                   if _CALENDARIO else ""))
 
     resultados, filas_diag = [], []
     for año_corte, df_ref in preds[GRUPOS[0]].groupby("año_corte_regimen"):
@@ -833,11 +889,20 @@ def main_conjunto():
         except Exception:
             _seed_offset = 0
         try:
+            # En modo calendario la transmat NO se usa: la secuencia de baldes
+            # es deterministica. Se carga igual cuando existe, porque su diag(A)
+            # va al diagnostico, pero su ausencia deja de ser motivo para omitir
+            # el grupo — y el guard de n_estados vs len(A) tampoco aplica, porque
+            # los 4 baldes no tienen por que coincidir con los estados del HMM.
             A = cargar_transmat(BANCO_REGIMEN if BANCO_REGIMEN else GRUPOS[0], año_corte)
         except (FileNotFoundError, ValueError) as e:
-            logger.warning(f"  año_corte_regimen={año_corte}: {e} — grupo omitido.")
-            continue
-        if n_estados != len(A):
+            if not _CALENDARIO:
+                logger.warning(f"  año_corte_regimen={año_corte}: {e} — grupo omitido.")
+                continue
+            logger.info(f"  año_corte_regimen={año_corte}: sin transmat, pero en "
+                        f"modo calendario no hace falta — se sigue.")
+            A = np.eye(n_estados)
+        if not _CALENDARIO and n_estados != len(A):
             logger.error(f"  año_corte_regimen={año_corte}: {n_estados} columnas "
                          f"rho_s_* contra transmat de {len(A)} estados — omitido.")
             continue
@@ -889,8 +954,15 @@ def main_conjunto():
                     dfg[g], taus=None, n_jobs=N_JOBS).items():
                 distribuciones[(g, ft, h)] = d
 
-        estado_por_origen = (df_ref.drop_duplicates("fecha_t")
-                             .set_index("fecha_t")["regimen_hmm"].astype(int))
+        # En calendario el estado inicial es irrelevante (P1 no arranca una cadena
+        # de Markov), pero se deja por uniformidad de firma: secuencia_regimen lo
+        # ignora cuando recibe baldes_fijos.
+        if "regimen_hmm" in df_ref.columns and df_ref["regimen_hmm"].notna().any():
+            estado_por_origen = (df_ref.drop_duplicates("fecha_t")
+                                 .set_index("fecha_t")["regimen_hmm"]
+                                 .fillna(0).astype(int))
+        else:
+            estado_por_origen = pd.Series(0, index=df_ref["fecha_t"].unique())
         ventanas = [v for v in VENTANAS if v >= int(dfg[GRUPOS[0]]["h"].min())]
 
         origenes = sorted(dfg[GRUPOS[0]]["fecha_t"].unique())
@@ -899,11 +971,18 @@ def main_conjunto():
                     f"diag(A)={np.diag(A).round(3).tolist()}")
         for i_o, ft in enumerate(origenes):
             df_por_grupo = {g: dfg[g][dfg[g]["fecha_t"] == ft] for g in GRUPOS}
+            # En calendario, la secuencia de baldes de ESTE origen sale de la
+            # columna balde_th, ordenada por h igual que los horizontes.
+            _bf = None
+            if _CALENDARIO:
+                _s0 = df_por_grupo[GRUPOS[0]].sort_values("h")
+                _bf = _s0["balde_th"].values.astype(int)
             acum = simular_paths_origen_conjunto(
                 ft, df_por_grupo, distribuciones,
                 estado_inicial=int(estado_por_origen.get(ft, 0)),
                 matriz_transicion=A, bloques=bloques, n_paths=N_PATHS,
-                ventanas=ventanas, grupos=GRUPOS, seed=SEED + _seed_offset + i_o)
+                ventanas=ventanas, grupos=GRUPOS, seed=SEED + _seed_offset + i_o,
+                baldes_fijos=_bf)
             # y realizado del SISTEMA = suma de los grupos, por ventana
             real = {}
             for v in ventanas:
@@ -930,7 +1009,8 @@ def main_conjunto():
                 dfg, distribuciones, estado_por_origen, A, bloques, GRUPOS,
                 dir_salida=DIR_FLUJOS_ACUMULADOS, banco=BANCO,
                 n_paths=N_PATHS_FANCHART, seed=SEED + _seed_offset,
-                bandas=BANDAS_FANCHART)
+                bandas=BANDAS_FANCHART,
+                col_balde="balde_th" if _CALENDARIO else None)
 
     if not resultados:
         logger.error("Ningun año_corte_regimen pudo simularse.")
