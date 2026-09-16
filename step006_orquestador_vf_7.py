@@ -230,6 +230,23 @@ BANCO_REGIMEN = "SISTEMA"
 _DIR_MODO_BASE = (BASE_SISTEMA / "2. Output" / "step005_wfcv_v3" / "xgb_qt_expanding_310.5")
 
 
+def _avisar_salida_sin_modo() -> None:
+    """
+    Con CONDICIONAR_POR="auto" las salidas NO se separan por modo, porque el modo
+    recien se conoce al leer preds_test y estas rutas se arman al importar. O sea
+    que una corrida de calendario pisa el .parquet y los PNG de una de regimen.
+
+    Se avisa al arrancar la corrida y no al importar: a nivel de modulo el aviso
+    saldria tambien al cargar el archivo desde un checklist, donde no significa
+    nada.
+    """
+    if CONDICIONAR_POR == "auto":
+        logger.warning(
+            "CONDICIONAR_POR='auto': las salidas NO se separan por modo, asi que "
+            "una corrida de calendario va a pisar los .parquet y los PNG de una "
+            "de regimen. Declaralo ('regimen' o 'calendario') para que convivan.")
+
+
 def dir_modo_de(banco: str) -> Path:
     """
     Carpeta donde step005 dejo los preds_test de esa entidad. Se RESUELVE
@@ -310,6 +327,21 @@ DIR_REGIMEN_HMM = BASE_SISTEMA / "2. Output"
 # —del conjunto o de una entidad de particion— de las de SISTEMA, que comparten
 # nombre de archivo y se pisarian.
 _SUF_SALIDA = "" if (not PARTICIONES and ENTIDAD == "SISTEMA") else etiqueta_corrida(BANCO)
+
+# ── Separacion por MODO de condicionamiento, igual que step005 ──────────────
+# Sin esto, una corrida de calendario pisa el simulacion_paths_*.parquet y los
+# PNG de fan chart de una corrida de regimen: mismo nombre, misma carpeta. Es el
+# mismo problema que cond_<modo> resuelve aguas arriba, un nivel mas abajo.
+#
+# Solo se puede separar cuando el modo esta DECLARADO: con "auto" no se sabe
+# cual es hasta leer preds_test, y estas rutas se arman al importar el modulo.
+# Por eso declarar CONDICIONAR_POR no es solo documentacion — es lo que hace que
+# las salidas de los dos modos convivan.
+if CONDICIONAR_POR == "calendario":
+    _SUF_SALIDA = f"{_SUF_SALIDA}/cond_calendario" if _SUF_SALIDA else "cond_calendario"
+# El aviso para "auto" va dentro de la corrida (_avisar_salida_sin_modo), no
+# aca: a nivel de modulo dispararia con solo importar el archivo — p.ej. al
+# correr un checklist — y ahi no significa nada.
 DIR_SALIDA = (BASE_SISTEMA / "2. Output" / "step006_simulacion" /
               "xgb_qt_expanding_310.5" / _SUF_SALIDA)
 
@@ -886,6 +918,7 @@ def main_conjunto():
     justamente lo que hace el acumulado.
     """
     DIR_SALIDA.mkdir(parents=True, exist_ok=True)
+    _avisar_salida_sin_modo()
     logger.info(f"MODO CONJUNTO — N={len(GRUPOS)} grupos: {GRUPOS}")
 
     preds = cargar_preds_de_grupos(GRUPOS)
@@ -1099,6 +1132,7 @@ def main():
     if PARTICIONES:
         return main_conjunto()
     DIR_SALIDA.mkdir(parents=True, exist_ok=True)
+    _avisar_salida_sin_modo()
 
     # ── 1. Cargar predicciones TEST reales (todos los folds, sin duplicados) ──
     logger.info(f"Cargando preds_test de {BANCO} desde {DIR_MODO} ...")

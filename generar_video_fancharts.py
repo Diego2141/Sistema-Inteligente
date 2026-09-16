@@ -115,9 +115,19 @@ else:
     # El conjunto: step006 nombra el agregado así (main_conjunto).
     BANCO = f"CONJUNTO_{PARTICION.upper()}"
 
+# Sobre que estaba condicionada la corrida de step006 que dejo estos PNG.
+# "auto" = no se separaron por modo (step006 avisa cuando eso pasa).
+CONDICIONAR_POR = "auto"      # "auto" | "regimen" | "calendario"
+
+if CONDICIONAR_POR not in ("auto", "regimen", "calendario"):
+    raise ValueError(f"CONDICIONAR_POR={CONDICIONAR_POR!r} invalido — debe ser "
+                     f"'auto', 'regimen' o 'calendario'.")
+
 # Mismo predicado que _SUF_SALIDA de step006, porque es la MISMA decisión:
 # dónde escribió esos PNG. Si los dos divergen, este script busca donde no es.
 _SUF = "" if (not PARTICIONES and ENTIDAD == "SISTEMA") else etiqueta_corrida(BANCO)
+if CONDICIONAR_POR == "calendario":
+    _SUF = f"{_SUF}/cond_calendario" if _SUF else "cond_calendario"
 
 # Con PARTICIONES=True solo existe la familia "acumulado": main_conjunto genera
 # únicamente ese fan chart (el neto y el integrado leen percentiles de la
