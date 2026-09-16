@@ -80,8 +80,8 @@ BASE_SISTEMA = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente"
 #     ETIQUETA_CORRIDA = "xgb_qt_expanding_310.5/CONJUNTO_BBVA_1_0.5"
 # metiendo una barra adentro de lo que debería ser un solo nivel. Funcionaba
 # por cómo pathlib parsea la cadena, pero era un remiendo.
-PARTICIONES = False
-PARTICION   = "globales"   # "bbva" | "globales"
+PARTICIONES = True
+PARTICION   = "bbva"       # "bbva" | "globales"
 ENTIDAD     = "SISTEMA"    # "SISTEMA" | "FOCO" | "RESTO" — solo con PARTICIONES=False
 
 # Geometría del fold, para reconstruir etiqueta_corrida() igual que step005/006.
@@ -129,15 +129,19 @@ _SUF = "" if (not PARTICIONES and ENTIDAD == "SISTEMA") else etiqueta_corrida(BA
 if CONDICIONAR_POR == "calendario":
     _SUF = f"{_SUF}/cond_calendario" if _SUF else "cond_calendario"
 
-# Con PARTICIONES=True solo existe la familia "acumulado": main_conjunto genera
-# únicamente ese fan chart (el neto y el integrado leen percentiles de la
-# marginal de UNA entidad, y la del agregado no existe en forma cerrada). Pedir
-# los otros dos no rompe nada —se omiten con un aviso— pero conviene saberlo.
-
 # Qué videos armar. Lista, no un valor único: step006 genera las TRES familias de
 # PNG en una sola corrida, así que lo natural es armar los tres videos también.
-# Se puede reducir a ["integrado"] para reproducir el comportamiento anterior.
-TIPOS_FANCHART = ["acumulado", "neto", "integrado"]
+#
+# El default se DERIVA del modo en vez de ser fijo, porque los dos modos no
+# producen lo mismo: con PARTICIONES=True existe únicamente "acumulado"
+# (main_conjunto genera solo ese fan chart — el neto y el integrado leen
+# percentiles de la marginal de UNA entidad, y la del agregado no existe en forma
+# cerrada, hay que simularla). Pedir los tres ahí no rompe nada: los dos que
+# faltan se omiten con un WARNING. Pero ensucia el log con dos avisos esperados,
+# y un aviso que siempre aparece deja de leerse.
+#
+# Se puede fijar a mano si se quiere otra combinación.
+TIPOS_FANCHART = ["acumulado"] if PARTICIONES else ["acumulado", "neto", "integrado"]
 
 # tipo -> (carpeta de step006, prefijo del nombre de archivo).
 # Única fuente de esos dos datos: de acá salen la ruta, el patrón del glob y el
