@@ -228,7 +228,17 @@ BANCO_REGIMEN = "SISTEMA"
 # (se construye ahí como DIR_OUTPUT / f"{MODELO_CV}_{modo}_{ventanas}";
 # pega aquí el valor resultante de esa corrida — ej. con MODELO_CV="xgb",
 # EXPANDING=True, VENTANA_TRAIN_AÑOS=5, VENTANA_VAL_AÑOS=0.5, VENTANA_TEST_AÑOS=1):
-_DIR_MODO_BASE = (BASE_SISTEMA / "2. Output" / "step005_wfcv_v3" / "xgb_qt_expanding_310.5")
+# Identidad de la corrida de step005 que se va a leer. step005 la construye como
+# f"{MODELO_CV}_{modo}_{ventanas}" (_DIR_BASE) — pegar aca el valor resultante.
+#
+# UNA constante, usada en los cinco lugares donde antes estaba el literal
+# repetido: _DIR_MODO_BASE y las cuatro carpetas de salida. Con el literal
+# repetido, cambiar de corrida exigia editar cinco lineas, y olvidarse de una
+# dejaba los preds leidos de una corrida y las salidas escritas en otra — sin
+# ningun error visible. Es el mismo patron que ya usaba generar_video_fancharts.
+ETIQUETA_CORRIDA = "xgb_qt_expanding_310.5"
+
+_DIR_MODO_BASE = (BASE_SISTEMA / "2. Output" / "step005_wfcv_v3" / ETIQUETA_CORRIDA)
 
 
 class Cronometro:
@@ -418,7 +428,7 @@ if CONDICIONAR_POR == "calendario":
 # aca: a nivel de modulo dispararia con solo importar el archivo — p.ej. al
 # correr un checklist — y ahi no significa nada.
 DIR_SALIDA = (BASE_SISTEMA / "2. Output" / "step006_simulacion" /
-              "xgb_qt_expanding_310.5" / _SUF_SALIDA)
+              ETIQUETA_CORRIDA / _SUF_SALIDA)
 
 # Columna de Prophet en df_preds, si tu 'target' es un RESIDUO de Prophet que
 # hay que sumar de vuelta. None si 'target'/'y_realizado' ya es el flujo
@@ -444,7 +454,7 @@ SEED = 42
 # ── Fan charts de flujo acumulado (uno por día de origen) ───────────────────
 GENERAR_FANCHARTS    = True
 DIR_FLUJOS_ACUMULADOS = (BASE_SISTEMA / "2. Output" / "flujos_acumulados" /
-                       "xgb_qt_expanding_310.5" / _SUF_SALIDA)
+                       ETIQUETA_CORRIDA / _SUF_SALIDA)
 N_PATHS_FANCHART      = 100  # paths por origen (default aumentado para aprovechar
                                # la paralelización — con 8 cores el tiempo de cómputo
                                # es comparable al anterior con 1000 paths serial)
@@ -456,13 +466,13 @@ BANDAS_FANCHART       = None   # None = usa BANDAS_FANCHART_DEFAULT de
 # no requieren simulación adicional. Las bandas pueden no ser monótonas en h.
 GENERAR_FANCHARTS_NETO = True
 DIR_FLUJOS_NETOS = (BASE_SISTEMA / "2. Output" / "flujos_netos" /
-                  "xgb_qt_expanding_310.5" / _SUF_SALIDA)
+                  ETIQUETA_CORRIDA / _SUF_SALIDA)
 
 # ── Fanchart INTEGRADO (3 filas: neto XGBoost crudo / neto distribución / ────
 #     acumulado simulado) — imagen adicional, NO reemplaza las anteriores.
 GENERAR_FANCHARTS_INTEGRADO = True
 DIR_FLUJOS_INTEGRADOS = (BASE_SISTEMA / "2. Output" / "flujos_integrados" /
-                       "xgb_qt_expanding_310.5" / _SUF_SALIDA)
+                       ETIQUETA_CORRIDA / _SUF_SALIDA)
 
 # ── Backtest extendido: taus evaluados ───────────────────────────────────────
 # TAU_BACKTEST_ACUM : tau existente del backtest acumulado (no cambia).
