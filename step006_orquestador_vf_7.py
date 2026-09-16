@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 import warnings
 from pathlib import Path
 
@@ -228,6 +229,80 @@ BANCO_REGIMEN = "SISTEMA"
 # pega aquí el valor resultante de esa corrida — ej. con MODELO_CV="xgb",
 # EXPANDING=True, VENTANA_TRAIN_AÑOS=5, VENTANA_VAL_AÑOS=0.5, VENTANA_TEST_AÑOS=1):
 _DIR_MODO_BASE = (BASE_SISTEMA / "2. Output" / "step005_wfcv_v3" / "xgb_qt_expanding_310.5")
+
+
+class Cronometro:
+    """
+    Reloj por ETAPA, no solo total.
+
+    El total dice "tardo 5 horas" y no sirve para decidir nada. El desglose dice
+    cual de las tres etapas se lleva el tiempo —fitear las marginales, simular, o
+    dibujar los fan charts— que es lo que determina que optimizar.
+
+    Y lo mas util en una corrida larga: al cerrar el primer año_corte PROYECTA el
+    total. Saber en el minuto 5 si faltan 20 minutos o 6 horas cambia lo que uno
+    hace con la tarde.
+    """
+
+    def __init__(self, n_bloques: int, etiqueta: str = ""):
+        self.t0 = time.time()
+        self.n_bloques = max(int(n_bloques), 1)
+        self.etiqueta = etiqueta
+        self.acum: dict[str, float] = {}
+        self.bloques_hechos = 0
+        self._t_etapa = None
+        self._nombre_etapa = None
+
+    def etapa(self, nombre: str):
+        """Context manager: acumula el tiempo de esa etapa y lo loguea."""
+        crono = self
+
+        class _Ctx:
+            def __enter__(self):
+                crono._t_etapa = time.time()
+                crono._nombre_etapa = nombre
+                return crono
+
+            def __exit__(self, *exc):
+                dt = time.time() - crono._t_etapa
+                crono.acum[nombre] = crono.acum.get(nombre, 0.0) + dt
+                logger.info(f"    [t] {nombre}: {crono._fmt(dt)}")
+                return False
+        return _Ctx()
+
+    def cerrar_bloque(self) -> None:
+        """Marca un año_corte terminado y proyecta lo que falta."""
+        self.bloques_hechos += 1
+        transcurrido = time.time() - self.t0
+        if self.bloques_hechos >= self.n_bloques:
+            return
+        por_bloque = transcurrido / self.bloques_hechos
+        restante = por_bloque * (self.n_bloques - self.bloques_hechos)
+        logger.info(
+            f"  [t] bloque {self.bloques_hechos}/{self.n_bloques} en "
+            f"{self._fmt(transcurrido)} — proyeccion: faltan "
+            f"~{self._fmt(restante)}, total ~{self._fmt(transcurrido + restante)}")
+
+    def resumen(self) -> None:
+        total = time.time() - self.t0
+        logger.info(f"\n  ── Tiempos{' ' + self.etiqueta if self.etiqueta else ''} "
+                    f"─────────────────────────────")
+        for nombre, dt in sorted(self.acum.items(), key=lambda kv: -kv[1]):
+            logger.info(f"    {nombre:28s} {self._fmt(dt):>10s}   "
+                        f"{dt / total * 100:5.1f}%")
+        _otros = total - sum(self.acum.values())
+        if _otros > 0.05 * total:
+            logger.info(f"    {'(resto: I/O, concat, etc.)':28s} "
+                        f"{self._fmt(_otros):>10s}   {_otros / total * 100:5.1f}%")
+        logger.info(f"    {'TOTAL':28s} {self._fmt(total):>10s}")
+
+    @staticmethod
+    def _fmt(seg: float) -> str:
+        if seg < 60:
+            return f"{seg:.1f}s"
+        if seg < 3600:
+            return f"{seg / 60:.1f}min"
+        return f"{seg / 3600:.2f}h"
 
 
 def _avisar_salida_sin_modo() -> None:
@@ -979,7 +1054,9 @@ def main_conjunto():
                    if _CALENDARIO else ""))
 
     resultados, filas_diag = [], []
-    for año_corte, df_ref in preds[GRUPOS[0]].groupby("año_corte_regimen"):
+    _grupos_ac = list(preds[GRUPOS[0]].groupby("año_corte_regimen"))
+    crono = Cronometro(len(_grupos_ac), etiqueta="(modo conjunto)")
+    for año_corte, df_ref in _grupos_ac:
         try:
             _seed_offset = int(str(año_corte).replace("-", "")) % 100_000
         except Exception:
@@ -1043,12 +1120,13 @@ def main_conjunto():
 
         # ── Marginales por GRUPO: clave (grupo, fecha_t, h) ──────────────────
         distribuciones = {}
-        for g in GRUPOS:
-            logger.info(f"  año_corte_regimen={año_corte}: fiteando marginales de {g} "
-                        f"({len(dfg[g]):,} pares)...")
-            for (ft, h), d in fitear_distribuciones_por_horizonte(
-                    dfg[g], taus=None, n_jobs=N_JOBS).items():
-                distribuciones[(g, ft, h)] = d
+        with crono.etapa("fitear marginales"):
+            for g in GRUPOS:
+                logger.info(f"  año_corte_regimen={año_corte}: fiteando marginales de {g} "
+                            f"({len(dfg[g]):,} pares)...")
+                for (ft, h), d in fitear_distribuciones_por_horizonte(
+                        dfg[g], taus=None, n_jobs=N_JOBS).items():
+                    distribuciones[(g, ft, h)] = d
 
         # En calendario el estado inicial es irrelevante (P1 no arranca una cadena
         # de Markov), pero se deja por uniformidad de firma: secuencia_regimen lo
@@ -1065,6 +1143,7 @@ def main_conjunto():
         logger.info(f"  año_corte_regimen={año_corte}: simulando {len(origenes)} "
                     f"origenes x {N_PATHS} replicas, "
                     f"diag(A)={np.diag(A).round(3).tolist()}")
+        _t_sim = time.time()
         for i_o, ft in enumerate(origenes):
             df_por_grupo = {g: dfg[g][dfg[g]["fecha_t"] == ft] for g in GRUPOS}
             # En calendario, la secuencia de baldes de ESTE origen sale de la
@@ -1094,19 +1173,32 @@ def main_conjunto():
                                        "percentil_acum": val,
                                        "y_realizado_acum": real.get(v, np.nan)})
             if (i_o + 1) % 25 == 0:
-                logger.info(f"    origen {i_o+1}/{len(origenes)}")
+                # ETA dentro del bloque: con 476 origenes el primer aviso llega a
+                # los 25 y ya dice si esto son minutos u horas.
+                _el = time.time() - _t_sim
+                _falta = _el / (i_o + 1) * (len(origenes) - i_o - 1)
+                logger.info(f"    origen {i_o+1}/{len(origenes)} — "
+                            f"{Cronometro._fmt(_el)} transcurridos, faltan "
+                            f"~{Cronometro._fmt(_falta)}")
+        crono.acum["simular paths"] = (crono.acum.get("simular paths", 0.0)
+                                       + time.time() - _t_sim)
+        logger.info(f"    [t] simular paths: "
+                    f"{Cronometro._fmt(time.time() - _t_sim)}")
 
         if GENERAR_FANCHARTS:
             # El fan chart del CONJUNTO: la banda del acumulado de FOCO+RESTO
             # con la dependencia ya incorporada. Es el unico grafico que muestra
             # lo que aporta el metodo — sin el, el modo conjunto produce un
             # parquet de numeros y nada que mirar.
-            generar_fancharts_conjunto(
-                dfg, distribuciones, estado_por_origen, A, bloques, GRUPOS,
-                dir_salida=DIR_FLUJOS_ACUMULADOS, banco=BANCO,
-                n_paths=N_PATHS_FANCHART, seed=SEED + _seed_offset,
-                bandas=BANDAS_FANCHART,
-                col_balde="balde_th" if _CALENDARIO else None)
+            with crono.etapa("fan charts"):
+                generar_fancharts_conjunto(
+                    dfg, distribuciones, estado_por_origen, A, bloques, GRUPOS,
+                    dir_salida=DIR_FLUJOS_ACUMULADOS, banco=BANCO,
+                    n_paths=N_PATHS_FANCHART, seed=SEED + _seed_offset,
+                    bandas=BANDAS_FANCHART,
+                    col_balde="balde_th" if _CALENDARIO else None)
+
+        crono.cerrar_bloque()
 
     if not resultados:
         logger.error("Ningun año_corte_regimen pudo simularse.")
@@ -1122,6 +1214,7 @@ def main_conjunto():
     df_diag.to_csv(ruta_d, index=False)
     logger.info("\n" + df_diag.to_string(index=False))
     logger.info(f"Diagnostico Sigma_e / lambda*: {ruta_d.name}")
+    crono.resumen()
     if (df_diag["lambda_estrella"] < 1.0).any():
         logger.warning(
             "  Algun regimen necesito encogimiento (8). Un lambda* bajo indica "
