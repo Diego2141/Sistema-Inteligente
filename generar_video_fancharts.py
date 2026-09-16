@@ -230,6 +230,9 @@ def listar_pngs_ordenados(dir_flujos: Path, banco: str,
     return [ruta for _, ruta in archivos]
 
 
+_VERSIONES_LOGUEADAS = False
+
+
 def _verificar_imageio_ffmpeg() -> None:
     """
     Verifica que imageio-ffmpeg esté instalado ANTES de intentar escribir el
@@ -254,6 +257,13 @@ def _verificar_imageio_ffmpeg() -> None:
     # API legacy si falta el submodulo v2. Pero se loguea: si algo raro pasa con
     # el writer, el numero de version es el primer dato que uno quiere ver, y en
     # Anaconda es comun tener un imageio viejo arrastrado por scikit-image.
+    # El renglon de versiones sale UNA sola vez por corrida. Antes salia cuatro
+    # —una en generar_videos mas una por tipo— y un dato que se repite en cada
+    # bloque del log deja de leerse, ademas de tapar los avisos que si importan.
+    global _VERSIONES_LOGUEADAS
+    if _VERSIONES_LOGUEADAS:
+        return
+    _VERSIONES_LOGUEADAS = True
     _v = getattr(imageio, "__version__", None)
     if _v is None:
         import imageio as _base
@@ -295,7 +305,7 @@ def generar_video(tipo: str = "integrado",
 
     logger.info(f"[{tipo}] {len(rutas)} fan charts encontrados — "
                f"desde {rutas[0].name} hasta {rutas[-1].name}")
-    logger.info(f"Ensamblando video a {fps} fps "
+    logger.info(f"[{tipo}] Ensamblando video a {fps} fps "
                f"(~{len(rutas)/fps:.1f}s de duración)...")
 
     ruta_salida.parent.mkdir(parents=True, exist_ok=True)
