@@ -96,6 +96,49 @@ BASE_SISTEMA = Path(r"H:\DPINV\CARPETAS PERSONALES\DIEGO\3. Sistema Inteligente"
 MODELO       = "expanding"
 
 # ═════════════════════════════════════════════════════════════════════════════
+# COMBINACIONES POSIBLES — las 16 configuraciones validas, y la que no lo es
+# ═════════════════════════════════════════════════════════════════════════════
+# Cuatro botones gobiernan QUE se simula: PARTICIONES, PARTICION, ENTIDAD y
+# CONDICIONAR_POR. No son independientes entre si —cada uno apaga la lectura de
+# algun otro— asi que el producto cartesiano (2x2x3x3 = 36) confunde mas de lo
+# que informa. Las familias reales son cinco:
+#
+#  #  PARTICIONES  PARTICION   ENTIDAD    CONDICIONAR_POR   BANCO           N  fan charts
+#  ─  ───────────  ──────────  ─────────  ────────────────  ──────────────  ─  ──────────────────
+#  1  False        (ignorado)  SISTEMA    auto | regimen    SISTEMA         1  acum+neto+integrado
+#  2  False        bbva|glob   FOCO       auto | regimen    FOCO_<P>        1  acum+neto+integrado
+#  3  False        bbva|glob   RESTO      auto | regimen    RESTO_<P>       1  acum+neto+integrado
+#  4  True         bbva|glob   (ignorado) auto | regimen    CONJUNTO_<P>    2  solo acumulado
+#  5  True         bbva|glob   (ignorado) calendario        CONJUNTO_<P>    2  solo acumulado
+#  ─  ───────────  ──────────  ─────────  ────────────────  ──────────────  ─  ──────────────────
+#  X  False        *           *          calendario        —               —  ABORTA al importar
+#
+# Contando: 5 entidades N=1 (SISTEMA + FOCO/RESTO x bbva/globales) x 2 modos
+# admitidos = 10, mas 2 particiones x 3 modos = 6. Total 16.
+#
+# Las tres reglas que explican la tabla:
+#
+#  a) PARTICION solo se lee cuando hay una particion de la cual hablar: con
+#     PARTICIONES=True siempre, y con False solo si ENTIDAD es FOCO o RESTO.
+#     Con SISTEMA su valor no toca ninguna ruta ni ningun nombre de archivo.
+#
+#  b) ENTIDAD solo se lee con PARTICIONES=False. El modo conjunto corre las DOS
+#     caras por definicion (esa es toda la idea: rho_ij entra una sola vez, ver
+#     el comentario del boton), asi que no hay entidad que elegir.
+#
+#  c) CONDICIONAR_POR="calendario" esta soportado en la ruta CONJUNTA y NO en la
+#     N=1. La asimetria no es un descuido: main_conjunto arma la secuencia de
+#     baldes y se la pasa a secuencia_regimen(baldes_fijos=...), mientras que la
+#     ruta N=1 delega en pipeline_simulacion del modulo vf7, que llama a
+#     simular_regimen_path por dentro y no expone por donde inyectarla.
+#     Soportarlo exige tocar el motor vigente — trabajo aparte.
+#
+# La fila X se rechaza AL IMPORTAR (ver _validar_combinacion). Antes el rechazo
+# ocurria dentro del bucle de año_corte, o sea despues de cargar preds, fitear
+# las marginales y descubrir que los rho_s_* no cuadraban con la transmat: una
+# hora de computo para llegar a un error que la config ya permitia anticipar.
+
+# ═════════════════════════════════════════════════════════════════════════════
 # BOTON: N=1 (SISTEMA) o N=2 (simulacion CONJUNTA por grupos)
 # ═════════════════════════════════════════════════════════════════════════════
 # False → una sola entidad, el motor vigente. Es el caso N=1 del paper
@@ -158,10 +201,57 @@ ENTIDAD = "SISTEMA"       # "SISTEMA" | "FOCO" | "RESTO"
 # inmediato en lugar de una corrida silenciosa en el otro modo.
 CONDICIONAR_POR = "auto"
 
-if CONDICIONAR_POR not in ("auto", "regimen", "calendario"):
-    raise ValueError(
-        f"CONDICIONAR_POR={CONDICIONAR_POR!r} invalido — debe ser 'auto', "
-        f"'regimen' o 'calendario'.")
+
+def _validar_combinacion() -> None:
+    """
+    Rechaza al IMPORTAR las combinaciones que la tabla de arriba no contempla.
+
+    Los tres chequeos, y el caso real que ataja cada uno:
+
+      - CONDICIONAR_POR fuera del vocabulario: un typo ("regimenes") pasaba
+        derecho, no coincidia con la columna condicionar_por de preds_test y
+        abortaba grupo por grupo con un mensaje sobre los rho_s_*, que no es
+        donde esta el problema.
+
+      - PARTICION fuera de {bbva, globales}: no estaba validado. Un typo
+        construia BANCO="FOCO_GLOBALS", la carpeta no existia y el error salia
+        como FileNotFoundError sobre una ruta larga, sin decir que el origen
+        era una letra de menos en la config.
+
+      - calendario con PARTICIONES=False: la fila X de la tabla. Ver el
+        comentario (c) — la ruta N=1 no sabe inyectar la secuencia de baldes.
+
+    ENTIDAD se valida mas abajo, donde se deriva BANCO, porque ahi el mensaje
+    puede nombrar las tres opciones junto al string que fallo.
+    """
+    if CONDICIONAR_POR not in ("auto", "regimen", "calendario"):
+        raise ValueError(
+            f"CONDICIONAR_POR={CONDICIONAR_POR!r} invalido — debe ser 'auto', "
+            f"'regimen' o 'calendario'.")
+
+    # Solo se exige valido cuando se lo va a leer (regla (a) de la tabla): con
+    # PARTICIONES=False y ENTIDAD="SISTEMA" su valor no toca nada, y abortar por
+    # un campo inerte seria ruido.
+    if (PARTICIONES or ENTIDAD in ("FOCO", "RESTO")) and PARTICION not in ("bbva", "globales"):
+        raise ValueError(
+            f"PARTICION={PARTICION!r} invalida — debe ser 'bbva' o 'globales', "
+            f"y debe coincidir con la particion_activa con que se corrio "
+            f"step001_build_feature_matrix_v2.py y step005.")
+
+    if CONDICIONAR_POR == "calendario" and not PARTICIONES:
+        raise ValueError(
+            "CONDICIONAR_POR='calendario' con PARTICIONES=False no esta "
+            "soportado (fila X de la tabla de combinaciones). El modo "
+            "calendario solo corre por la ruta CONJUNTA: main_conjunto le pasa "
+            "la secuencia de baldes a secuencia_regimen(baldes_fijos=...), "
+            "mientras que la ruta N=1 delega en pipeline_simulacion de "
+            "step006_simulacion_paths_vf7.py, que muestrea el regimen por "
+            "dentro. Opciones: correr con PARTICIONES=True, o leer un "
+            "preds_test de una corrida de step005 con CONDICIONAR_POR="
+            "'regimen'.")
+
+
+_validar_combinacion()
 
 # Geometria del fold de la corrida de step005 que se quiere leer. NO reconfigura
 # nada: solo reconstruye el nombre del subnivel de carpeta que step005 crea con
@@ -315,6 +405,32 @@ class Cronometro:
         return f"{seg / 3600:.2f}h"
 
 
+def _log_config() -> None:
+    """
+    Imprime la fila de la tabla de combinaciones que corresponde a esta corrida.
+
+    Los cuatro botones estan repartidos en 150 lineas de comentario, y BANCO,
+    _SUF_SALIDA y SUFIJO_CONFIG se derivan de ellos en tres lugares distintos.
+    Al abrir un log viejo eso obliga a reconstruir a mano que se corrio. Cuatro
+    lineas al arrancar lo dejan dicho, y —mas util— dejan a la vista el nombre
+    de archivo que se va a escribir ANTES de las horas de computo, que es cuando
+    todavia se puede corregir la config.
+    """
+    _fam = ("CONJUNTA (N=2, algoritmo P1-P5)" if PARTICIONES
+            else f"N=1 sobre {BANCO}")
+    _part = PARTICION if (PARTICIONES or ENTIDAD in ("FOCO", "RESTO")) else "(inerte)"
+    _ent = "(ignorado: el conjunto corre las dos caras)" if PARTICIONES else ENTIDAD
+    logger.info("─" * 70)
+    logger.info(f"CONFIG  ruta={_fam}")
+    logger.info(f"CONFIG  PARTICIONES={PARTICIONES}  PARTICION={_part}  "
+                f"ENTIDAD={_ent}  CONDICIONAR_POR={CONDICIONAR_POR!r}")
+    logger.info(f"CONFIG  BANCO={BANCO}  fold={_fmt_anios(VENTANA_VAL_AÑOS)}/"
+                f"{_fmt_anios(VENTANA_TEST_AÑOS)}  corrida={ETIQUETA_CORRIDA}")
+    logger.info(f"CONFIG  salidas -> {DIR_SALIDA}")
+    logger.info(f"CONFIG  nombre  -> *_{SUFIJO_CONFIG}.parquet")
+    logger.info("─" * 70)
+
+
 def _avisar_salida_sin_modo() -> None:
     """
     Con CONDICIONAR_POR="auto" las salidas NO se separan por modo, porque el modo
@@ -429,6 +545,42 @@ if CONDICIONAR_POR == "calendario":
 # correr un checklist — y ahi no significa nada.
 DIR_SALIDA = (BASE_SISTEMA / "2. Output" / "step006_simulacion" /
               ETIQUETA_CORRIDA / _SUF_SALIDA)
+
+
+def sufijo_config(banco: str = None) -> str:
+    """
+    Identidad de la configuracion, para el NOMBRE de los archivos de salida.
+
+    Ej: CONJUNTO_BBVA_1_0.5_condregimen
+        SISTEMA_1_0.5_condauto
+        FOCO_GLOBALES_1_0.5_condregimen
+
+    POR QUE NO ALCANZA CON LA CARPETA
+    Las cuatro carpetas de salida ya separan por corrida (_SUF_SALIDA), asi que
+    dos configuraciones no se pisan MIENTRAS los archivos queden donde se
+    escribieron. Pero los .parquet de step006 son justamente los que uno copia
+    afuera para comparar dos corridas, y ahi el nombre es todo lo que sobrevive:
+    dos `simulacion_paths_SISTEMA.parquet` en la misma carpeta de trabajo son
+    indistinguibles aunque vengan de geometrias de fold distintas.
+
+    Y hay un caso en que la carpeta NO alcanza ni siquiera en su sitio: con
+    CONDICIONAR_POR="auto" el modo no se conoce al armar las rutas, asi que
+    _SUF_SALIDA no puede llevar el cond_<modo> y una corrida de calendario pisa
+    a una de regimen. El token cond<modo> del nombre no lo resuelve del todo
+    —"auto" sigue siendo "auto"— pero deja constancia de que el modo no estaba
+    declarado, que es la mitad del diagnostico.
+
+    Las tres piezas son las mismas que gobiernan la tabla de combinaciones:
+    BANCO resume PARTICIONES+PARTICION+ENTIDAD, la geometria del fold dice de
+    que corrida de step005 salieron los insumos, y cond<modo> sobre que estan
+    estratificados los phi_i(s).
+    """
+    banco = BANCO if banco is None else banco
+    return (f"{banco}_{_fmt_anios(VENTANA_VAL_AÑOS)}_{_fmt_anios(VENTANA_TEST_AÑOS)}"
+            f"_cond{CONDICIONAR_POR}")
+
+
+SUFIJO_CONFIG = sufijo_config()
 
 # Columna de Prophet en df_preds, si tu 'target' es un RESIDUO de Prophet que
 # hay que sumar de vuelta. None si 'target'/'y_realizado' ya es el flujo
@@ -1003,6 +1155,7 @@ def main_conjunto():
     justamente lo que hace el acumulado.
     """
     DIR_SALIDA.mkdir(parents=True, exist_ok=True)
+    _log_config()
     _avisar_salida_sin_modo()
     logger.info(f"MODO CONJUNTO — N={len(GRUPOS)} grupos: {GRUPOS}")
 
@@ -1215,7 +1368,7 @@ def main_conjunto():
         return
 
     df_sim = pd.DataFrame(resultados)
-    ruta = DIR_SALIDA / f"simulacion_paths_{BANCO}.parquet"
+    ruta = DIR_SALIDA / f"simulacion_paths_{SUFIJO_CONFIG}.parquet"
     df_sim.to_parquet(ruta, index=False)
     logger.info(f"Simulacion conjunta: {len(df_sim):,} filas -> {ruta.name}")
 
@@ -1235,6 +1388,7 @@ def main():
     if PARTICIONES:
         return main_conjunto()
     DIR_SALIDA.mkdir(parents=True, exist_ok=True)
+    _log_config()
     _avisar_salida_sin_modo()
 
     # ── 1. Cargar predicciones TEST reales (todos los folds, sin duplicados) ──
@@ -1531,7 +1685,7 @@ def main():
                               "p3": np.nan, "p4": np.nan})
     df_dists = pd.DataFrame(dist_rows)
     df_dists["fecha_t"] = pd.to_datetime(df_dists["fecha_t"])
-    ruta_dists = DIR_SALIDA / f"distribuciones_{BANCO}.parquet"
+    ruta_dists = DIR_SALIDA / f"distribuciones_{SUFIJO_CONFIG}.parquet"
     df_dists.to_parquet(ruta_dists, index=False)
     logger.info(f"  Guardado: {ruta_dists.name}  "
                 f"({df_dists['dist_type'].value_counts().to_dict()})")
@@ -1571,9 +1725,9 @@ def main():
     )
  
     # ── 5. Guardar resultados principales ─────────────────────────────────────
-    ruta_sim     = DIR_SALIDA / f"simulacion_paths_{BANCO}.parquet"
-    ruta_bt      = DIR_SALIDA / f"backtest_acum_{BANCO}.parquet"
-    ruta_bt_neto = DIR_SALIDA / f"backtest_neto_{BANCO}.parquet"
+    ruta_sim     = DIR_SALIDA / f"simulacion_paths_{SUFIJO_CONFIG}.parquet"
+    ruta_bt      = DIR_SALIDA / f"backtest_acum_{SUFIJO_CONFIG}.parquet"
+    ruta_bt_neto = DIR_SALIDA / f"backtest_neto_{SUFIJO_CONFIG}.parquet"
     df_sim.to_parquet(ruta_sim, index=False)
 
     # Los flags de las 3 piezas ahora pueden valer None ("no concluyente"),
@@ -1639,7 +1793,7 @@ def main():
                 pits_acum_rows.append({"tau": tau, "ventana": v, "pit": float(val)})
     if pits_acum_rows:
         pd.DataFrame(pits_acum_rows).to_parquet(
-            DIR_SALIDA / f"pits_acum_{BANCO}.parquet", index=False)
+            DIR_SALIDA / f"pits_acum_{SUFIJO_CONFIG}.parquet", index=False)
  
     # 6b. PITs netos: (tau, h, pit)
     pits_neto_rows = []
@@ -1649,7 +1803,7 @@ def main():
                 pits_neto_rows.append({"tau": tau, "h": h, "pit": float(val)})
     if pits_neto_rows:
         pd.DataFrame(pits_neto_rows).to_parquet(
-            DIR_SALIDA / f"pits_neto_{BANCO}.parquet", index=False)
+            DIR_SALIDA / f"pits_neto_{SUFIJO_CONFIG}.parquet", index=False)
  
     # 6c. Indicadores de violación: (tau, ventana, fecha_t, I_t)
     indic_rows = []
@@ -1661,7 +1815,7 @@ def main():
                     "fecha_t": pd.Timestamp(ft), "I_t": float(it)})
     if indic_rows:
         pd.DataFrame(indic_rows).to_parquet(
-            DIR_SALIDA / f"indicadores_acum_{BANCO}.parquet", index=False)
+            DIR_SALIDA / f"indicadores_acum_{SUFIJO_CONFIG}.parquet", index=False)
  
     # 6d. Duraciones entre violaciones: (tau, ventana, duracion)
     durs_rows = []
@@ -1671,17 +1825,31 @@ def main():
                 durs_rows.append({"tau": tau, "ventana": v, "duracion": float(val)})
     if durs_rows:
         pd.DataFrame(durs_rows).to_parquet(
-            DIR_SALIDA / f"duraciones_acum_{BANCO}.parquet", index=False)
+            DIR_SALIDA / f"duraciones_acum_{SUFIJO_CONFIG}.parquet", index=False)
  
     # 6e. rho_s + diag(A) por grupo HMM
     if rho_regimen_rows:
         pd.DataFrame(rho_regimen_rows).to_parquet(
-            DIR_SALIDA / f"rho_regimen_{BANCO}.parquet", index=False)
+            DIR_SALIDA / f"rho_regimen_{SUFIJO_CONFIG}.parquet", index=False)
  
     # 6f. Config del reporte (reproducibilidad)
     import json as _json
     config_reporte = {
         "banco":               BANCO,
+        # Los cuatro botones de la tabla de combinaciones, explicitos. BANCO ya
+        # resume los tres primeros, pero no es invertible: de "SISTEMA" no se
+        # recupera si PARTICION valia "bbva" o "globales" (con ENTIDAD=SISTEMA
+        # el valor es inerte, pero saber cual estaba puesto ayuda a reconstruir
+        # la sesion). Y cond<modo> del nombre de archivo no distingue un "auto"
+        # que resolvio a regimen de uno declarado.
+        "particiones":         PARTICIONES,
+        "particion":           PARTICION,
+        "entidad":             ENTIDAD,
+        "condicionar_por":     CONDICIONAR_POR,
+        "sufijo_config":       SUFIJO_CONFIG,
+        "ventana_val_anios":   VENTANA_VAL_AÑOS,
+        "ventana_test_anios":  VENTANA_TEST_AÑOS,
+        "etiqueta_corrida":    ETIQUETA_CORRIDA,
         "ventanas":            VENTANAS,
         "n_paths":             N_PATHS,
         "tau_backtest_acum":   TAU_BACKTEST_ACUM,
@@ -1691,20 +1859,20 @@ def main():
         "dir_modo":            str(DIR_MODO),
         "fecha_corrida":       pd.Timestamp.today().strftime("%Y-%m-%d %H:%M"),
     }
-    with open(DIR_SALIDA / f"config_reporte_{BANCO}.json", "w",
+    with open(DIR_SALIDA / f"config_reporte_{SUFIJO_CONFIG}.json", "w",
               encoding="utf-8") as _f:
         _json.dump(config_reporte, _f, indent=2, ensure_ascii=False)
  
     logger.info(f"  Datos reporte guardados en {DIR_SALIDA}:")
     for nombre in [
-        f"backtest_acum_{BANCO}.parquet",
-        f"backtest_neto_{BANCO}.parquet",
-        f"pits_acum_{BANCO}.parquet",
-        f"pits_neto_{BANCO}.parquet",
-        f"indicadores_acum_{BANCO}.parquet",
-        f"duraciones_acum_{BANCO}.parquet",
-        f"rho_regimen_{BANCO}.parquet",
-        f"config_reporte_{BANCO}.json",
+        f"backtest_acum_{SUFIJO_CONFIG}.parquet",
+        f"backtest_neto_{SUFIJO_CONFIG}.parquet",
+        f"pits_acum_{SUFIJO_CONFIG}.parquet",
+        f"pits_neto_{SUFIJO_CONFIG}.parquet",
+        f"indicadores_acum_{SUFIJO_CONFIG}.parquet",
+        f"duraciones_acum_{SUFIJO_CONFIG}.parquet",
+        f"rho_regimen_{SUFIJO_CONFIG}.parquet",
+        f"config_reporte_{SUFIJO_CONFIG}.json",
     ]:
         ruta = DIR_SALIDA / nombre
         logger.info(f"    {'✓' if ruta.exists() else '✗'} {nombre}")

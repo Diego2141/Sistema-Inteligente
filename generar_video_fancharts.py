@@ -119,9 +119,24 @@ else:
 # "auto" = no se separaron por modo (step006 avisa cuando eso pasa).
 CONDICIONAR_POR = "auto"      # "auto" | "regimen" | "calendario"
 
+# Las mismas validaciones que _validar_combinacion() de step006, por el mismo
+# motivo por el que este archivo replica _SUF: si los dos difieren, este script
+# acepta una config que allá no existe y busca frames que nunca se escribieron.
+# La tabla completa de combinaciones vive en la cabecera de step006 — acá solo
+# se aplica, no se repite.
 if CONDICIONAR_POR not in ("auto", "regimen", "calendario"):
     raise ValueError(f"CONDICIONAR_POR={CONDICIONAR_POR!r} invalido — debe ser "
                      f"'auto', 'regimen' o 'calendario'.")
+
+if (PARTICIONES or ENTIDAD in ("FOCO", "RESTO")) and PARTICION not in ("bbva", "globales"):
+    raise ValueError(f"PARTICION={PARTICION!r} invalida — debe ser 'bbva' o "
+                     f"'globales'.")
+
+if CONDICIONAR_POR == "calendario" and not PARTICIONES:
+    raise ValueError(
+        "CONDICIONAR_POR='calendario' con PARTICIONES=False no existe: step006 "
+        "aborta esa combinacion al importar (solo la ruta CONJUNTA soporta el "
+        "modo calendario), asi que no hay frames que ensamblar.")
 
 # Mismo predicado que _SUF_SALIDA de step006, porque es la MISMA decisión:
 # dónde escribió esos PNG. Si los dos divergen, este script busca donde no es.
@@ -194,13 +209,43 @@ def dir_frames_de(tipo: str) -> Path:
     return sub
 
 
+def sufijo_config(banco: str = None) -> str:
+    """
+    Identidad de la configuración, para el NOMBRE del mp4. Misma regla que
+    sufijo_config() de step006_orquestador_vf_7.py — las dos tienen que moverse
+    juntas, igual que etiqueta_corrida() y _SUF.
+
+    Ej: CONJUNTO_BBVA_1_0.5_condregimen
+    """
+    banco = BANCO if banco is None else banco
+    return (f"{banco}_{_fmt_anios(VENTANA_VAL_AÑOS)}_{_fmt_anios(VENTANA_TEST_AÑOS)}"
+            f"_cond{CONDICIONAR_POR}")
+
+
+SUFIJO_CONFIG = sufijo_config()
+
+
 def ruta_video_de(tipo: str, banco: str = BANCO) -> Path:
     """
-    Video de salida, junto a sus frames. El tipo va EN EL NOMBRE: antes los tres
-    habrían quedado como video_SISTEMA.mp4 y el último habría pisado a los otros
-    dos si alguna vez compartían carpeta.
+    Video de salida, junto a sus frames. Dos cosas van EN EL NOMBRE:
+
+    - el TIPO: antes los tres habrían quedado como video_SISTEMA.mp4 y el último
+      habría pisado a los otros dos si alguna vez compartían carpeta.
+
+    - la CONFIGURACIÓN (sufijo_config): el mp4 es el único entregable de este
+      pipeline que viaja fuera de su carpeta — se manda por correo, se pega en
+      una presentación. Ahí el nombre es lo único que queda, y `video_acumulado_
+      CONJUNTO_BBVA.mp4` no dice de qué geometría de fold salió ni sobre qué
+      estaban estratificados los φ_i(s). Dos corridas con CONDICIONAR_POR
+      distinto producían el mismo nombre; con "auto" (que no crea subnivel de
+      carpeta) además se pisaban en disco.
+
+    Los PNG de frames NO llevan el sufijo a propósito: los nombra
+    step006_simulacion_paths_vf7.py como fanchart_<banco>_<fecha>.png, se
+    direccionan en bloque por carpeta y nunca salen de ella. Renombrarlos
+    invalidaría los frames ya generados sin resolver nada.
     """
-    return dir_frames_de(tipo) / f"video_{tipo}_{banco}.mp4"
+    return dir_frames_de(tipo) / f"video_{tipo}_{sufijo_config(banco)}.mp4"
 
 
 ###############################################################################

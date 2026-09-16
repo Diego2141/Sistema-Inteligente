@@ -102,17 +102,73 @@ módulo de simulación, y son puras — se validan sin acceso a `H:`.
 | | `HMM_INTERNO` | ajusta el HMM por su cuenta, alineado a los folds |
 | | `CONDICIONAR_POR` | `"regimen"` (HMM) o `"calendario"` (4 baldes) |
 | | `MODO_DEBUG` | corrida de ~10 min en vez de ~60 |
-| `step006_orq_vf_7` | `PARTICIONES` | N=1 (SISTEMA) o N=2 (conjunta, P1-P5) |
+| `step006_orq_vf_7` | `PARTICIONES` | N=1 (una entidad) o N=2 (conjunta, P1-P5) |
+| | `PARTICION` | `"bbva"` o `"globales"` |
+| | `ENTIDAD` | `SISTEMA`/`FOCO`/`RESTO` — **solo se lee con `PARTICIONES=False`** |
+| | `CONDICIONAR_POR` | `"auto"` (lo deduce de `preds_test`), `"regimen"`, `"calendario"` |
 
-Dos límites conocidos de esos botones:
+### Las 16 combinaciones válidas de `step006`
 
-- **`CONDICIONAR_POR="calendario"` no está soportado en `step006`.** La
-  trayectoria de régimen se muestrea de la transmat del HMM, así que los 4
-  baldes de calendario no tienen con qué propagarse. Un guard en el orquestador
-  lo aborta leyendo la columna `condicionar_por`; falta reemplazar el muestreo
-  de `A` por el balde determinista de `t+h`.
-- **`PARTICIONES=True` en `step006` no genera fan charts.** Los tres generadores
-  esperan `rho_por_regimen` escalar.
+Los cuatro botones no son independientes —cada uno apaga la lectura de algún
+otro— así que el producto cartesiano (36) confunde. Las familias reales son
+cinco, y están tabuladas en la cabecera de `step006_orquestador_vf_7.py`:
+
+| # | `PARTICIONES` | `PARTICION` | `ENTIDAD` | `CONDICIONAR_POR` | `BANCO` | N | fan charts |
+|---|---|---|---|---|---|---|---|
+| 1 | False | (inerte) | SISTEMA | auto \| regimen | `SISTEMA` | 1 | los tres |
+| 2 | False | bbva\|globales | FOCO | auto \| regimen | `FOCO_<P>` | 1 | los tres |
+| 3 | False | bbva\|globales | RESTO | auto \| regimen | `RESTO_<P>` | 1 | los tres |
+| 4 | True | bbva\|globales | (ignorado) | auto \| regimen | `CONJUNTO_<P>` | 2 | solo acumulado |
+| 5 | True | bbva\|globales | (ignorado) | calendario | `CONJUNTO_<P>` | 2 | solo acumulado |
+| X | False | * | * | **calendario** | — | — | **aborta al importar** |
+
+Cuentan 5 entidades N=1 × 2 modos = 10, más 2 particiones × 3 modos = 6.
+
+Las tres reglas que explican la tabla:
+
+- **`PARTICION` solo se lee cuando hay partición de la cual hablar**: con
+  `PARTICIONES=True` siempre, y con `False` solo si `ENTIDAD` es FOCO o RESTO.
+  Con SISTEMA su valor no toca ninguna ruta ni ningún nombre — por eso un typo
+  ahí **no** aborta, sería ruido sobre un campo inerte.
+- **`ENTIDAD` solo se lee con `PARTICIONES=False`.** El modo conjunto corre las
+  dos caras por definición: `ρ_ij` entra una sola vez, en el `η_h` vectorial de
+  P2. Correr dos veces y sumar da `ρ_ij = 0` efectivo.
+- **`calendario` corre en la ruta CONJUNTA y no en la N=1.** `main_conjunto`
+  arma la secuencia de baldes y se la pasa a `secuencia_regimen(baldes_fijos=)`;
+  la ruta N=1 delega en `pipeline_simulacion` de vf7, que llama a
+  `simular_regimen_path` por dentro y no expone dónde inyectarla. Soportarlo
+  exige tocar el motor vigente.
+
+La fila X se rechaza **al importar** (`_validar_combinacion`). Antes el rechazo
+ocurría dentro del bucle de `año_corte`: una hora de cómputo para llegar a un
+error que la config ya permitía anticipar.
+
+`PARTICIONES=True` genera **solo el fan chart acumulado**, no los tres. No es
+una limitación pendiente: `neto` e `integrado` leen percentiles de la marginal de
+**una** entidad, y la del agregado no existe en forma cerrada — hay que
+simularla, que es exactamente lo que hace el acumulado.
+
+### El nombre del archivo lleva la configuración
+
+`sufijo_config()` — definida igual en `step006_orquestador_vf_7.py` y en
+`generar_video_fancharts.py`, y las dos se mueven juntas:
+
+```
+CONJUNTO_BBVA_1_0.5_condregimen     ← BANCO + geometría del fold + modo
+```
+
+Va en los 9 `.parquet` + el `.json` de `step006` y en el `.mp4` del video.
+Las carpetas ya separaban por corrida (`_SUF_SALIDA`), pero eso solo protege
+mientras el archivo **queda donde se escribió**, y los `.parquet` son justamente
+los que uno copia afuera para comparar dos corridas. Además hay un caso en que
+la carpeta no alcanza ni en su sitio: con `CONDICIONAR_POR="auto"` el modo no se
+conoce al armar las rutas, así que `_SUF_SALIDA` no puede llevar el
+`cond_<modo>` y una corrida de calendario pisaba a una de régimen.
+
+Los **PNG de frames no llevan el sufijo**, a propósito: los nombra
+`step006_simulacion_paths_vf7.py` como `fanchart_<banco>_<fecha>.png`, se
+direccionan en bloque por carpeta y nunca salen de ella. Renombrarlos
+invalidaría los frames ya generados sin resolver nada.
 
 ### Convención de versiones: hay muchas, importa cuál
 
