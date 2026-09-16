@@ -334,6 +334,16 @@ Checklists vigentes:
 | `aux_verificar_pos_ventana.py` | ventana deslizante de rezagos, máscara point-in-time, recencia |
 | `aux_verificar_particion.py` | particiones, mapeo CCOVN, paridad de esquema, orden determinista |
 | `aux_verificar_ccovn_particion.py` | roles propio/contraparte por entidad |
+| `aux_verificar_estructura_paths.py` | esquema de los `simulacion_paths_*.parquet` entre corridas |
+
+`aux_verificar_estructura_paths.py` compara dos entregables de `step006` para
+poder afirmar que sirven como el mismo insumo aguas abajo. Vale la pena porque
+las dos ramas del orquestador arman ese parquet **por separado** —`main_conjunto`
+con su propio `resultados.append`, y `main` (N=1) vía `pipeline_simulacion` de
+vf7— y nada ata los dos diccionarios. Juzga como estructura las columnas, su
+orden, la familia de dtype, la clave `(fecha_t, ventana, tau)`, los nulos y la
+grilla de `tau`; informa sin fallar el rango de fechas y la grilla de `ventana`,
+que son perillas de configuración y no contrato.
 
 (`aux_verificar_multioutput.py` no sigue este patrón: es un script de sondeo que
 decide qué ruta hacia el modelo multi-output es viable con la versión de XGBoost
