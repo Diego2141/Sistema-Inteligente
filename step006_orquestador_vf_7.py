@@ -238,6 +238,14 @@ def _validar_combinacion() -> None:
             f"y debe coincidir con la particion_activa con que se corrio "
             f"step001_build_feature_matrix_v2.py y step005.")
 
+    # ENTIDAD se valida SIEMPRE, tambien con PARTICIONES=True donde su valor se
+    # ignora. Antes la rama conjunta ni la miraba, asi que un ENTIDAD="FOCA"
+    # pasaba derecho — y el usuario se quedaba pensando que habia elegido algo.
+    if ENTIDAD not in ("SISTEMA", "FOCO", "RESTO"):
+        raise ValueError(
+            f"ENTIDAD={ENTIDAD!r} no es valida. Opciones: 'SISTEMA', 'FOCO', "
+            f"'RESTO'.")
+
     if CONDICIONAR_POR == "calendario" and not PARTICIONES:
         raise ValueError(
             "CONDICIONAR_POR='calendario' con PARTICIONES=False no esta "
@@ -429,6 +437,28 @@ def _log_config() -> None:
     logger.info(f"CONFIG  salidas -> {DIR_SALIDA}")
     logger.info(f"CONFIG  nombre  -> *_{SUFIJO_CONFIG}.parquet")
     logger.info("─" * 70)
+
+
+def _avisar_entidad_ignorada() -> None:
+    """
+    Con PARTICIONES=True, ENTIDAD no se lee (regla (b) de la tabla). Si alguien
+    la movio esperando otro resultado, hay que DECIRSELO.
+
+    El caso real: cambiar ENTIDAD de "FOCO" a "RESTO" con PARTICIONES=True y
+    obtener el mismo archivo, con el mismo nombre. Lo correcto —las dos corridas
+    SON la misma— pero indistinguible de que el boton no funcione. El silencio es
+    la peor de las dos respuestas posibles: un aviso convierte media hora de
+    desconcierto en una linea de log.
+    """
+    if PARTICIONES and ENTIDAD != "SISTEMA":
+        logger.warning(
+            f"ENTIDAD={ENTIDAD!r} NO se usa con PARTICIONES=True: el modo "
+            f"conjunto corre las dos caras de la particion por definicion "
+            f"(rho_ij entra una sola vez, en el eta_h vectorial de P2), asi que "
+            f"no hay entidad que elegir. Esta corrida es identica a la de "
+            f"ENTIDAD='FOCO' y a la de ENTIDAD='RESTO' — mismo BANCO={BANCO}, "
+            f"mismas salidas. Para el fan chart de UN grupo por separado: "
+            f"PARTICIONES=False con ENTIDAD='{ENTIDAD}'.")
 
 
 def _avisar_salida_sin_modo() -> None:
@@ -1156,6 +1186,7 @@ def main_conjunto():
     """
     DIR_SALIDA.mkdir(parents=True, exist_ok=True)
     _log_config()
+    _avisar_entidad_ignorada()
     _avisar_salida_sin_modo()
     logger.info(f"MODO CONJUNTO — N={len(GRUPOS)} grupos: {GRUPOS}")
 
@@ -1389,6 +1420,7 @@ def main():
         return main_conjunto()
     DIR_SALIDA.mkdir(parents=True, exist_ok=True)
     _log_config()
+    _avisar_entidad_ignorada()
     _avisar_salida_sin_modo()
 
     # ── 1. Cargar predicciones TEST reales (todos los folds, sin duplicados) ──

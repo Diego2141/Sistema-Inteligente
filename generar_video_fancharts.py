@@ -103,16 +103,17 @@ def etiqueta_corrida(banco: str) -> str:
     return f"{banco}_{_fmt_anios(VENTANA_VAL_AÑOS)}_{_fmt_anios(VENTANA_TEST_AÑOS)}"
 
 
+# ENTIDAD se valida SIEMPRE, también con PARTICIONES=True donde su valor se
+# ignora: antes la rama del conjunto ni la miraba y un typo pasaba derecho.
+if ENTIDAD not in ("SISTEMA", "FOCO", "RESTO"):
+    raise ValueError(f"ENTIDAD={ENTIDAD!r} no es valida. Opciones: "
+                     f"'SISTEMA', 'FOCO', 'RESTO'.")
+
 if not PARTICIONES:
-    if ENTIDAD == "SISTEMA":
-        BANCO = "SISTEMA"
-    elif ENTIDAD in ("FOCO", "RESTO"):
-        BANCO = f"{ENTIDAD}_{PARTICION.upper()}"
-    else:
-        raise ValueError(f"ENTIDAD={ENTIDAD!r} no es valida. Opciones: "
-                         f"'SISTEMA', 'FOCO', 'RESTO'.")
+    BANCO = "SISTEMA" if ENTIDAD == "SISTEMA" else f"{ENTIDAD}_{PARTICION.upper()}"
 else:
-    # El conjunto: step006 nombra el agregado así (main_conjunto).
+    # El conjunto: step006 nombra el agregado así (main_conjunto). ENTIDAD no
+    # entra acá — ver _avisar_entidad_ignorada().
     BANCO = f"CONJUNTO_{PARTICION.upper()}"
 
 # Sobre que estaba condicionada la corrida de step006 que dejo estos PNG.
@@ -380,6 +381,31 @@ def generar_video(tipo: str = "integrado",
     return ruta_salida
 
 
+def _avisar_entidad_ignorada() -> None:
+    """
+    Con PARTICIONES=True, ENTIDAD no se lee. Si alguien la movió esperando otro
+    video, hay que DECÍRSELO.
+
+    El caso real que lo motivó: correr con ENTIDAD="FOCO" y después con
+    ENTIDAD="RESTO", y obtener el mismo mp4 con el mismo nombre. Es lo correcto
+    —las dos corridas SON la misma, BANCO=CONJUNTO_BBVA en ambas— pero es
+    indistinguible de que el botón esté roto. El silencio es la peor de las dos
+    respuestas posibles.
+
+    Va dentro de la corrida y no a nivel de módulo, igual que en step006: un
+    warning al importar saldría también al cargar el archivo desde un checklist,
+    donde no significa nada (y ya rompió cuatro harnesses una vez).
+    """
+    if PARTICIONES and ENTIDAD != "SISTEMA":
+        logger.warning(
+            f"ENTIDAD={ENTIDAD!r} NO se usa con PARTICIONES=True: step006 genera "
+            f"UN solo juego de frames, los del agregado (BANCO={BANCO}). Este "
+            f"video es identico al de ENTIDAD='FOCO' y al de ENTIDAD='RESTO'. "
+            f"Para ver {ENTIDAD}_{PARTICION.upper()} por separado hace falta "
+            f"correr step006 con PARTICIONES=False y ENTIDAD='{ENTIDAD}', que "
+            f"genera SUS frames; despues este script con la misma config.")
+
+
 def generar_videos(tipos: list | None = None, banco: str = BANCO,
                    fps: int = FPS) -> dict:
     """
@@ -391,6 +417,7 @@ def generar_videos(tipos: list | None = None, banco: str = BANCO,
     otro BANCO), se perdían los dos videos que sí se podían armar.
     """
     tipos = list(TIPOS_FANCHART if tipos is None else tipos)
+    _avisar_entidad_ignorada()
     _verificar_imageio_ffmpeg()      # una vez, no una por tipo
     out = {}
     for tipo in tipos:
