@@ -134,8 +134,12 @@ try:
     spec.loader.exec_module(m)
 
     configs = m.expandir(m.GRILLA, m.CORRIDAS_STEP005)
-    chk("1. la grilla expande a 8 configuraciones", len(configs) == 8,
-        f"{len(configs)}")
+    # Derivado, no hardcodeado: el harness sigue a la grilla vigente en vez de
+    # fallar por contabilidad cada vez que alguien la recorta.
+    esperadas = len(m.expandir(m.GRILLA)) * len(m.CORRIDAS_STEP005)
+    chk("1. la grilla expande al producto grilla x corridas de step005",
+        len(configs) == esperadas,
+        f"{len(configs)} = {len(m.expandir(m.GRILLA))} x {len(m.CORRIDAS_STEP005)}")
 
     listas, hechas, sininputs, avisos = [], [], [], []
     for cfg in configs:
@@ -161,31 +165,53 @@ try:
             print(f"        - {x}")
     print()
 
+    # Las expectativas se DERIVAN de la grilla y del arbol, no se hardcodean:
+    # el arbol tiene salidas preexistentes SOLO para bbva expanding, asi que
+    # esas son las que deben salir YA HECHAS sea cual sea la grilla vigente.
+    esp_hechas = [c for c in configs
+                  if c["PARTICION"] == "bbva" and "expanding" in c["ETIQUETA_CORRIDA"]]
     chk("2. ninguna configuracion queda sin inputs", not sininputs,
         f"{len(sininputs)} sin inputs")
-    chk("3. las 2 de bbva expanding se detectan YA HECHAS", len(hechas) == 2,
-        f"{len(hechas)}: {[h[0].split('| ')[-1] for h in hechas]}")
-    chk("4. quedan 6 a correr (globales x4 + bbva rolling x2)", len(listas) == 6,
-        f"{len(listas)}")
+    chk("3. las de bbva expanding se detectan YA HECHAS",
+        len(hechas) == len(esp_hechas),
+        f"{len(hechas)}/{len(esp_hechas)}: {[h[0].split('| ')[-1] for h in hechas]}")
+    chk("4. el resto queda LISTA, y nada se pierde",
+        len(listas) == len(configs) - len(esp_hechas)
+        and len(listas) + len(hechas) == len(configs),
+        f"{len(listas)} a correr de {len(configs)}")
+    # El aviso del nombre legado solo aplica si la grilla incluye la
+    # configuracion que en el arbol tiene ese nombre (bbva expanding regimen).
+    hay_legado = any(c["PARTICION"] == "bbva" and "expanding" in c["ETIQUETA_CORRIDA"]
+                     and c["CONDICIONAR_POR"] == "regimen" for c in configs)
     chk("5. la salida con nombre LEGADO se reconoce igual",
-        any("hecha con el nombre ANTERIOR" in a for a in avisos),
-        next((a[:60] for a in avisos if "ANTERIOR" in a), "sin aviso"))
-    chk("6. las 6 a correr leen los 4 folds de cada grupo",
+        (not hay_legado) or any("hecha con el nombre ANTERIOR" in a for a in avisos),
+        next((a[:60] for a in avisos if "ANTERIOR" in a), "n/a"))
+    chk("6. las que van a correr leen los 4 folds de cada grupo",
         all(f_ and set(f_.values()) == {4} for _, _, f_, _ in listas))
     chk("7. el modo conjunto carga las DOS caras de la particion",
         all(len(g_) == 2 for _, g_, _, _ in listas))
 
     # Las de calendario tienen que resolver al subnivel cond_calendario
-    cal = [m.derivar(c) for c in configs if c["CONDICIONAR_POR"] == "calendario"]
+    # Calendario se prueba SIEMPRE, este o no en la grilla vigente: un all()
+    # sobre una lista vacia pasa trivialmente, y un chequeo que no puede fallar
+    # es decorativo. Se construyen las configuraciones a proposito.
+    cal = [m.derivar(m.canonicalizar(
+        {"PARTICIONES": True, "PARTICION": p_, "ENTIDAD": "SISTEMA",
+         "CONDICIONAR_POR": "calendario", **e})) 
+        for p_ in ("globales", "bbva") for e in m.CORRIDAS_STEP005]
     chk("8. las de calendario leen del subnivel cond_calendario",
-        all("cond_calendario" in str(d["DIR_MODO"]) for d in cal),
-        f"{len(cal)} configuraciones")
+        cal and all("cond_calendario" in str(d["DIR_MODO"]) for d in cal),
+        f"{len(cal)} configuraciones (construidas, esten o no en la grilla)")
     chk("9. las de calendario ESCRIBEN en cond_calendario",
-        all("cond_calendario" in str(d["DIR_SALIDA"]) for d in cal))
+        cal and all("cond_calendario" in str(d["DIR_SALIDA"]) for d in cal))
 
-    reg = [m.derivar(c) for c in configs if c["CONDICIONAR_POR"] == "regimen"]
+    reg = [m.derivar(m.canonicalizar(
+        {"PARTICIONES": True, "PARTICION": p_, "ENTIDAD": "SISTEMA",
+         "CONDICIONAR_POR": "regimen", **e}))
+        for p_ in ("globales", "bbva") for e in m.CORRIDAS_STEP005]
     chk("10. [neg] las de regimen NO leen del subnivel de calendario",
-        all("cond_calendario" not in str(d["DIR_MODO"]) for d in reg))
+        reg and all("cond_calendario" not in str(d["DIR_MODO"]) for d in reg),
+        f"{len(reg)} configuraciones")
 
     # ── Control negativo fuerte: si el preds dice otro modo, se detecta ──────
     d_cal = WF / "xgb_qt_rolling_30.51" / "FOCO_GLOBALES_1_0.5" / "cond_calendario"
@@ -193,10 +219,9 @@ try:
         df = pd.read_parquet(f)
         df["condicionar_por"] = "regimen"          # discordante a proposito
         df.to_parquet(f, index=False)
-    cfg_mal = next(c for c in configs
-                   if c["CONDICIONAR_POR"] == "calendario"
-                   and c["PARTICION"] == "globales"
-                   and "rolling" in c["ETIQUETA_CORRIDA"])
+    cfg_mal = m.canonicalizar(
+        {"PARTICIONES": True, "PARTICION": "globales", "ENTIDAD": "SISTEMA",
+         "CONDICIONAR_POR": "calendario", **m.CORRIDAS_STEP005[-1]})
     probs, _ = m.validar(cfg_mal, m.derivar(cfg_mal))
     chk("11. [neg] un preds_test del OTRO modo se detecta en fase 0",
         any("CONDICIONAR_POR" in p for p in probs), str(probs)[:80])
@@ -207,10 +232,9 @@ try:
         df = pd.read_parquet(f)
         df.drop(columns=[c for c in df.columns if c.startswith("rho_s_")]).to_parquet(
             f, index=False)
-    cfg_mal2 = next(c for c in configs
-                    if c["CONDICIONAR_POR"] == "regimen"
-                    and c["PARTICION"] == "bbva"
-                    and "rolling" in c["ETIQUETA_CORRIDA"])
+    cfg_mal2 = m.canonicalizar(
+        {"PARTICIONES": True, "PARTICION": "bbva", "ENTIDAD": "SISTEMA",
+         "CONDICIONAR_POR": "regimen", **m.CORRIDAS_STEP005[-1]})
     probs, _ = m.validar(cfg_mal2, m.derivar(cfg_mal2))
     chk("12. [neg] sin columnas rho_s_* se detecta en fase 0",
         any("rho_s_" in p for p in probs), str(probs)[:80])

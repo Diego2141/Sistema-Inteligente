@@ -58,7 +58,7 @@ GRILLA = {
     "PARTICIONES":     [True],
     "PARTICION":       ["globales", "bbva"],
     "ENTIDAD":         ["SISTEMA"],   # inerte con PARTICIONES=True
-    "CONDICIONAR_POR": ["regimen", "calendario"],
+    "CONDICIONAR_POR": ["regimen"],   # agregar "calendario" cuando toque
 }
 
 # ── Corridas de step005 a leer — PARAMETROS ACOPLADOS ───────────────────────
