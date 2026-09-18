@@ -66,12 +66,16 @@ GRILLA = {
 # nombra la carpeta de step005 y las dos ventanas nombran el subnivel de adentro,
 # asi que solo existen en disco las combinaciones que step005 produjo.
 #
-# OJO con leer la geometria del fold desde el NOMBRE de la etiqueta: no siempre
-# se corresponde. Las dos corridas de abajo usan val=1 / test=0.5 aunque una se
-# llame "30.51" — el sufijo de la etiqueta lo genero step005 con SUS constantes,
-# que no tienen por que ser las que step006 necesita para armar el subnivel.
-# La geometria se declara aca explicitamente; el nombre de la carpeta no es
-# fuente de verdad.
+# step005 arma la etiqueta como f"{MODELO_CV}_{modo}_{TRAIN}{VAL}{TEST}", una
+# concatenacion pelada de los tres numeros:
+#
+#     xgb_qt_expanding_310.5  ->  "3" + "1" + "0.5"   (train 3, val 1, test 0.5)
+#     xgb_qt_rolling_310.5    ->  idem, con EXPANDING=False
+#
+# Ojo con confundirla con una carpeta de otra geometria: un "xgb_qt_rolling_30.51"
+# seria "3"+"0.5"+"1", o sea val y test INVERTIDOS — otra corrida, otro subnivel.
+# La geometria se declara aca explicitamente y no se deduce del nombre; si las
+# dos no coinciden, el subnivel que step006 arma no existe en disco.
 #
 # Cada entrada es un TRIPLE que se aplica ENTERO y la grilla se cruza contra
 # ella. Se mantiene asi aunque hoy las dos compartan geometria: el dia que entre
@@ -83,7 +87,7 @@ GRILLA = {
 CORRIDAS_STEP005 = [
     {"ETIQUETA_CORRIDA": "xgb_qt_expanding_310.5",
      "VENTANA_VAL_AÑOS": 1, "VENTANA_TEST_AÑOS": 0.5},
-    {"ETIQUETA_CORRIDA": "xgb_qt_rolling_30.51",
+    {"ETIQUETA_CORRIDA": "xgb_qt_rolling_310.5",
      "VENTANA_VAL_AÑOS": 1, "VENTANA_TEST_AÑOS": 0.5},
 ]
 
@@ -553,7 +557,7 @@ def autotest() -> int:
     d_roll = derivar(expandir(
         {"PARTICIONES": [True], "PARTICION": ["globales"],
          "ENTIDAD": ["SISTEMA"], "CONDICIONAR_POR": ["regimen"]},
-        [{"ETIQUETA_CORRIDA": "xgb_qt_rolling_30.51",
+        [{"ETIQUETA_CORRIDA": "xgb_qt_rolling_310.5",
           "VENTANA_VAL_AÑOS": 0.5, "VENTANA_TEST_AÑOS": 1}])[0])
     chk("9b. el triple acoplado se aplica entero (etiqueta + las dos ventanas)",
         "rolling" in str(d_roll["DIR_SALIDA"])

@@ -52,10 +52,29 @@ H = Path(tempfile.mkdtemp())
 OUT = H / "2. Output"
 WF = OUT / "step005_wfcv_v3"
 
-ETIQUETAS = ["xgb_qt_expanding_310.5", "xgb_qt_rolling_30.51"]
+# La config REAL de la grilla, para no duplicarla: el arbol de prueba se
+# construye con las etiquetas y la geometria de fold que la grilla va a buscar.
+# Hardcodearlas hacia que el harness validara contra un disco imaginario
+# distinto del que la grilla lee — el peor tipo de test verde.
+_g = (REPO / "aux_correr_grilla_step006.py").read_text(encoding="utf-8")
+_ns = {"__file__": str(REPO / "aux_correr_grilla_step006.py")}
+exec(compile(_g.split("\n# Botones que NO varian")[0], "<cfg>", "exec"), _ns)
+CORRIDAS = _ns["CORRIDAS_STEP005"]
+
 PARTICIONES = ["GLOBALES", "BBVA"]
 MODOS = ["regimen", "calendario"]
 N_ESTADOS = 3
+
+
+def _fmt(x):
+    """0.5 -> '0.5', 1 -> '1'. Misma regla que step005/006."""
+    return f"{x:g}"
+
+
+def subnivel(banco, corrida):
+    """<banco>_<val>_<test>, como lo arma etiqueta_corrida() de step006."""
+    return (f"{banco}_{_fmt(corrida['VENTANA_VAL_AÑOS'])}"
+            f"_{_fmt(corrida['VENTANA_TEST_AÑOS'])}")
 
 
 def preds(banco, modo):
@@ -76,13 +95,13 @@ def preds(banco, modo):
     return pd.DataFrame(filas)
 
 
-for etq in ETIQUETAS:
+for corrida in CORRIDAS:
+    etq = corrida["ETIQUETA_CORRIDA"]
     for p in PARTICIONES:
         for modo in MODOS:
             for cara in ("FOCO", "RESTO"):
                 banco = f"{cara}_{p}"
-                # el subnivel usa val=1 / test=0.5 (el hecho declarado)
-                d = WF / etq / f"{banco}_1_0.5"
+                d = WF / etq / subnivel(banco, corrida)
                 if modo == "calendario":
                     d = d / "cond_calendario"
                 d.mkdir(parents=True, exist_ok=True)
@@ -100,12 +119,14 @@ pd.DataFrame({"año_corte": ["2024-01-01"] * N_ESTADOS**2,
 
 # Salidas YA HECHAS de bbva expanding: la de regimen con el nombre LEGADO
 # (anterior a sufijo_config) y la de calendario con el nombre nuevo.
-sim = OUT / "step006_simulacion" / "xgb_qt_expanding_310.5" / "CONJUNTO_BBVA_1_0.5"
+_exp = next(c for c in CORRIDAS if "expanding" in c["ETIQUETA_CORRIDA"])
+sim = (OUT / "step006_simulacion" / _exp["ETIQUETA_CORRIDA"]
+       / subnivel("CONJUNTO_BBVA", _exp))
 sim.mkdir(parents=True, exist_ok=True)
 (sim / "simulacion_paths_CONJUNTO_BBVA.parquet").touch()
 (sim / "cond_calendario").mkdir(exist_ok=True)
 (sim / "cond_calendario" /
- "simulacion_paths_CONJUNTO_BBVA_1_0.5_condcalendario.parquet").touch()
+ f"simulacion_paths_{subnivel('CONJUNTO_BBVA', _exp)}_condcalendario.parquet").touch()
 
 print(f"Arbol de prueba en {H}\n")
 
@@ -214,7 +235,9 @@ try:
         f"{len(reg)} configuraciones")
 
     # ── Control negativo fuerte: si el preds dice otro modo, se detecta ──────
-    d_cal = WF / "xgb_qt_rolling_30.51" / "FOCO_GLOBALES_1_0.5" / "cond_calendario"
+    _roll = CORRIDAS[-1]
+    d_cal = (WF / _roll["ETIQUETA_CORRIDA"]
+             / subnivel("FOCO_GLOBALES", _roll) / "cond_calendario")
     for f in d_cal.glob("*.parquet"):
         df = pd.read_parquet(f)
         df["condicionar_por"] = "regimen"          # discordante a proposito
@@ -227,7 +250,7 @@ try:
         any("CONDICIONAR_POR" in p for p in probs), str(probs)[:80])
 
     # ── Y si faltan las columnas rho_s_* ────────────────────────────────────
-    d_reg = WF / "xgb_qt_rolling_30.51" / "FOCO_BBVA_1_0.5"
+    d_reg = WF / _roll["ETIQUETA_CORRIDA"] / subnivel("FOCO_BBVA", _roll)
     for f in d_reg.glob("*.parquet"):
         df = pd.read_parquet(f)
         df.drop(columns=[c for c in df.columns if c.startswith("rho_s_")]).to_parquet(
