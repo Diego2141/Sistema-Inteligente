@@ -8,6 +8,12 @@ Construye un arbol de directorios que imita el H: real —step005 corrido con
 PARTICIONES=True para bbva y globales, en expanding y rolling, en regimen y
 calendario, todos con val=1 / test=0.5— y corre la FASE 0 de verdad contra el.
 
+NO MIRA H:. Construye su propio arbol en un directorio temporal y redirige
+BASE_SISTEMA ahi. Valida la LOGICA de la grilla, no que tus preds existan — eso
+lo dice la fase 0 de aux_correr_grilla_step006.py con EJECUTAR=False, que si lee
+el disco real. Este harness se corre despues de tocar el codigo, no antes de
+cada corrida.
+
 POR QUE EXISTE APARTE DEL AUTOTEST DE LA GRILLA
 El autotest de aux_correr_grilla_step006 valida la expansion, la derivacion y la
 plomeria del subproceso, pero no puede ejercitar la fase 0 completa: sin una
@@ -32,7 +38,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-REPO = Path("/home/user/Sistema-Inteligente")
+# La carpeta donde vive este archivo, no una ruta absoluta: el script se
+# copia a H: junto a los demas y ahi una ruta del contenedor no existe.
+REPO = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO))
 
 OK = FALLA = 0
