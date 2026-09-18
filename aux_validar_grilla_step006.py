@@ -1,0 +1,224 @@
+# -*- coding: utf-8 -*-
+"""
+aux_validar_grilla_step006.py — ¿la grilla clasifica bien las 8 configuraciones?
+
+    python aux_validar_grilla_step006.py
+
+Construye un arbol de directorios que imita el H: real —step005 corrido con
+PARTICIONES=True para bbva y globales, en expanding y rolling, en regimen y
+calendario, todos con val=1 / test=0.5— y corre la FASE 0 de verdad contra el.
+
+POR QUE EXISTE APARTE DEL AUTOTEST DE LA GRILLA
+El autotest de aux_correr_grilla_step006 valida la expansion, la derivacion y la
+plomeria del subproceso, pero no puede ejercitar la fase 0 completa: sin una
+jerarquia de carpetas con preds_test de verdad, validar() sale temprano y el
+camino interesante nunca se recorre.
+
+Eso oculto un bug real: validar() usaba DIR_MODO —que es dir_modo_de(GRUPOS[0]),
+la carpeta de FOCO— para los DOS grupos, y reportaba "sin preds_test de RESTO_*"
+en las 8 configuraciones, todas perfectas. step006 resuelve una carpeta por
+grupo dentro del bucle de cargar_preds_de_grupos. El bug sobrevivio a 22 checks
+y lo encontro este harness en la primera corrida.
+
+Ejercita el CODIGO DE PRODUCCION: copia step006 y la grilla con BASE_SISTEMA y
+ORQ redirigidos al arbol de prueba, sin reimplementar nada.
+"""
+import re
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+REPO = Path("/home/user/Sistema-Inteligente")
+sys.path.insert(0, str(REPO))
+
+OK = FALLA = 0
+
+
+def chk(n, c, d=""):
+    global OK, FALLA
+    print(f"[{'OK' if c else 'FALLA'}] {n}" + (f"  — {d}" if d else ""))
+    if c:
+        OK += 1
+    else:
+        FALLA += 1
+
+
+# ── 1. El arbol de H: ────────────────────────────────────────────────────────
+H = Path(tempfile.mkdtemp())
+OUT = H / "2. Output"
+WF = OUT / "step005_wfcv_v3"
+
+ETIQUETAS = ["xgb_qt_expanding_310.5", "xgb_qt_rolling_30.51"]
+PARTICIONES = ["GLOBALES", "BBVA"]
+MODOS = ["regimen", "calendario"]
+N_ESTADOS = 3
+
+
+def preds(banco, modo):
+    """Un preds_test con las columnas que la fase 0 verifica."""
+    f = pd.bdate_range("2024-04-30", periods=40)
+    filas = []
+    for ft in f:
+        for h in (2, 5, 22):
+            filas.append({
+                "fecha_t": ft, "h": h, "banco": banco,
+                "y_realizado": 0.0, "regimen_hmm": 0,
+                "año_corte_regimen": "2024-01-01",
+                "condicionar_por": modo,
+                **{f"rho_s_{s}": -0.3 for s in range(N_ESTADOS)},
+                "rho_ij": -0.04,
+                **({"balde_th": 1} if modo == "calendario" else {}),
+            })
+    return pd.DataFrame(filas)
+
+
+for etq in ETIQUETAS:
+    for p in PARTICIONES:
+        for modo in MODOS:
+            for cara in ("FOCO", "RESTO"):
+                banco = f"{cara}_{p}"
+                # el subnivel usa val=1 / test=0.5 (el hecho declarado)
+                d = WF / etq / f"{banco}_1_0.5"
+                if modo == "calendario":
+                    d = d / "cond_calendario"
+                d.mkdir(parents=True, exist_ok=True)
+                for fold in (1, 2, 3, 4):
+                    preds(banco, modo).to_parquet(
+                        d / f"preds_test_fold{fold}_{banco}_20240430.parquet",
+                        index=False)
+
+# transmat del HMM (solo hace falta para el modo regimen)
+pd.DataFrame({"año_corte": ["2024-01-01"] * N_ESTADOS**2,
+              "i": np.repeat(range(N_ESTADOS), N_ESTADOS),
+              "j": list(range(N_ESTADOS)) * N_ESTADOS,
+              "p": [1 / N_ESTADOS] * N_ESTADOS**2}).to_parquet(
+    OUT / "transmat_hmm_SISTEMA.parquet", index=False)
+
+# Salidas YA HECHAS de bbva expanding: la de regimen con el nombre LEGADO
+# (anterior a sufijo_config) y la de calendario con el nombre nuevo.
+sim = OUT / "step006_simulacion" / "xgb_qt_expanding_310.5" / "CONJUNTO_BBVA_1_0.5"
+sim.mkdir(parents=True, exist_ok=True)
+(sim / "simulacion_paths_CONJUNTO_BBVA.parquet").touch()
+(sim / "cond_calendario").mkdir(exist_ok=True)
+(sim / "cond_calendario" /
+ "simulacion_paths_CONJUNTO_BBVA_1_0.5_condcalendario.parquet").touch()
+
+print(f"Arbol de prueba en {H}\n")
+
+# ── 2. Copias del codigo con las rutas redirigidas ──────────────────────────
+orq_tmp = REPO / "_val_step006.py"
+gri_tmp = REPO / "_val_grilla.py"
+try:
+    src = (REPO / "step006_orquestador_vf_7.py").read_text(encoding="utf-8")
+    src2, n = re.subn(r'(?m)^BASE_SISTEMA = Path\(r"[^"]*"\)',
+                      f'BASE_SISTEMA = Path(r"{H}")', src, count=1)
+    assert n == 1, "no se pudo redirigir BASE_SISTEMA"
+    orq_tmp.write_text(src2, encoding="utf-8")
+
+    g = (REPO / "aux_correr_grilla_step006.py").read_text(encoding="utf-8")
+    g, n = re.subn(r'(?m)^ORQ = REPO / "step006_orquestador_vf_7\.py"',
+                   f'ORQ = REPO / "{orq_tmp.name}"', g, count=1)
+    assert n == 1, "no se pudo redirigir ORQ"
+    g = re.sub(r'(?m)^EJECUTAR = True', 'EJECUTAR = False', g, count=1)
+    gri_tmp.write_text(g, encoding="utf-8")
+
+    # ── 3. Correr la fase 0 real ────────────────────────────────────────────
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("valg", gri_tmp)
+    m = importlib.util.module_from_spec(spec)
+    sys.modules["valg"] = m
+    spec.loader.exec_module(m)
+
+    configs = m.expandir(m.GRILLA, m.CORRIDAS_STEP005)
+    chk("1. la grilla expande a 8 configuraciones", len(configs) == 8,
+        f"{len(configs)}")
+
+    listas, hechas, sininputs, avisos = [], [], [], []
+    for cfg in configs:
+        d = m.derivar(cfg)
+        probs, info = m.validar(cfg, d)
+        etq = f"{cfg['ETIQUETA_CORRIDA']} | {d.get('SUFIJO_CONFIG', '?')}"
+        avisos += info.get("avisos", [])
+        if probs:
+            sininputs.append((etq, probs))
+        elif info.get("hecha"):
+            hechas.append((etq, info["salida"].name))
+        else:
+            listas.append((etq, d["GRUPOS"], info.get("folds"), info.get("origenes")))
+
+    print()
+    for e, g_, f_, o_ in listas:
+        print(f"  [LISTA]     {e}  grupos={g_} folds={list(f_.values())} origenes={o_}")
+    for e, nom in hechas:
+        print(f"  [YA HECHA]  {e}  -> {nom}")
+    for e, p_ in sininputs:
+        print(f"  [SIN INPUTS] {e}")
+        for x in p_:
+            print(f"        - {x}")
+    print()
+
+    chk("2. ninguna configuracion queda sin inputs", not sininputs,
+        f"{len(sininputs)} sin inputs")
+    chk("3. las 2 de bbva expanding se detectan YA HECHAS", len(hechas) == 2,
+        f"{len(hechas)}: {[h[0].split('| ')[-1] for h in hechas]}")
+    chk("4. quedan 6 a correr (globales x4 + bbva rolling x2)", len(listas) == 6,
+        f"{len(listas)}")
+    chk("5. la salida con nombre LEGADO se reconoce igual",
+        any("hecha con el nombre ANTERIOR" in a for a in avisos),
+        next((a[:60] for a in avisos if "ANTERIOR" in a), "sin aviso"))
+    chk("6. las 6 a correr leen los 4 folds de cada grupo",
+        all(f_ and set(f_.values()) == {4} for _, _, f_, _ in listas))
+    chk("7. el modo conjunto carga las DOS caras de la particion",
+        all(len(g_) == 2 for _, g_, _, _ in listas))
+
+    # Las de calendario tienen que resolver al subnivel cond_calendario
+    cal = [m.derivar(c) for c in configs if c["CONDICIONAR_POR"] == "calendario"]
+    chk("8. las de calendario leen del subnivel cond_calendario",
+        all("cond_calendario" in str(d["DIR_MODO"]) for d in cal),
+        f"{len(cal)} configuraciones")
+    chk("9. las de calendario ESCRIBEN en cond_calendario",
+        all("cond_calendario" in str(d["DIR_SALIDA"]) for d in cal))
+
+    reg = [m.derivar(c) for c in configs if c["CONDICIONAR_POR"] == "regimen"]
+    chk("10. [neg] las de regimen NO leen del subnivel de calendario",
+        all("cond_calendario" not in str(d["DIR_MODO"]) for d in reg))
+
+    # ── Control negativo fuerte: si el preds dice otro modo, se detecta ──────
+    d_cal = WF / "xgb_qt_rolling_30.51" / "FOCO_GLOBALES_1_0.5" / "cond_calendario"
+    for f in d_cal.glob("*.parquet"):
+        df = pd.read_parquet(f)
+        df["condicionar_por"] = "regimen"          # discordante a proposito
+        df.to_parquet(f, index=False)
+    cfg_mal = next(c for c in configs
+                   if c["CONDICIONAR_POR"] == "calendario"
+                   and c["PARTICION"] == "globales"
+                   and "rolling" in c["ETIQUETA_CORRIDA"])
+    probs, _ = m.validar(cfg_mal, m.derivar(cfg_mal))
+    chk("11. [neg] un preds_test del OTRO modo se detecta en fase 0",
+        any("CONDICIONAR_POR" in p for p in probs), str(probs)[:80])
+
+    # ── Y si faltan las columnas rho_s_* ────────────────────────────────────
+    d_reg = WF / "xgb_qt_rolling_30.51" / "FOCO_BBVA_1_0.5"
+    for f in d_reg.glob("*.parquet"):
+        df = pd.read_parquet(f)
+        df.drop(columns=[c for c in df.columns if c.startswith("rho_s_")]).to_parquet(
+            f, index=False)
+    cfg_mal2 = next(c for c in configs
+                    if c["CONDICIONAR_POR"] == "regimen"
+                    and c["PARTICION"] == "bbva"
+                    and "rolling" in c["ETIQUETA_CORRIDA"])
+    probs, _ = m.validar(cfg_mal2, m.derivar(cfg_mal2))
+    chk("12. [neg] sin columnas rho_s_* se detecta en fase 0",
+        any("rho_s_" in p for p in probs), str(probs)[:80])
+
+finally:
+    orq_tmp.unlink(missing_ok=True)
+    gri_tmp.unlink(missing_ok=True)
+    shutil.rmtree(H, ignore_errors=True)
+
+print(f"\nval_grilla: {OK} OK / {FALLA} FALLA")
+sys.exit(1 if FALLA else 0)

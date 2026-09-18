@@ -187,9 +187,13 @@ def derivar(cfg: dict) -> dict:
         exec(compile(_sustituir(cab, cfg), "<cabecera>", "exec"), ns)
     except ValueError as e:
         return {"error": str(e)}
-    return {k: ns[k] for k in ("BANCO", "GRUPOS", "DIR_MODO", "DIR_SALIDA",
-                               "SUFIJO_CONFIG", "DIR_REGIMEN_HMM",
-                               "BANCO_REGIMEN", "ETIQUETA_CORRIDA")}
+    d = {k: ns[k] for k in ("BANCO", "GRUPOS", "DIR_MODO", "DIR_SALIDA",
+                            "SUFIJO_CONFIG", "DIR_REGIMEN_HMM",
+                            "BANCO_REGIMEN", "ETIQUETA_CORRIDA")}
+    # La FUNCION, no solo el resultado: cada grupo tiene SU carpeta y hay que
+    # resolverla una por una (ver validar). DIR_MODO es solo la del primero.
+    d["dir_modo_de"] = ns["dir_modo_de"]
+    return d
 
 
 ###############################################################################
@@ -243,18 +247,26 @@ def validar(cfg: dict, d: dict) -> tuple:
 
     import pandas as pd
 
-    dir_modo = Path(d["DIR_MODO"])
-    try:
-        if not dir_modo.is_dir():
-            return [f"no existe la carpeta de preds: {dir_modo}"], info
-    except OSError as e:
-        return [f"no se pudo inspeccionar {dir_modo} ({type(e).__name__})"], info
-
+    # CADA grupo tiene SU carpeta, y se resuelve con la funcion del propio
+    # step006 (cargar_preds_de_grupos hace exactamente esto: dir_modo_de(g)
+    # dentro del bucle). Usar una sola carpeta para todos los grupos era un bug:
+    # DIR_MODO es dir_modo_de(GRUPOS[0]), o sea la de FOCO, y los preds de RESTO
+    # viven en RESTO_<P>_<val>_<test>, otra carpeta. Daba "sin preds_test de
+    # RESTO_*" en configuraciones que estaban perfectas.
     modo = cfg["CONDICIONAR_POR"]
     for g in d["GRUPOS"]:
-        archivos = sorted(dir_modo.glob(f"preds_test_fold*_{g}_*.parquet"))
+        try:
+            dir_g = Path(d["dir_modo_de"](g))
+            if not dir_g.is_dir():
+                problemas.append(f"no existe la carpeta de preds de {g}: {dir_g}")
+                continue
+        except OSError as e:
+            problemas.append(f"no se pudo inspeccionar la carpeta de {g} "
+                             f"({type(e).__name__})")
+            continue
+        archivos = sorted(dir_g.glob(f"preds_test_fold*_{g}_*.parquet"))
         if not archivos:
-            problemas.append(f"sin preds_test de {g} en {dir_modo.name}")
+            problemas.append(f"sin preds_test de {g} en {dir_g.name}")
             continue
         info.setdefault("folds", {})[g] = len(archivos)
         # Se lee UN fold: las columnas y condicionar_por son constantes por
@@ -563,6 +575,19 @@ def autotest() -> int:
     chk("9g. homonimos entre corridas de step005 (esperado con igual geometria)",
         len(homon) == len(porsuf) if len(CORRIDAS_STEP005) > 1 else True,
         f"{len(homon)}/{len(porsuf)} sufijos se repiten entre carpetas")
+
+    # 9h. CADA grupo tiene SU carpeta de preds. Fue un bug real: validar() usaba
+    #     DIR_MODO —que es dir_modo_de(GRUPOS[0]), la de FOCO— para los dos
+    #     grupos, y reportaba "sin preds_test de RESTO_*" en configuraciones que
+    #     estaban perfectas. step006 resuelve una por grupo dentro del bucle de
+    #     cargar_preds_de_grupos; aca se verifica que las dos rutas difieran.
+    d_dos = derivar({"PARTICIONES": True, "PARTICION": "globales",
+                     "ENTIDAD": "SISTEMA", "CONDICIONAR_POR": "regimen"})
+    g1, g2 = d_dos["GRUPOS"]
+    p1, p2 = d_dos["dir_modo_de"](g1), d_dos["dir_modo_de"](g2)
+    chk("9h. cada grupo resuelve a SU carpeta de preds (no comparten)",
+        str(p1) != str(p2) and g1 in str(p1) and g2 in str(p2),
+        f"{Path(p1).name} vs {Path(p2).name}")
 
     # ── Deteccion de "ya hecha", con el nombre nuevo y con el legado ────────
     import tempfile
