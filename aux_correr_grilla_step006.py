@@ -66,20 +66,25 @@ GRILLA = {
 # nombra la carpeta de step005 y las dos ventanas nombran el subnivel de adentro,
 # asi que solo existen en disco las combinaciones que step005 produjo.
 #
-#     xgb_qt_expanding_310.5  ->  "3" + "1"   + "0.5"   (train 3, val 1,   test 0.5)
-#     xgb_qt_rolling_30.51    ->  "3" + "0.5" + "1"     (train 3, val 0.5, test 1)
+# OJO con leer la geometria del fold desde el NOMBRE de la etiqueta: no siempre
+# se corresponde. Las dos corridas de abajo usan val=1 / test=0.5 aunque una se
+# llame "30.51" — el sufijo de la etiqueta lo genero step005 con SUS constantes,
+# que no tienen por que ser las que step006 necesita para armar el subnivel.
+# La geometria se declara aca explicitamente; el nombre de la carpeta no es
+# fuente de verdad.
 #
-# Cruzarlos como producto cartesiano daria 2x2x2 = 8 configuraciones de las
-# cuales 6 apuntan a carpetas que no existen. Cada entrada de esta lista es un
-# TRIPLE que se aplica entero, y la grilla se cruza contra ella.
+# Cada entrada es un TRIPLE que se aplica ENTERO y la grilla se cruza contra
+# ella. Se mantiene asi aunque hoy las dos compartan geometria: el dia que entre
+# una corrida con otras ventanas, no hay nada que rehacer, y el acoplamiento
+# queda documentado donde importa.
 #
-# Si la lectura de la etiqueta no es la correcta, la fase 0 lo dice: reporta la
-# ruta exacta que busco. Correr primero con EJECUTAR=False para verlo.
+# Si una ruta no existe, la fase 0 la nombra exacta. Correr primero con
+# EJECUTAR=False para verlo.
 CORRIDAS_STEP005 = [
     {"ETIQUETA_CORRIDA": "xgb_qt_expanding_310.5",
-     "VENTANA_VAL_AÑOS": 1,   "VENTANA_TEST_AÑOS": 0.5},
+     "VENTANA_VAL_AÑOS": 1, "VENTANA_TEST_AÑOS": 0.5},
     {"ETIQUETA_CORRIDA": "xgb_qt_rolling_30.51",
-     "VENTANA_VAL_AÑOS": 0.5, "VENTANA_TEST_AÑOS": 1},
+     "VENTANA_VAL_AÑOS": 1, "VENTANA_TEST_AÑOS": 0.5},
 ]
 
 # Botones que NO varian en la grilla pero se quieren fijar para toda la corrida.
@@ -308,7 +313,12 @@ def correr(cfg: dict, d: dict, i: int, total: int) -> dict:
     DIR_LOGS.mkdir(parents=True, exist_ok=True)
     suf = d["SUFIJO_CONFIG"]
     tmp = REPO / f"_grilla_step006_{suf}.py"
-    log = DIR_LOGS / f"{datetime.now():%Y%m%d_%H%M%S}_{suf}.log"
+    # El nombre del log lleva la corrida de step005 ademas del sufijo: los logs
+    # de todas las configuraciones caen en la MISMA carpeta, y con dos corridas
+    # de igual geometria de fold el sufijo coincide — se distinguirian solo por
+    # la hora, que es justo lo que uno no recuerda al volver a buscarlos.
+    _etq = cfg.get("ETIQUETA_CORRIDA", "")
+    log = DIR_LOGS / f"{datetime.now():%Y%m%d_%H%M%S}_{_etq}_{suf}.log"
 
     src = _sustituir(ORQ.read_text(encoding="utf-8"), {**cfg, **FIJOS})
     tmp.write_text(src, encoding="utf-8")
@@ -367,9 +377,14 @@ def main() -> int:
     for cfg in configs:
         d = derivar(cfg)
         problemas, info = validar(cfg, d)
+        # La corrida de step005 va SIEMPRE en la etiqueta: cuando dos corridas
+        # comparten geometria de fold, SUFIJO_CONFIG es identico entre ellas y
+        # las lineas del plan quedarian indistinguibles.
         etiqueta = d.get("SUFIJO_CONFIG") or (
             f"PARTICIONES={cfg['PARTICIONES']} ENTIDAD={cfg['ENTIDAD']} "
             f"cond={cfg['CONDICIONAR_POR']}")
+        etiqueta = f"{cfg['ETIQUETA_CORRIDA']} | {etiqueta}" if cfg.get(
+            "ETIQUETA_CORRIDA") else etiqueta
         if "error" in d:
             podadas.append(etiqueta)
             continue
@@ -386,9 +401,8 @@ def main() -> int:
             hechas.append(etiqueta)
             continue
         folds = info.get("folds", {})
-        print(f"[LISTA] {etiqueta}  <- {cfg.get('ETIQUETA_CORRIDA', d['ETIQUETA_CORRIDA'])}"
-              f"  grupos={d['GRUPOS']}  folds={list(folds.values())}  "
-              f"origenes={info.get('origenes', '?')}")
+        print(f"[LISTA] {etiqueta}  grupos={d['GRUPOS']}  "
+              f"folds={list(folds.values())}  origenes={info.get('origenes', '?')}")
         plan.append((cfg, d))
 
     if podadas:
@@ -519,15 +533,36 @@ def autotest() -> int:
     chk("9. cada configuracion escribe en una ruta distinta (nada se pisa)",
         len(set(rutas)) == len(rutas), f"{len(set(rutas))}/{len(rutas)} distintas")
 
-    # 9b. [neg] los acoplados se aplican ENTEROS: la etiqueta de rolling va con
-    #     val=0.5/test=1, no con las de expanding.
-    d_roll = derivar(expandir({"PARTICIONES": [True], "PARTICION": ["globales"],
-                               "ENTIDAD": ["SISTEMA"], "CONDICIONAR_POR": ["regimen"]},
-                              [CORRIDAS_STEP005[-1]])[0])
+    # 9b. El triple acoplado se aplica ENTERO: la etiqueta manda la carpeta y las
+    #     ventanas declaradas mandan el sufijo. Se prueba con un triple
+    #     SINTETICO de geometria distinta, no con CORRIDAS_STEP005: hoy las dos
+    #     entradas comparten val/test, asi que usarlas no distinguiria si las
+    #     ventanas se aplican o se ignoran — el chequeo pasaria por casualidad.
+    d_roll = derivar(expandir(
+        {"PARTICIONES": [True], "PARTICION": ["globales"],
+         "ENTIDAD": ["SISTEMA"], "CONDICIONAR_POR": ["regimen"]},
+        [{"ETIQUETA_CORRIDA": "xgb_qt_rolling_30.51",
+          "VENTANA_VAL_AÑOS": 0.5, "VENTANA_TEST_AÑOS": 1}])[0])
     chk("9b. el triple acoplado se aplica entero (etiqueta + las dos ventanas)",
         "rolling" in str(d_roll["DIR_SALIDA"])
         and d_roll["SUFIJO_CONFIG"].startswith("CONJUNTO_GLOBALES_0.5_1"),
         f"{d_roll['SUFIJO_CONFIG']}")
+
+    # 9g. Con la geometria REAL, expanding y rolling comparten SUFIJO_CONFIG y
+    #     se distinguen solo por la carpeta. No es colision —las rutas difieren—
+    #     pero si vuelve homonimos los archivos al sacarlos de su carpeta, que es
+    #     justo lo que sufijo_config existia para evitar. Queda medido aca para
+    #     que el dia que se decida meter la etiqueta en el nombre haya un
+    #     chequeo que lo refleje.
+    porsuf = {}
+    for cfg_ in expandir(GRILLA, CORRIDAS_STEP005):
+        dd = derivar(cfg_)
+        if "error" not in dd:
+            porsuf.setdefault(dd["SUFIJO_CONFIG"], set()).add(cfg_["ETIQUETA_CORRIDA"])
+    homon = {k: v for k, v in porsuf.items() if len(v) > 1}
+    chk("9g. homonimos entre corridas de step005 (esperado con igual geometria)",
+        len(homon) == len(porsuf) if len(CORRIDAS_STEP005) > 1 else True,
+        f"{len(homon)}/{len(porsuf)} sufijos se repiten entre carpetas")
 
     # ── Deteccion de "ya hecha", con el nombre nuevo y con el legado ────────
     import tempfile
