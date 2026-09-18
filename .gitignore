@@ -56,3 +56,7 @@ __pycache__/
 *.txt
 *.model
 !requirements.txt
+
+# Temporales y logs de aux_correr_grilla_step006.py
+_grilla_step006_*.py
+logs_grilla/
