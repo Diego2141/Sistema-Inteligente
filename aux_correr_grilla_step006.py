@@ -56,7 +56,7 @@ ORQ = REPO / "step006_orquestador_vf_7.py"
 # cartesiano, se canonicaliza y se descartan las combinaciones invalidas.
 GRILLA = {
     "PARTICIONES":     [True],
-    "PARTICION":       ["globales"],
+    "PARTICION":       ["globales", "bbva"],
     "ENTIDAD":         ["SISTEMA"],   # inerte con PARTICIONES=True
     "CONDICIONAR_POR": ["regimen", "calendario"],
 }
@@ -191,6 +191,35 @@ def derivar(cfg: dict) -> dict:
 # Fase 0 — validación de inputs
 ###############################################################################
 
+def detectar_hecha(dir_salida: Path, sufijo: str, banco: str) -> tuple:
+    """
+    ¿Esta configuracion ya tiene su salida? Devuelve (hecha, ruta, aviso|None).
+
+    Acepta TAMBIEN el nombre anterior a sufijo_config. Las corridas previas al
+    renombrado dejaron simulacion_paths_<BANCO>.parquet; buscar solo el nombre
+    nuevo las daria por no hechas y SALTAR_SI_EXISTE volveria a correr horas de
+    computo ya hecho — el problema exacto que ese flag existe para evitar.
+
+    El nombre viejo no dice el modo, pero la CARPETA si: el modo calendario
+    escribe en el subnivel cond_calendario, asi que un archivo con nombre legado
+    en dir_salida solo puede venir del modo de esa carpeta. Por eso se busca
+    unicamente ahi, sin glob recursivo.
+    """
+    salida = dir_salida / f"simulacion_paths_{sufijo}.parquet"
+    legado = dir_salida / f"simulacion_paths_{banco}.parquet"
+    try:
+        if salida.exists():
+            return True, salida, None
+        if legado.exists():
+            return True, legado, (
+                f"hecha con el nombre ANTERIOR ({legado.name}). Se la saltea "
+                f"igual; renombrala a {salida.name} si queres que el nombre "
+                f"lleve la configuracion.")
+    except OSError:
+        pass
+    return False, salida, None
+
+
 def validar(cfg: dict, d: dict) -> tuple:
     """
     ¿Esta configuracion tiene con que correr? Devuelve (lista_de_problemas, info).
@@ -262,12 +291,11 @@ def validar(cfg: dict, d: dict) -> tuple:
             problemas.append(f"no se pudo verificar {ruta.name}")
 
     # ¿Ya esta hecha?
-    salida = Path(d["DIR_SALIDA"]) / f"simulacion_paths_{d['SUFIJO_CONFIG']}.parquet"
-    try:
-        info["hecha"] = salida.exists()
-    except OSError:
-        info["hecha"] = False
-    info["salida"] = salida
+    hecha, salida, aviso = detectar_hecha(Path(d["DIR_SALIDA"]),
+                                          d["SUFIJO_CONFIG"], d["BANCO"])
+    info["hecha"], info["salida"] = hecha, salida
+    if aviso:
+        info.setdefault("avisos", []).append(aviso)
     return problemas, info
 
 
@@ -500,6 +528,34 @@ def autotest() -> int:
         "rolling" in str(d_roll["DIR_SALIDA"])
         and d_roll["SUFIJO_CONFIG"].startswith("CONJUNTO_GLOBALES_0.5_1"),
         f"{d_roll['SUFIJO_CONFIG']}")
+
+    # ── Deteccion de "ya hecha", con el nombre nuevo y con el legado ────────
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        suf, banco = "CONJUNTO_BBVA_1_0.5_condregimen", "CONJUNTO_BBVA"
+        h, r, av = detectar_hecha(td, suf, banco)
+        chk("9c. sin archivos, no esta hecha", (not h) and av is None
+            and r.name == f"simulacion_paths_{suf}.parquet")
+
+        (td / f"simulacion_paths_{banco}.parquet").touch()
+        h, r, av = detectar_hecha(td, suf, banco)
+        chk("9d. el nombre LEGADO cuenta como hecha (no re-correr horas)",
+            h and av is not None and r.name == f"simulacion_paths_{banco}.parquet",
+            (av or "")[:48])
+
+        (td / f"simulacion_paths_{suf}.parquet").touch()
+        h, r, av = detectar_hecha(td, suf, banco)
+        chk("9e. con los dos presentes gana el nombre NUEVO, sin aviso",
+            h and av is None and r.name == f"simulacion_paths_{suf}.parquet")
+
+        # [neg] el legado NO se busca fuera de su carpeta: el modo calendario
+        # escribe en cond_calendario, asi que un legado del padre no es suyo.
+        sub = td / "cond_calendario"
+        sub.mkdir()
+        h, _, _ = detectar_hecha(sub, "CONJUNTO_BBVA_1_0.5_condcalendario", banco)
+        chk("9f. [neg] el legado del padre NO cuenta para el subnivel "
+            "cond_calendario", not h)
 
     # ── Plomeria del subproceso ─────────────────────────────────────────────
     # Es la parte que solo se ejercita corriendo de verdad, y la que mas caro
