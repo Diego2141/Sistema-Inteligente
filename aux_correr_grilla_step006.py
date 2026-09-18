@@ -55,11 +55,32 @@ ORQ = REPO / "step006_orquestador_vf_7.py"
 # La grilla: un valor o una lista por boton. Se expande como producto
 # cartesiano, se canonicaliza y se descartan las combinaciones invalidas.
 GRILLA = {
-    "PARTICIONES":     [True, False],
-    "PARTICION":       ["bbva"],
-    "ENTIDAD":         ["SISTEMA", "FOCO", "RESTO"],
+    "PARTICIONES":     [True],
+    "PARTICION":       ["globales"],
+    "ENTIDAD":         ["SISTEMA"],   # inerte con PARTICIONES=True
     "CONDICIONAR_POR": ["regimen", "calendario"],
 }
+
+# ── Corridas de step005 a leer — PARAMETROS ACOPLADOS ───────────────────────
+# Estos tres NO son ejes independientes y por eso no van en GRILLA: la etiqueta
+# nombra la carpeta de step005 y las dos ventanas nombran el subnivel de adentro,
+# asi que solo existen en disco las combinaciones que step005 produjo.
+#
+#     xgb_qt_expanding_310.5  ->  "3" + "1"   + "0.5"   (train 3, val 1,   test 0.5)
+#     xgb_qt_rolling_30.51    ->  "3" + "0.5" + "1"     (train 3, val 0.5, test 1)
+#
+# Cruzarlos como producto cartesiano daria 2x2x2 = 8 configuraciones de las
+# cuales 6 apuntan a carpetas que no existen. Cada entrada de esta lista es un
+# TRIPLE que se aplica entero, y la grilla se cruza contra ella.
+#
+# Si la lectura de la etiqueta no es la correcta, la fase 0 lo dice: reporta la
+# ruta exacta que busco. Correr primero con EJECUTAR=False para verlo.
+CORRIDAS_STEP005 = [
+    {"ETIQUETA_CORRIDA": "xgb_qt_expanding_310.5",
+     "VENTANA_VAL_AÑOS": 1,   "VENTANA_TEST_AÑOS": 0.5},
+    {"ETIQUETA_CORRIDA": "xgb_qt_rolling_30.51",
+     "VENTANA_VAL_AÑOS": 0.5, "VENTANA_TEST_AÑOS": 1},
+]
 
 # Botones que NO varian en la grilla pero se quieren fijar para toda la corrida.
 # Se sustituyen igual que los otros. Util sobre todo para N_JOBS y N_PATHS:
@@ -103,17 +124,25 @@ def canonicalizar(cfg: dict) -> dict:
     return cfg
 
 
-def expandir(grilla: dict) -> list:
-    """Producto cartesiano -> canonicalizar -> dedupe, preservando el orden."""
+def expandir(grilla: dict, acoplados: list | None = None) -> list:
+    """
+    Producto cartesiano de `grilla` x `acoplados` -> canonicalizar -> dedupe.
+
+    `acoplados` es una lista de dicts que se aplican ENTEROS, no por ejes. Es la
+    forma de expresar que ETIQUETA_CORRIDA y las dos ventanas del fold describen
+    UNA corrida de step005 y solo valen juntos.
+    """
+    acoplados = [{}] if not acoplados else acoplados
     claves = list(grilla)
     valores = [v if isinstance(v, (list, tuple)) else [v] for v in grilla.values()]
     vistas, salida = set(), []
     for combo in itertools.product(*valores):
-        cfg = canonicalizar(dict(zip(claves, combo)))
-        firma = tuple(sorted(cfg.items()))
-        if firma not in vistas:
-            vistas.add(firma)
-            salida.append(cfg)
+        for extra in acoplados:
+            cfg = canonicalizar({**dict(zip(claves, combo)), **extra})
+            firma = tuple(sorted(cfg.items()))
+            if firma not in vistas:
+                vistas.add(firma)
+                salida.append(cfg)
     return salida
 
 
@@ -285,12 +314,12 @@ def main() -> int:
     print("GRILLA DE CONFIGURACIONES — step006_orquestador_vf_7")
     print("=" * 78)
 
-    configs = expandir(GRILLA)
-    n_bruto = 1
+    configs = expandir(GRILLA, CORRIDAS_STEP005)
+    n_bruto = max(len(CORRIDAS_STEP005), 1)
     for v in GRILLA.values():
         n_bruto *= len(v) if isinstance(v, (list, tuple)) else 1
-    print(f"\nProducto cartesiano: {n_bruto}  ->  tras canonicalizar y deduplicar: "
-          f"{len(configs)}")
+    print(f"\nGrilla x {len(CORRIDAS_STEP005)} corrida(s) de step005: {n_bruto}"
+          f"  ->  tras canonicalizar y deduplicar: {len(configs)}")
     if n_bruto != len(configs):
         print(f"  ({n_bruto - len(configs)} descartadas: con PARTICIONES=True "
               f"ENTIDAD no se lee, las entidades colapsan en una sola corrida)")
@@ -329,8 +358,9 @@ def main() -> int:
             hechas.append(etiqueta)
             continue
         folds = info.get("folds", {})
-        print(f"[LISTA] {etiqueta}  grupos={d['GRUPOS']}  "
-              f"folds={list(folds.values())}  origenes={info.get('origenes', '?')}")
+        print(f"[LISTA] {etiqueta}  <- {cfg.get('ETIQUETA_CORRIDA', d['ETIQUETA_CORRIDA'])}"
+              f"  grupos={d['GRUPOS']}  folds={list(folds.values())}  "
+              f"origenes={info.get('origenes', '?')}")
         plan.append((cfg, d))
 
     if podadas:
@@ -408,8 +438,10 @@ def autotest() -> int:
         len(expandir(g2)) == 3, f"{len(expandir(g2))}")
 
     # 3. La grilla del archivo se reduce como corresponde.
-    c = expandir(GRILLA)
-    chk("3. la grilla por defecto se deduplica", len(c) < 12, f"{len(c)} configs")
+    c = expandir(GRILLA, CORRIDAS_STEP005)
+    chk("3. la grilla se cruza con las corridas acopladas de step005",
+        len(c) == len(expandir(GRILLA)) * len(CORRIDAS_STEP005),
+        f"{len(c)} configs = {len(expandir(GRILLA))} x {len(CORRIDAS_STEP005)}")
 
     # 4. Las invalidas las rechaza _validar_combinacion del PROPIO step006.
     d = derivar({"PARTICIONES": False, "PARTICION": "bbva", "ENTIDAD": "FOCO",
@@ -447,12 +479,27 @@ def autotest() -> int:
     chk("8. el archivo sustituido sigue compilando",
         "PARTICIONES = False" in src and "ENTIDAD = 'RESTO'" in src)
 
-    # 9. Los sufijos de la grilla son todos distintos: si dos coincidieran, la
-    #    segunda corrida pisaria a la primera.
-    sufs = [derivar(cfg).get("SUFIJO_CONFIG") for cfg in c]
-    sufs = [s for s in sufs if s]
-    chk("9. cada configuracion de la grilla escribe un archivo distinto",
-        len(set(sufs)) == len(sufs), f"{len(set(sufs))}/{len(sufs)} distintos")
+    # 9. Cada configuracion escribe en una RUTA distinta. Se compara la ruta
+    #    completa y no solo el sufijo: dos corridas de step005 con la misma
+    #    geometria de fold darian el mismo SUFIJO_CONFIG y distinto DIR_SALIDA,
+    #    y eso no es colision. Lo que si lo seria es la ruta repetida.
+    rutas = []
+    for cfg in c:
+        dd = derivar(cfg)
+        if "error" not in dd:
+            rutas.append(f"{dd['DIR_SALIDA']}/simulacion_paths_{dd['SUFIJO_CONFIG']}")
+    chk("9. cada configuracion escribe en una ruta distinta (nada se pisa)",
+        len(set(rutas)) == len(rutas), f"{len(set(rutas))}/{len(rutas)} distintas")
+
+    # 9b. [neg] los acoplados se aplican ENTEROS: la etiqueta de rolling va con
+    #     val=0.5/test=1, no con las de expanding.
+    d_roll = derivar(expandir({"PARTICIONES": [True], "PARTICION": ["globales"],
+                               "ENTIDAD": ["SISTEMA"], "CONDICIONAR_POR": ["regimen"]},
+                              [CORRIDAS_STEP005[-1]])[0])
+    chk("9b. el triple acoplado se aplica entero (etiqueta + las dos ventanas)",
+        "rolling" in str(d_roll["DIR_SALIDA"])
+        and d_roll["SUFIJO_CONFIG"].startswith("CONJUNTO_GLOBALES_0.5_1"),
+        f"{d_roll['SUFIJO_CONFIG']}")
 
     # ── Plomeria del subproceso ─────────────────────────────────────────────
     # Es la parte que solo se ejercita corriendo de verdad, y la que mas caro
