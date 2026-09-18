@@ -246,6 +246,189 @@ def chi2_efectivo(frec, nominal, n_efectivo) -> tuple:
     return stat, float(1 - _chi2.cdf(stat, gl))
 
 
+def kupiec_lr(k: int, n: float, tau: float) -> tuple:
+    """
+    Test de cobertura incondicional de Kupiec (razon de verosimilitud).
+
+        LR_uc = 2 * [ k*ln(pi/tau) + (n-k)*ln((1-pi)/(1-tau)) ],   pi = k/n
+
+    Asintoticamente chi2(1). Es el test estandar de "la tasa empirica es tau".
+
+    Se evalua sobre el n EFECTIVO (n/ventana), no sobre n: con observaciones que
+    comparten 74 de 75 dias de ventana, el n nominal miente por un factor de ~8
+    y el LR rechazaria practicamente siempre. Escalar k y n por igual mantiene la
+    proporcion y corrige los grados de informacion, que es lo unico que el test
+    necesita.
+    """
+    from scipy.stats import chi2 as _chi2
+    if not np.isfinite(n) or n < 5:
+        return np.nan, np.nan
+    pi = k / n
+    if pi <= 0:
+        lr = 2.0 * n * np.log(1.0 / (1.0 - tau))
+    elif pi >= 1:
+        lr = 2.0 * n * np.log(1.0 / tau)
+    else:
+        lr = 2.0 * (k * np.log(pi / tau) + (n - k) * np.log((1 - pi) / (1 - tau)))
+    return float(lr), float(1 - _chi2.cdf(lr, 1))
+
+
+def submuestras_no_solapadas(exc: np.ndarray, ventana: int) -> dict:
+    """
+    Tasa de excedencia sobre submuestras SIN solapamiento: se toma un origen cada
+    `ventana` dias, con los `ventana` desfases posibles.
+
+    Por que vale la pena ademas del n efectivo: escalar n por 1/ventana es una
+    correccion de grados de informacion, pero sigue siendo una aproximacion sobre
+    la muestra solapada. Cada submuestra de aca es genuinamente independiente —
+    dos origenes separados por `ventana` dias habiles no comparten ni un dia de
+    acumulacion. El rango entre desfases muestra cuanta de la tasa observada es
+    sensible a por donde se corta, que es la variabilidad real que el n nominal
+    esconde.
+
+    Es descriptivo: los desfases comparten la misma serie, asi que su dispersion
+    no es un error estandar. Se reporta como rango, no como IC.
+    """
+    exc = np.asarray(exc, dtype=float)
+    v = max(int(ventana), 1)
+    tasas = [exc[off::v].mean() for off in range(v) if len(exc[off::v]) >= 5]
+    if not tasas:
+        return {"media": np.nan, "min": np.nan, "max": np.nan, "n_sub": 0,
+                "n_por_sub": 0}
+    return {"media": float(np.mean(tasas)), "min": float(np.min(tasas)),
+            "max": float(np.max(tasas)), "n_sub": len(tasas),
+            "n_por_sub": int(np.ceil(len(exc) / v))}
+
+
+def cobertura_intervalo(m: pd.DataFrame, etq: str, ventana: int,
+                        tau_lo: float, tau_hi: float) -> dict:
+    """
+    Cobertura del INTERVALO central [q_lo, q_hi]: fraccion de origenes en que el
+    realizado cayo dentro.
+
+    Es el numero que el proyecto viene reportando (88.8% en FOCO_GLOBALES, 83.0%
+    en RESTO_GLOBALES contra 90% nominal), y no se deriva de las dos tasas de una
+    cola: un modelo puede tener las dos colas mal en la MISMA direccion —corrido,
+    no mal escalado— y aun asi cubrir el 90%. Por eso van las dos vistas.
+    """
+    sub = m[m["ventana"] == ventana]
+    lo = sub[sub["tau"] == tau_lo].set_index("fecha_t")[f"percentil_acum_{etq}"]
+    hi = sub[sub["tau"] == tau_hi].set_index("fecha_t")[f"percentil_acum_{etq}"]
+    y = sub.drop_duplicates("fecha_t").set_index("fecha_t")["y_realizado_acum"]
+    idx = lo.index.intersection(hi.index).intersection(y.dropna().index)
+    if len(idx) < 10:
+        return {"n": len(idx), "cobertura": np.nan}
+    dentro = ((y[idx] >= lo[idx]) & (y[idx] <= hi[idx])).values
+    n, k = len(idx), int(dentro.sum())
+    n_ef = n / max(ventana, 1)
+    lo_w, hi_w = wilson(int(round(k * n_ef / n)), int(round(n_ef)))
+    nominal = tau_hi - tau_lo
+    return {"n": n, "n_ef": n_ef, "cobertura": k / n, "nominal": nominal,
+            "ic_lo": lo_w, "ic_hi": hi_w, "cubre": bool(lo_w <= nominal <= hi_w),
+            "brecha": k / n - nominal}
+
+
+def reporte_cobertura(m: pd.DataFrame, etqs: list, taus_disp: list) -> pd.DataFrame:
+    """Seccion de cobertura: por cola, por intervalo, y estructura de plazos."""
+    ref, ret = etqs
+    ventanas = sorted(m["ventana"].unique().tolist())
+
+    print("\n" + "=" * 78)
+    print("COBERTURA")
+    print("=" * 78)
+
+    # ── A. Tasa de excedencia por cola, en las celdas pre-especificadas ──────
+    print("\n--- A. EXCEDENCIA de la cola inferior (romper el piso de estres) ---")
+    print("    tasa = P(realizado < percentil). Bien calibrado => tasa ~ tau.")
+    print("    IC de Wilson y Kupiec sobre el n EFECTIVO (n/ventana).")
+    print("    submuestras: un origen cada `ventana` dias, los v desfases.\n")
+    filas_a = []
+    for v in VENTANAS_FOCO:
+        for t in TAUS_FOCO:
+            sub = (m[(m["ventana"] == v) & (m["tau"] == t)]
+                   .dropna(subset=["y_realizado_acum"]).sort_values("fecha_t"))
+            if len(sub) < 10:
+                continue
+            y = sub["y_realizado_acum"].values
+            for e in etqs:
+                exc = (y < sub[f"percentil_acum_{e}"].values)
+                n, k = len(exc), int(exc.sum())
+                n_ef = n / max(v, 1)
+                k_ef = k * n_ef / n
+                lo_w, hi_w = wilson(int(round(k_ef)), int(round(n_ef)))
+                lr, p = kupiec_lr(k_ef, n_ef, t)
+                ss = submuestras_no_solapadas(exc, v)
+                filas_a.append({
+                    "modelo": e, "tau": t, "ventana": v, "n": n,
+                    "n_ef": round(n_ef, 1), "tasa": k / n,
+                    "ic_lo": lo_w, "ic_hi": hi_w,
+                    "cubre": bool(lo_w <= t <= hi_w),
+                    "kupiec_p": p,
+                    "sub_min": ss["min"], "sub_max": ss["max"],
+                })
+    df_a = pd.DataFrame(filas_a)
+    if not df_a.empty:
+        print(df_a.to_string(index=False, float_format=lambda x: f"{x:,.4g}"))
+
+    # ── B. Cobertura del INTERVALO, estructura de plazos ────────────────────
+    print("\n--- B. COBERTURA DEL INTERVALO central (el numero comparable al "
+          "83.0% ya medido) ---")
+    filas_b = []
+    pares = [(0.05, 0.95, "90%"), (0.01, 0.99, "98%")]
+    pares = [(a, b, etiq) for a, b, etiq in pares
+             if a in taus_disp and b in taus_disp]
+    # estructura de plazos legible: las de foco mas una grilla espaciada
+    v_muestra = sorted(set(VENTANAS_FOCO) |
+                       set(ventanas[::max(len(ventanas) // 8, 1)]) |
+                       {ventanas[0], ventanas[-1]})
+    for tau_lo, tau_hi, etiq in pares:
+        print(f"\n  intervalo [{tau_lo:g}, {tau_hi:g}]  nominal {etiq}")
+        print(f"  {'ventana':>7} {'n_ef':>6} "
+              + " ".join(f"{e[:10]:>11}" for e in etqs)
+              + f"  {'brecha nom':>12}")   # del RETADOR contra el nominal
+        for v in v_muestra:
+            r = {e: cobertura_intervalo(m, e, v, tau_lo, tau_hi) for e in etqs}
+            if any(not np.isfinite(r[e].get("cobertura", np.nan)) for e in etqs):
+                continue
+            marca = {e: ("" if r[e]["cubre"] else " *") for e in etqs}
+            print(f"  {v:>7} {r[etqs[0]]['n_ef']:>6.1f} "
+                  + " ".join(f"{r[e]['cobertura']:>9.1%}{marca[e]:<2}" for e in etqs)
+                  + f"  {r[ret]['brecha']:>+11.1%}")
+            for e in etqs:
+                filas_b.append({"modelo": e, "intervalo": etiq, "ventana": v,
+                                **{k: val for k, val in r[e].items()}})
+        print(f"  (* = el nominal {etiq} cae FUERA del IC de Wilson sobre n_ef)")
+
+    df_b = pd.DataFrame(filas_b)
+
+    # ── C. Resumen sobre TODAS las ventanas ─────────────────────────────────
+    if pares:
+        tau_lo, tau_hi, etiq = pares[0]
+        print(f"\n--- C. RESUMEN sobre las {len(ventanas)} ventanas "
+              f"(intervalo {etiq}) ---")
+        for e in etqs:
+            cobs = [cobertura_intervalo(m, e, v, tau_lo, tau_hi) for v in ventanas]
+            cobs = [c for c in cobs if np.isfinite(c.get("cobertura", np.nan))]
+            if not cobs:
+                continue
+            vals = np.array([c["cobertura"] for c in cobs])
+            dentro = sum(c["cubre"] for c in cobs)
+            # tendencia con el horizonte: si la cobertura se deteriora al alargar
+            # el plazo, el problema esta en la acumulacion, no en las marginales.
+            vs = np.array([v for v, c in zip(ventanas, cobs)])
+            pend = float(np.polyfit(vs, vals, 1)[0]) * 10 if len(vals) > 2 else np.nan
+            print(f"  {e:<11} media {vals.mean():6.1%}  "
+                  f"rango [{vals.min():.1%}, {vals.max():.1%}]  "
+                  f"nominal dentro del IC en {dentro}/{len(cobs)} ventanas  "
+                  f"tendencia {pend:+.2%} cada 10 dias")
+        print("\n  Los dos modelos heredan las MISMAS marginales de step005, asi "
+              "que una brecha\n  de cobertura comun NO la explica el "
+              "condicionamiento: phi y rho describen\n  dependencia, no ancho. "
+              "Lo comparable entre modelos es la DIFERENCIA.")
+
+    return df_a, df_b
+
+
 ###############################################################################
 # Fase 0 — inspección
 ###############################################################################
@@ -478,6 +661,9 @@ def main():
                   f"independientes — el chi2 no tiene potencia, leelo como "
                   f"descriptivo y mira la FRECUENCIA, no el p.")
 
+    # ── Cobertura: seccion propia ────────────────────────────────────────────
+    df_cola, df_int = reporte_cobertura(m, etqs, taus_all)
+
     # ── Sharpness: se REPORTA, no se rankea ──────────────────────────────────
     print("\n--- ANCHO DE BANDA q05-q95 (diagnostico, NUNCA criterio) ---")
     print(f"    {ret} tiene una fuente de ruido Monte Carlo MENOS por "
@@ -513,7 +699,7 @@ def main():
 
     res.attrs["referencia"] = ref
     autotest()
-    return res
+    return {"celdas": res, "cobertura_cola": df_cola, "cobertura_intervalo": df_int}
 
 
 ###############################################################################
@@ -633,6 +819,43 @@ def autotest() -> int:
     chk("autotest 10. Wilson con k=1,n=20 da un IC no degenerado",
         0 < lo < 0.05 < hi < 1, f"[{lo:.3f}, {hi:.3f}]")
 
+    # ── Cobertura ────────────────────────────────────────────────────────────
+    # 11. Kupiec NO rechaza cuando la tasa es la nominal.
+    lr, p = kupiec_lr(5, 100, 0.05)
+    chk("autotest 11. Kupiec con tasa == tau no rechaza",
+        lr < 1e-9 and p > 0.99, f"LR={lr:.2e} p={p:.3f}")
+
+    # 12. [neg] Kupiec SI rechaza con una tasa muy distinta y n suficiente.
+    lr, p = kupiec_lr(25, 100, 0.05)
+    chk("autotest 12. [neg] Kupiec rechaza 25% contra tau=5%",
+        p < 0.001, f"LR={lr:.1f} p={p:.2e}")
+
+    # 13. La correccion por n efectivo AFLOJA el test: la misma proporcion con
+    #     n/22 no rechaza lo que con n nominal si. Es el punto de todo el
+    #     tratamiento del solapamiento.
+    _, p_nom = kupiec_lr(38, 476, 0.05)          # 8% con n nominal
+    _, p_ef  = kupiec_lr(38 / 22, 476 / 22, 0.05)  # la MISMA proporcion, n efectivo
+    chk("autotest 13. el n efectivo afloja Kupiec (no rechaza lo que el n "
+        "nominal si)", p_nom < 0.05 < p_ef, f"p_nominal={p_nom:.4f} -> p_ef={p_ef:.3f}")
+
+    # 14. Submuestras no solapadas: cantidad y tamaño correctos, y la media
+    #     coincide con la tasa global cuando no hay estructura.
+    exc = (rng.random(440) < 0.10)
+    ss = submuestras_no_solapadas(exc, 22)
+    chk("autotest 14. submuestras no solapadas: v desfases del tamaño correcto",
+        ss["n_sub"] == 22 and ss["n_por_sub"] == 20
+        and abs(ss["media"] - exc.mean()) < 1e-9,
+        f"{ss['n_sub']} desfases de {ss['n_por_sub']}, media {ss['media']:.3f}")
+
+    # 15. [neg] con violaciones EN RACIMO el rango entre desfases se abre — es
+    #     justamente lo que el n nominal esconde.
+    exc_racimo = np.zeros(440, dtype=bool)
+    exc_racimo[::22] = True              # una por bloque, siempre en el mismo sitio
+    ss_r = submuestras_no_solapadas(exc_racimo, 22)
+    chk("autotest 15. [neg] violaciones en racimo abren el rango entre desfases",
+        (ss_r["max"] - ss_r["min"]) > 0.9,
+        f"rango [{ss_r['min']:.2f}, {ss_r['max']:.2f}] vs media {ss_r['media']:.2f}")
+
     print(f"\n{'=' * 78}")
     print(f"RESULTADO: {_OK} OK / {_FALLA} FALLA")
     print("=" * 78)
@@ -643,4 +866,8 @@ if __name__ == "__main__":
     _res = main()
     if isinstance(_res, int):
         sys.exit(_res)
-    resultados = _res      # DataFrame completo, para el Variable Explorer
+    # Al namespace GLOBAL: con runfile() de Spyder es lo que los deja en el
+    # Variable Explorer para seguir explorandolos a mano.
+    resultados     = _res["celdas"]               # pinball/DM por celda
+    tabla_cola     = _res["cobertura_cola"]       # excedencia por tau
+    tabla_intervalo = _res["cobertura_intervalo"]  # cobertura del intervalo central
