@@ -305,7 +305,23 @@ def validar(cfg: dict, d: dict) -> tuple:
             problemas.append(f"{g}: modo calendario sin columna balde_th")
         if cfg["PARTICIONES"] and "rho_ij" not in df.columns:
             problemas.append(f"{g}: modo conjunto sin columna rho_ij")
+        # Origenes del PRIMER fold, no de la corrida: arriba se lee un solo
+        # archivo a proposito (las columnas son constantes por corrida y cargar
+        # cientos de MB para validar no tiene sentido). Se nombra asi en el plan
+        # para que no se lea como el total.
         info["origenes"] = int(df["fecha_t"].nunique())
+
+    # Los dos grupos tienen que venir de la MISMA corrida de step005, y el
+    # conteo de folds es el sintoma mas barato de que no: cargar_preds_de_grupos
+    # hace inner join sobre (fecha_t, h), asi que folds desparejos se traducen en
+    # origenes descartados en silencio — el WARNING de A5 avisa, pero recien a
+    # mitad de corrida y sin decir por que.
+    _folds = info.get("folds", {})
+    if len(set(_folds.values())) > 1:
+        info.setdefault("avisos", []).append(
+            f"los grupos traen DISTINTA cantidad de folds {_folds} — probable "
+            f"mezcla de dos corridas de step005 en la misma carpeta. El inner "
+            f"join de A5 va a descartar los origenes que no compartan.")
 
     # La transmat solo hace falta si se muestrea la cadena de Markov.
     if modo != "calendario":
@@ -410,6 +426,20 @@ def main() -> int:
         if "error" in d:
             podadas.append(etiqueta)
             continue
+        # "ya hecha" se evalua ANTES que los problemas de inputs, y el orden
+        # importa: si la salida ya existe no hay que correr nada, asi que el
+        # estado de los preds es irrelevante. Al reves —como estaba— una
+        # configuracion terminada salia como [SIN INPUTS] y parecia que habia
+        # algo que arreglar. Igual se reportan los problemas como nota, porque
+        # con SALTAR_SI_EXISTE=False esa misma corrida abortaria.
+        if SALTAR_SI_EXISTE and info.get("hecha"):
+            for av in info.get("avisos", []):
+                print(f"[AVISO] {etiqueta}: {av}")
+            print(f"[YA HECHA] {etiqueta}  ->  {info['salida'].name}")
+            for p in problemas:
+                print(f"    (nota: con SALTAR_SI_EXISTE=False fallaria — {p})")
+            hechas.append(etiqueta)
+            continue
         if problemas:
             print(f"\n[SIN INPUTS] {etiqueta}")
             for p in problemas:
@@ -418,13 +448,10 @@ def main() -> int:
             continue
         for av in info.get("avisos", []):
             print(f"[AVISO] {etiqueta}: {av}")
-        if SALTAR_SI_EXISTE and info.get("hecha"):
-            print(f"[YA HECHA] {etiqueta}  ->  {info['salida'].name}")
-            hechas.append(etiqueta)
-            continue
         folds = info.get("folds", {})
         print(f"[LISTA] {etiqueta}  grupos={d['GRUPOS']}  "
-              f"folds={list(folds.values())}  origenes={info.get('origenes', '?')}")
+              f"folds={list(folds.values())}  "
+              f"origenes/fold={info.get('origenes', '?')}")
         plan.append((cfg, d))
 
     if podadas:

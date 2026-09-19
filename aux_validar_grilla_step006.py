@@ -276,6 +276,38 @@ try:
     chk("12. [neg] sin columnas rho_s_* se detecta en fase 0",
         any("rho_s_" in p for p in probs), str(probs)[:80])
 
+    # ── 13. [neg] folds desparejos entre grupos se detectan ─────────────────
+    # Simula la mezcla de dos corridas de step005 en la misma carpeta: se borra
+    # un fold de RESTO y el conteo queda [4, 3].
+    _c = CORRIDAS[0]
+    d_resto = WF / _c["ETIQUETA_CORRIDA"] / subnivel("RESTO_GLOBALES", _c)
+    next(iter(sorted(d_resto.glob("*.parquet")))).unlink()
+    cfg_desp = m.canonicalizar(
+        {"PARTICIONES": True, "PARTICION": "globales", "ENTIDAD": "SISTEMA",
+         "CONDICIONAR_POR": "regimen", **_c})
+    _, info_d = m.validar(cfg_desp, m.derivar(cfg_desp))
+    chk("13. [neg] folds desparejos entre grupos se avisan",
+        any("DISTINTA cantidad de folds" in a for a in info_d.get("avisos", [])),
+        str(info_d.get("folds")))
+
+    # ── 14. una config con la salida HECHA no se reporta como sin inputs ────
+    # El orden importa: si ya esta hecha no hay que correr nada, asi que el
+    # estado de los preds es irrelevante. Se rompen los preds a proposito y la
+    # configuracion tiene que seguir contando como hecha.
+    d_bbva = WF / _exp["ETIQUETA_CORRIDA"] / subnivel("FOCO_BBVA", _exp)
+    for f in d_bbva.glob("*.parquet"):
+        df = pd.read_parquet(f)
+        df["condicionar_por"] = "calendario"      # discordante a proposito
+        df.to_parquet(f, index=False)
+    cfg_hecha = m.canonicalizar(
+        {"PARTICIONES": True, "PARTICION": "bbva", "ENTIDAD": "SISTEMA",
+         "CONDICIONAR_POR": "regimen", **_exp})
+    probs_h, info_h = m.validar(cfg_hecha, m.derivar(cfg_hecha))
+    chk("14. con la salida ya hecha, los problemas de preds no la invalidan",
+        info_h.get("hecha") and probs_h,
+        f"hecha={info_h.get('hecha')}, {len(probs_h)} problema(s) reportado(s) "
+        f"como nota")
+
 finally:
     orq_tmp.unlink(missing_ok=True)
     gri_tmp.unlink(missing_ok=True)
