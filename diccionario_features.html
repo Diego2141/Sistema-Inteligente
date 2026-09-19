@@ -1,0 +1,423 @@
+<title>Diccionario de Features — Sistema Inteligente</title>
+<style>
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:#141813; --surface:#191e18; --surface-2:#20261e;
+      --ink:#e7ece6; --ink-soft:#9aa79a; --line:#2b332a;
+      --accent:#4fbfa0; --accent-soft:#173a30; --accent-ink:#bdf0dd;
+      --warn:#e0973e; --warn-soft:#3a2a14; --warn-ink:#f6d9ac;
+      --code-bg:#12160f; --code-ink:#d9e2d6; --shadow:rgba(0,0,0,.45);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg:#141813; --surface:#191e18; --surface-2:#20261e;
+    --ink:#e7ece6; --ink-soft:#9aa79a; --line:#2b332a;
+    --accent:#4fbfa0; --accent-soft:#173a30; --accent-ink:#bdf0dd;
+    --warn:#e0973e; --warn-soft:#3a2a14; --warn-ink:#f6d9ac;
+    --code-bg:#12160f; --code-ink:#d9e2d6; --shadow:rgba(0,0,0,.45);
+  }
+  :root {
+    --bg:#f5f6f3; --surface:#ffffff; --surface-2:#eef1ec;
+    --ink:#1b2420; --ink-soft:#5b675e; --line:#dde2dc;
+    --accent:#1f6f5c; --accent-soft:#e4f0ec; --accent-ink:#0f3f34;
+    --warn:#a6570a; --warn-soft:#fbeee0; --warn-ink:#7a3f06;
+    --code-bg:#eef1ec; --code-ink:#1b2420; --shadow:rgba(20,30,25,.08);
+  }
+  :root[data-theme="light"] {
+    --bg:#f5f6f3; --surface:#ffffff; --surface-2:#eef1ec;
+    --ink:#1b2420; --ink-soft:#5b675e; --line:#dde2dc;
+    --accent:#1f6f5c; --accent-soft:#e4f0ec; --accent-ink:#0f3f34;
+    --warn:#a6570a; --warn-soft:#fbeee0; --warn-ink:#7a3f06;
+    --code-bg:#eef1ec; --code-ink:#1b2420; --shadow:rgba(20,30,25,.08);
+  }
+
+  * { box-sizing:border-box; }
+  html { scroll-behavior:smooth; scroll-padding-top:1.5rem; }
+  body {
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+    font-size:15.5px; line-height:1.55;
+  }
+  ::selection { background:var(--accent-soft); color:var(--accent-ink); }
+  code, .mono, .feat-name, .chip, .kv dt, table { font-family:ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace; }
+
+  a { color:var(--accent); }
+  h1,h2,h3 { font-family:ui-serif,Georgia,"Times New Roman",serif; text-wrap:balance; color:var(--ink); }
+
+  .shell { display:grid; grid-template-columns: 240px minmax(0,1fr); gap:2.5rem; max-width:1180px; margin:0 auto; padding:2.5rem 1.5rem 6rem; }
+  @media (max-width: 880px) { .shell { grid-template-columns: 1fr; } .toc { position:static !important; order:2; } }
+
+  header.hero { grid-column:1/-1; margin-bottom:.5rem; }
+  header.hero h1 { font-size:2rem; margin:0 0 .3rem; }
+  header.hero .sub { color:var(--ink-soft); font-size:.98rem; max-width:70ch; }
+  .meta-row { display:flex; flex-wrap:wrap; gap:.5rem .9rem; margin-top:1rem; font-size:.82rem; color:var(--ink-soft); }
+  .meta-row b { color:var(--ink); font-weight:600; }
+  .meta-row .mono { color:var(--ink); }
+
+  .toc { position:sticky; top:1.5rem; align-self:start; max-height:calc(100vh - 3rem); overflow:auto; }
+  .toc-title { font-size:.72rem; letter-spacing:.08em; text-transform:uppercase; color:var(--ink-soft); margin:0 0 .6rem; }
+  .toc ol { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:.15rem; counter-reset:sec; }
+  .toc li { counter-increment:sec; }
+  .toc a { display:flex; gap:.5rem; text-decoration:none; color:var(--ink-soft); font-size:.86rem; padding:.32rem .5rem; border-radius:6px; }
+  .toc a:hover { background:var(--surface-2); color:var(--ink); }
+  .toc a::before { content: counter(sec); color:var(--accent); font-variant-numeric:tabular-nums; width:1.1em; }
+  .toc .n { margin-left:auto; color:var(--ink-soft); font-variant-numeric:tabular-nums; font-size:.78rem; }
+
+  main { min-width:0; }
+
+  .callout { border:1px solid var(--line); background:var(--surface); border-radius:10px; padding:1.1rem 1.3rem; margin-bottom:2rem; box-shadow:0 1px 2px var(--shadow); }
+  .callout.warn { border-color:color-mix(in srgb, var(--warn) 45%, var(--line)); background:var(--warn-soft); }
+  .callout h2 { font-size:1.02rem; margin:0 0 .6rem; }
+  .callout ul { margin:.3rem 0 0; padding-left:1.2rem; }
+  .callout li { margin-bottom:.5rem; }
+  .callout li:last-child { margin-bottom:0; }
+  .finding-tag { display:inline-block; font-size:.68rem; letter-spacing:.05em; text-transform:uppercase; padding:.12rem .5rem; border-radius:99px; background:var(--warn); color:#fff; font-weight:700; margin-right:.5rem; vertical-align:1px; }
+
+  section.group { margin-bottom:3rem; scroll-margin-top:1.5rem; }
+  section.group > h2 { font-size:1.3rem; margin:0 0 .25rem; display:flex; align-items:baseline; gap:.6rem; }
+  section.group > h2 .count { font-size:.78rem; color:var(--ink-soft); font-weight:400; font-family:ui-monospace,monospace; }
+  section.group > .group-note { color:var(--ink-soft); font-size:.9rem; max-width:74ch; margin:0 0 1.3rem; }
+
+  .cards { display:flex; flex-direction:column; gap:.9rem; }
+  article.feat { border:1px solid var(--line); background:var(--surface); border-radius:10px; padding:1rem 1.2rem 1.1rem; scroll-margin-top:1.5rem; }
+  .feat-head { display:flex; align-items:center; justify-content:space-between; gap:.8rem; flex-wrap:wrap; margin-bottom:.55rem; }
+  .feat-name { font-size:.98rem; font-weight:700; color:var(--ink); }
+  .chips { display:flex; gap:.4rem; flex-wrap:wrap; }
+  .chip { font-size:.68rem; letter-spacing:.03em; padding:.16rem .5rem; border-radius:99px; border:1px solid var(--line); color:var(--ink-soft); background:var(--surface-2); white-space:nowrap; }
+  .chip.anchor-t { color:var(--accent-ink); background:var(--accent-soft); border-color:transparent; }
+  .chip.anchor-th { color:#fff; background:var(--accent); border-color:transparent; }
+  .chip.anchor-t1 { color:var(--warn-ink); background:var(--warn-soft); border-color:transparent; }
+
+  .feat-desc { font-size:.92rem; color:var(--ink); margin:0 0 .7rem; max-width:76ch; }
+  .kv { display:grid; grid-template-columns: max-content 1fr; gap:.25rem 1rem; font-size:.78rem; margin-bottom:.7rem; }
+  .kv dt { color:var(--ink-soft); font-weight:600; }
+  .kv dd { margin:0; color:var(--ink-soft); }
+
+  pre { margin:0; background:var(--code-bg); color:var(--code-ink); border:1px solid var(--line); border-radius:8px; padding:.7rem .85rem; overflow-x:auto; font-size:.81rem; line-height:1.5; }
+  pre .ln { color:var(--ink-soft); user-select:none; margin-right:.9em; }
+  .code-cap { font-size:.72rem; color:var(--ink-soft); margin:.35rem 0 0; }
+  .code-cap .mono { color:var(--ink-soft); }
+
+  footer { grid-column:1/-1; margin-top:2rem; padding-top:1.5rem; border-top:1px solid var(--line); color:var(--ink-soft); font-size:.8rem; }
+</style>
+
+<div class="shell">
+  <header class="hero">
+    <h1>Diccionario de Features</h1>
+    <p class="sub">Cómo se construye cada feature activo en <span class="mono">step001_build_feature_matrix.py</span>: fórmula, anclaje temporal y el código que lo genera. Generado para revisar consistencia antes de la próxima corrida de <span class="mono">step005_walk_forward_cv_4.py</span>.</p>
+    <div class="meta-row">
+      <span><b>Features activos:</b> <span class="mono">27</span></span>
+      <span><b>Excluidos en FEATURES_EXCLUIR:</b> <span class="mono">104</span> (101 únicos)</span>
+      <span><b>Matriz:</b> <span class="mono">1. Data/Clean/matriz_features.parquet</span></span>
+      <span><b>Última revisión de contenido:</b> sesión 2026-08-24 (cuarta pasada) · CC+OVN resuelto por partición (propio/contraparte), step001 v2</span>
+    </div>
+  </header>
+
+  <nav class="toc">
+    <p class="toc-title">Contenido</p>
+    <ol>
+      <li><a href="#hallazgos"><span>Hallazgos</span></a></li>
+      <li><a href="#excluidos"><span>Excluidos recientemente</span></a></li>
+      <li><a href="#g1"><span>Flujo bancario crudo</span><span class="n">4</span></a></li>
+      <li><a href="#g2"><span>Calendario crudo/binario</span><span class="n">5</span></a></li>
+      <li><a href="#g3"><span>Posición en el mes</span><span class="n">8</span></a></li>
+      <li><a href="#g4"><span>Encaje BBVA</span><span class="n">2</span></a></li>
+      <li><a href="#g5"><span>CC+OVN en BCR</span><span class="n">6</span></a></li>
+      <li><a href="#g6"><span>Macro / mercado</span><span class="n">2</span></a></li>
+    </ol>
+  </nav>
+
+  <main>
+
+    <div id="hallazgos" class="callout warn">
+      <h2>Hallazgos de esta revisión</h2>
+      <ul>
+        <li><span class="finding-tag">rediseño</span> Las features CC+OVN dejan de ser fijas a BBVA. <span class="mono">ccovn_bbva_lag1</span> y <span class="mono">var_ccovn_bbva_lag1</span> se renombran a <b class="mono">ccovn_propio_lag1</b>/<b class="mono">var_ccovn_propio_lag1</b> — mismo estado activo, solo cambia qué banco describen según la entidad que se está modelando (<span class="mono">resolver_ccovn_lados()</span>). Se agregan <b class="mono">ccovn_contraparte_lag1</b>/<b class="mono">var_ccovn_contraparte_lag1</b>, nuevas y activas: el saldo del otro lado de la partición, que en v1 no tenía cómo expresarse. <span class="mono">bbva_share_lag1</span> y <span class="mono">var_ccovn_bbva_exceso_lag1</span> se renombran a <span class="mono">share_propio_lag1</span>/<span class="mono">var_ccovn_propio_exceso_lag1</span> pero <b>siguen excluidos</b> — se verificó su estado antes de tocar la lista, para no reactivar en silencio algo que estaba desactivado a propósito. Ver el grupo 5.</li>
+        <li><span class="finding-tag">bug de construcción</span> <span class="mono">_normalizar_banco()</span> —la función que decide si un banco pertenece al foco de una partición, y ahora también si un header de <span class="mono">Saldos_CCOVN.xlsx</span> corresponde a un banco canónico— quitaba puntuación pero <b>no tildes</b>: <span class="mono">.upper()</span> conserva "É" como carácter distinto de "E", y <span class="mono">ch.isalnum()</span> lo deja pasar igual porque una letra acentuada sigue siendo una letra. Consecuencia medida: "CREDITO" no es subcadena de "CRÉDITO", así que un header real de CCOVN como "Banco de Crédito del Perú" nunca habría emparejado con el banco canónico <span class="mono">CREDITO</span> de Transacciones_BancaLocal. <b>Arreglo:</b> normalización NFKD para separar cada letra de su diacrítico, se descartan los diacríticos (categoría Unicode <span class="mono">Mn</span>), y recién ahí se filtra alfanumérico. Atrapado por <span class="mono">aux_verificar_ccovn_particion.py</span> con un header deliberadamente en minúsculas y con tilde — y arrastraba una segunda falla en cascada: con CREDITO sin emparejar, <span class="mono">ccovn_foco + ccovn_resto</span> no reconstruía <span class="mono">ccovn_sistema</span>.</li>
+        <li><span class="finding-tag">bug de construcción</span> El conteo de rezagos que entraba al extremo de la familia <b class="mono">*_pos</b> <b>caía de 4 a 1</b> con el horizonte: la máscara <span class="mono">h ≤ 21k</span> deja los cuatro rezagos hasta h=21 y uno solo desde h~64, y el código tomaba <i>todos</i> los disponibles de una lista de 4. Sobre el <b>sesgo</b> la docstring ya tenía razón y no había nada que arreglar (E[máx de 4] &gt; E[máx de 1], pero con un modelo por horizonte el conteo es constante dentro de cada modelo y un corrimiento constante no altera el orden de los cortes de un árbol). El problema era la <b>varianza</b>: a h largo el feature terminaba siendo el valor de <b>un único día de hace ~4 meses</b>, y a h corto un extremo sobre cuatro. Eso no lo arregla tener un modelo por horizonte; el de h largo simplemente recibía un feature mucho más ruidoso. <b>Consecuencia para la lectura de los heatmaps:</b> la familia se apagaba a h alto y no se podía saber cuánto de esa caída era señal que decae y cuánto el feature quedándose sin observaciones.</li>
+        <li><span class="finding-tag">arreglo</span> <b>Ventana deslizante.</b> <span class="mono">LAGS_POSICION_MES</span> pasa a ser una lista de <b>candidatos</b> (<span class="mono">[1..8]</span>) y entran los <span class="mono">N_REZAGOS_OBJETIVO = 4</span> más recientes que sobrevivan a la máscara. En el bucle es una condición extra: <span class="mono">usable &amp;= (n_lags &lt; n_objetivo)</span>, y como se recorre del más reciente al más viejo, los elegidos son siempre los más nuevos. <b>Conteo fijo y recencia máxima a la vez.</b> Se descartó la alternativa de fijar una lista rígida y lejana (<span class="mono">[4,5,6,7]</span> para todo h): también daba conteo constante, pero pagaba recencia en los horizontes cortos, que era donde no había ningún problema, y como familia paralela habría quedado muy correlacionada con la original, deprimiendo la importancia por permutación de <b>ambas</b>. <b>Propiedad que conviene retener:</b> donde el comportamiento previo ya llegaba a 4 rezagos el resultado es <b>idéntico</b>, así que las mediciones ya hechas en ese tramo siguen valiendo; el cambio solo toca las filas donde antes faltaban rezagos.</li>
+        <li><span class="finding-tag">regla que no es la regla</span> <span class="mono">h ≤ 21k</span> documenta la <i>intención</i>, no el corte real. Medido: a <b>h=64 todavía sobreviven 2 rezagos</b>, no 1. Los meses tienen 19-23 ruedas y el lookup usa aritmética de mes calendario, no de 21 días, así que el h en que cae cada rezago se corre según el calendario. Esto rompió <b>dos veces</b> verificaciones escritas contra la regla en vez de contra el dato. <b>Regla general:</b> cualquier chequeo que dependa de cuántos rezagos hay tiene que leer el contador que <span class="mono">_build_lag_posicion_mes</span> ya devuelve, nunca derivarlo de un umbral de h. El checklist quedó escrito así, condicionando sobre <span class="mono">n_previo == 4</span>.</li>
+        <li><span class="finding-tag">criterio inconsistente</span> La máscara point-in-time es <b class="mono">f_lag &lt;= ft</b>, <b>inclusive</b>. Medido con una serie cuyo valor es el ordinal de su propia fecha, el excedente peor es <b>+0 ruedas</b>: en algunas filas el rezago cae exactamente sobre <span class="mono">fecha_t</span> y lee <span class="mono">R</span>/<span class="mono">D</span> de ese mismo día. Pero <span class="mono">R_t0</span> y <span class="mono">D_t0</span> están excluidos de la matriz precisamente por no ser información disponible al decidir, así que los dos criterios no coinciden. <b>No se cambió:</b> pasar a <span class="mono">&lt;</span> alteraría los valores de toda la familia e invalidaría las mediciones de importancia ya hechas. Queda como decisión pendiente, no como olvido.</li>
+                                <li><span class="finding-tag">casi se rompe algo</span> Al limpiar por SHAP baja, <b class="mono">R_conf_t2</b> estaba en la lista de candidatos a excluir junto con <span class="mono">R_conf_t1</span>/<span class="mono">D_conf_t1</span> — misma SHAP baja, mismo aspecto de feature débil. Es insumo estructural de <span class="mono">DESCOMPONER_H2</span> en <span class="mono">step005</span>: excluirlo habría desactivado en silencio (solo un <span class="mono">log.warning</span>) la descomposición del target de h=2, que aprovecha que el retiro a 2 días está casi confirmado por la banca. <b>Regla general:</b> antes de excluir un feature por baja importancia, verificar que no sea insumo de otra parte del pipeline — la importancia se mide dentro de un modelo, no across todo el sistema. Ver la ficha de <span class="mono">R_conf_t2</span> en el grupo 1.</li>
+        <li><span class="finding-tag">bug recurrente</span> Segunda vez en este archivo que una coma faltante en <span class="mono">FEATURES_EXCLUIR</span> concatena dos literales adyacentes en uno solo (Python no necesita el operador <span class="mono">+</span> para unir strings pegados). La primera vez fue <span class="mono">"is_post_elecciones_post_feriado"</span>; esta vez <span class="mono">"elec_cos"</span> sin coma se fusionó con <span class="mono">"capacidad_retiro_th"</span>, y la exclusión de este último no habría tenido efecto. Detectado ANTES de confiar en el commit, comparando cada <span class="mono">ast.Constant</span> de la lista contra su propio segmento de fuente — más de un par de comillas en el segmento delata concatenación. Vale la pena correr ese chequeo después de cualquier edición a esta lista.</li>
+        <li><span class="finding-tag">nombre dinámico</span> <b class="mono">R_t-1</b>/<span class="mono">D_t-1</span> no aparecían en ninguna búsqueda por texto literal porque se generan con f-string dentro de un bucle: <span class="mono">for l in todos_lags: resultado[f"R_t-{l}"] = df["R"].shift(l)</span> (línea 1389). Solo se descubrió su existencia real al ver un heatmap de SHAP que los mostraba como filas propias.</li>
+        <li><span class="finding-tag">inactivo</span><b class="mono">n_lags_pos</b> no está en <span class="mono">FEATURES_EXCLUIR</span> pero tampoco llega a la matriz: su <span class="mono">add()</span> de documentación vive dentro de <span class="mono">if GUARDAR_N_LAGS_POS:</span> y esa bandera está en <span class="mono">False</span>. El recuento "activo" de este documento (35) ya lo excluye; un chequeo por diferencia simple contra <span class="mono">FEATURES_EXCLUIR</span> daría 36 y sería incorrecto.</li>
+        <li><span class="finding-tag">error de la revisión anterior</span> La versión previa de este documento afirmaba que <span class="mono">CDS_PERU_5Y_frac</span> estaba excluido. No lo está — nunca lo estuvo. Corregido en el grupo 6.</li>
+        <li><span class="finding-tag">redundancia deliberada, revertida con datos</span> La revisión anterior daba por buena la coexistencia de cada eje de calendario en forma cíclica (<span class="mono">_sin/_cos</span>) y cruda, para <span class="mono">mes</span>, <span class="mono">dias_al_cierre_mes</span> y <span class="mono">dias_al_cierre_trim</span> — el argumento era que la forma cruda permite un único split (<span class="mono">dcm ≤ 1</span>) donde la cíclica necesita varios. Con ambas formas activas a la vez, gain/perm/SHAP de las corridas siguientes mostraron lo contrario: la cíclica no sumaba señal propia, le quitaba aporte a la cruda. Los diez features cíclicos se excluyen esta pasada — ver <a href="#excluidos">Excluidos recientemente</a>. La familia de calendario queda solo en su forma cruda/binaria (grupo 2).</li>
+        <li><span class="finding-tag">feature nuevo, ya activo</span> <span class="mono">ma_flujo_5d</span> y <span class="mono">ma_flujo_20d</span> (media móvil del flujo neto D−R) están activos desde antes de esta sesión pero no habían entrado a ninguna versión de este documento: se generan con f-string dentro de un bucle (<span class="mono">for v in VENTANAS_FLUJO: resultado[f"ma_flujo_{v}d"] = flujo.rolling(v).mean()</span>, línea 1458) — el mismo patrón que hizo invisibles a <span class="mono">R_t-1</span>/<span class="mono">D_t-1</span> en la revisión anterior. Añadidos al grupo 1.</li>
+      </ul>
+    </div>
+
+    <div id="excluidos" class="callout">
+      <h2>Excluidos recientemente, con motivo</h2>
+      <p style="color:var(--ink-soft);font-size:.9rem;margin:0 0 1rem">No se borró el código de ninguno — todos siguen calculándose y solo se les quitó la línea que los sube a la matriz (<span class="mono">FEATURES_EXCLUIR</span>). Reactivarlos es revertir esa línea.</p>
+      <ul>
+        <li><b class="mono">capacidad_retiro_th</b> — proyectaba la capacidad de retiro a fecha_th dentro del mes calendario de fecha_t (fórmula completa: <span class="mono">MAX(0, encaje_diario_lag1 − min_por_dia_proyectado) + overnight_lag1</span>, con un resguardo de frescura contra insumos congelados si <span class="mono">bbva_encaje.xlsx</span> no se refrescaba). Excluida por tres motivos medidos, no uno: sin poder predictivo detectable, cobertura &lt;3% en horizontes largos por diseño (solo aplica dentro del mes de origen), y alargó la corrida de <span class="mono">step005</span> sin mejorar la cobertura — la empeoró levemente. <span class="mono">step001_build_feature_matrix.py:2680-2828</span>.</li>
+        <li><b class="mono">R_t0, D_t0, R_t-1, D_t-1, R_conf_t1, D_conf_t1</b> — SHAP |mean| (participación q99, por fold) las mostró con participación despreciable frente a <span class="mono">dias_al_cierre_mes</span>, <span class="mono">dias_desde_cierre_mes</span> y la familia <span class="mono">*_pos</span>. Eran la única excepción activa dentro de la familia de rezagos de R/D — el resto (t-2 a t-22) ya estaba excluido de antes. Su hermano <span class="mono">R_conf_t2</span> tenía la misma SHAP baja pero se conservó — ver el hallazgo de arriba.</li>
+        <li><b class="mono">esc_deposito_pos</b> (anclada al cierre) — superada por <span class="mono">esc_deposito_pos_ap</span> (anclada a la apertura) en importancia por permutación. Mecánicamente consistente: los depósitos fuertes ocurren a inicios de mes, así que anclar al cierre desalineaba la posición buscada en los meses previos con el día donde realmente ocurre el depósito grande. No se aplicó el mismo argumento a <span class="mono">esc_neto_max_pos</span>: su espejo de apertura (<span class="mono">esc_neto_max_pos_ap</span>) ya se había probado y salió débil, señal de que ese extremo del neto capta algo distinto del depósito puro — se mantiene activo.</li>
+        <li><b class="mono">mes_sin/cos, dias_sem_sin/cos, dias_al_cierre_mes_sin/cos, dias_al_cierre_trim_sin/cos, dias_al_cierre_anio_sin/cos, dias_cal_al_cierre_mes</b> — toda la familia cíclica de calendario, más la variante en días calendario del cierre de mes. La coexistencia cíclica+cruda que la revisión anterior daba por deliberada (ver hallazgo de arriba) no se sostuvo con gain/perm/SHAP: con ambas formas activas, la cíclica le restaba aporte a la cruda en vez de sumar señal propia. <span class="mono">dias_al_cierre_mes</span> y <span class="mono">dias_desde_cierre_mes</span> (las formas crudas) quedan intactas — son las que concentran la señal, no las que se excluyeron.</li>
+      </ul>
+    </div>
+
+    <section id="g1" class="group">
+      <h2>1 · Flujo bancario crudo <span class="count">4 features</span></h2>
+      <p class="group-note">Del bloque original de 6 niveles crudos + confirmaciones sobreviven <span class="mono">R_conf_t2</span> y <span class="mono">sigma_flujo_ratio</span> — <span class="mono">R_t0</span>, <span class="mono">D_t0</span>, <span class="mono">R_conf_t1</span> y <span class="mono">D_conf_t1</span> se excluyeron la sesión pasada (ver <a href="#excluidos">Excluidos recientemente</a>). Se suman <span class="mono">ma_flujo_5d</span> y <span class="mono">ma_flujo_20d</span>, activos desde antes pero recién documentados esta pasada.</p>
+      <div class="cards">
+
+        <article class="feat" id="R_conf_t2">
+          <div class="feat-head"><span class="feat-name">R_conf_t2</span><div class="chips"><span class="chip anchor-t1">t+2</span><span class="chip" style="background:var(--accent-soft);color:var(--accent-ink);border-color:transparent">insumo estructural</span></div></div>
+          <p class="feat-desc"><b>R(t+2)</b> — el retiro a 2 días está prácticamente confirmado por la banca de antemano (las excepciones se sancionan), así que no es un proxy correlacionado: es el componente de retiro del target casi exacto.</p>
+          <dl class="kv"><dt>Fuente</dt><dd>Datos bancarios / Confirmados operativos</dd></dl>
+          <pre><span class="ln">1417</span>resultado["R_conf_t2"] = df["R"].shift(-2)</pre>
+          <p class="code-cap"><span class="mono">step001_build_feature_matrix.py:1417</span></p>
+          <p class="code-cap" style="margin-top:.5rem"><b>Por qué no se excluyó pese a SHAP bajo:</b> es insumo de <span class="mono">DESCOMPONER_H2</span> en <span class="mono">step005_walk_forward_cv_4.py:146-162</span>. Para <span class="mono">h=2</span> el target real es <span class="mono">D(t+2)−R(t+2)</span>, pero en vez de pedirle al modelo que prediga esa resta completa, se entrena sobre <span class="mono">D(t+2)</span> solo y se reconstruye después: <span class="mono">q_τ(target) = max(q_τ(D), 0) − R_conf_t2</span> (línea 765). <span class="mono">step005</span> lee el valor de <span class="mono">X_train["R_conf_t2"]</span> (línea ~2317) — si la columna faltara en la matriz, la descomposición se desactivaría en silencio (<span class="mono">log.warning</span>, sin error) y <span class="mono">h=2</span> perdería la ventaja de usar el retiro casi-confirmado. Su SHAP baja es la firma de que el mecanismo funciona bien: la resta es exacta y ocurre <i>fuera</i> del modelo entrenado, así que el árbol no necesita usarla como split.</p>
+        </article>
+
+        <article class="feat" id="sigma_flujo_ratio">
+          <div class="feat-head"><span class="feat-name">sigma_flujo_ratio</span><div class="chips"><span class="chip">sin ancla</span></div></div>
+          <p class="feat-desc"><span class="mono">σ(flujo, 5d) / σ(flujo, 20d)</span> — volatilidad reciente sobre volatilidad base. &gt;1 marca régimen de alta vol reciente. <span class="mono">NaN</span> si el denominador es 0.</p>
+          <dl class="kv"><dt>Fuente</dt><dd>Datos bancarios (derivado)</dd></dl>
+          <pre><span class="ln">1429</span>resultado["sigma_flujo_ratio"] = (
+<span class="ln">1430</span>    resultado["sigma_flujo_5d"] / resultado["sigma_flujo_20d"].replace(0, np.nan)
+<span class="ln">1431</span>)</pre>
+          <p class="code-cap"><span class="mono">step001_build_feature_matrix.py:1429-1431</span> — sigma_flujo_5d/20d quedan excluidos por sí solos, solo se activa el cociente.</p>
+        </article>
+
+        <article class="feat" id="ma_flujo_5d">
+          <div class="feat-head"><span class="feat-name">ma_flujo_5d</span><div class="chips"><span class="chip">sin ancla</span><span class="chip">nuevo en el doc</span></div></div>
+          <p class="feat-desc">Media móvil de 5 ruedas del flujo neto <span class="mono">D−R</span>: nivel reciente del flujo, sin el ruido de un solo día. Activo desde antes de esta sesión, no documentado hasta ahora — ver el hallazgo de arriba.</p>
+          <pre><span class="ln">1458</span>for v in VENTANAS_FLUJO:   # [5, 20]
+<span class="ln">1458</span>    resultado[f"ma_flujo_{v}d"] = flujo.rolling(v).mean()</pre>
+          <p class="code-cap"><span class="mono">step001_build_feature_matrix.py:1458</span> — nombre generado con f-string, invisible a una búsqueda por texto literal.</p>
+        </article>
+
+        <article class="feat" id="ma_flujo_20d">
+          <div class="feat-head"><span class="feat-name">ma_flujo_20d</span><div class="chips"><span class="chip">sin ancla</span><span class="chip">nuevo en el doc</span></div></div>
+          <p class="feat-desc">Ídem, ventana de 20 ruedas: nivel de más largo plazo, complementa a <span class="mono">ma_flujo_5d</span> igual que <span class="mono">sigma_flujo_5d/20d</span> se complementan en <span class="mono">sigma_flujo_ratio</span>.</p>
+          <pre><span class="ln">1458</span>resultado[f"ma_flujo_{v}d"] = flujo.rolling(v).mean()</pre>
+          <p class="code-cap"><span class="mono">step001_build_feature_matrix.py:1458</span></p>
+        </article>
+
+      </div>
+    </section>
+
+    <section id="g2" class="group">
+      <h2>2 · Calendario crudo / binario <span class="count">5 features</span></h2>
+      <p class="group-note">La familia cíclica sin/cos que antes coexistía con estos crudos —diez features en total: <span class="mono">mes</span>, <span class="mono">dias_sem</span>, <span class="mono">dias_al_cierre_mes</span>, <span class="mono">dias_al_cierre_trim</span>, <span class="mono">dias_al_cierre_anio</span>— se excluyó esta pasada, junto con <span class="mono">dias_cal_al_cierre_mes</span>. Ver <a href="#excluidos">Excluidos recientemente</a> y el hallazgo de "redundancia deliberada, revertida con datos". Lo que queda es exactamente lo que sí mostró aporte propio: enteros y banderas que permiten a un árbol un <b>único split</b> en el punto exacto del calendario, donde la forma sin/cos necesitaba varios y desparramaba el efecto sobre una ventana. Todos anclados en <span class="mono">fecha_th</span>.</p>
+      <div class="cards">
+
+        <article class="feat" id="dias_al_cierre_mes">
+          <div class="feat-head"><span class="feat-name">dias_al_cierre_mes</span><div class="chips"><span class="chip anchor-th">t+h</span></div></div>
+          <p class="feat-desc">Días hábiles restantes hasta fin de mes: <span class="mono">total_bdays_mes − pos_en_mes</span>. 0 = último día hábil del mes.</p>
+          <pre><span class="ln">2215</span>dias_al_cierre_mes = total_bdays_mes - pos_en_mes</pre>
+          <p class="code-cap"><span class="mono">step001_build_feature_matrix.py:2215</span> — reloj OPERATIVO (hábil). Su contraparte en días calendario, <span class="mono">dias_cal_al_cierre_mes</span>, se excluyó esta pasada (ver <a href="#excluidos">Excluidos recientemente</a>).</p>
+        </article>
+
+        <article class="feat" id="dias_desde_cierre_mes">
+          <div class="feat-head"><span class="feat-name">dias_desde_cierre_mes</span><div class="chips"><span class="chip anchor-th">t+h</span></div></div>
+          <p class="feat-desc">Días hábiles transcurridos desde el inicio de mes: <span class="mono">pos_en_mes − 1</span>. 0 = primer día hábil.</p>
+          <pre><span class="ln">2216</span>dias_desde_cierre_mes = pos_en_mes - 1</pre>
+          <p class="code-cap"><span class="mono">step001_build_feature_matrix.py:2216</span></p>
+        </article>
+
+        <article class="feat" id="dias_al_cierre_trim">
+          <div class="feat-head"><span class="feat-name">dias_al_cierre_trim</span><div class="chips"><span class="chip anchor-th">t+h</span></div></div>
+          <p class="feat-desc">Días hábiles restantes hasta fin de trimestre: <span class="mono">total_bdays_trim − pos_en_trim</span>.</p>
+          <pre><span class="ln">2217</span>dias_al_cierre_trim = total_bdays_trim - pos_en_trim</pre>
+          <p class="code-cap"><span class="mono">step001_build_feature_matrix.py:2217</span> — ya se calculaba solo para el sin/cos; esta sesión se activó también en crudo.</p>
+        </article>
+
+        <article class="feat" id="es_mes_cierre_trim">
+          <div class="feat-head"><span class="feat-name">es_mes_cierre_trim</span><div class="chips"><span class="chip anchor-th">t+h</span></div></div>
+          <p class="feat-desc">1 si el mes de <span class="mono">fecha_th</span> es Mar/Jun/Sep/Dic. El heatmap de intensidad de retiro de BBVA concentra la activación casi exclusivamente en esos cuatro meses, con años recientes saturando cerca de 100% del exceso disponible.</p>
+          <pre><span class="ln">2232</span>es_mes_cierre_trim = int(ts.month in (3, 6, 9, 12))</pre>
+          <p class="code-cap"><span class="mono">step001_build_feature_matrix.py:2232</span> — nuevo esta sesión.</p>
+        </article>
+
+        <article class="feat" id="is_cierre_encaje">
+          <div class="feat-head"><span class="feat-name">is_cierre_encaje</span><div class="chips"><span class="chip anchor-th">t+h</span></div></div>
+          <p class="feat-desc">1 si <span class="mono">fecha_th</span> cae en los últimos 2 días hábiles del mes. El split más barato posible para los modelos de cola, donde el <span class="mono">cover</span> mínimo (suma de hessianos) está más ajustado.</p>
+          <pre><span class="ln">2315</span>"is_cierre_encaje": int(dias_al_cierre_mes &lt;= 1),</pre>
+          <p class="code-cap"><span class="mono">step001_build_feature_matrix.py:2315</span></p>
+        </article>
+
+      </div>
+    </section>
+
+    <section id="g3" class="group">
+      <h2>3 · Posición en el mes — familia <span class="mono" style="font-size:1.05rem">*_pos</span> <span class="count">8 features</span></h2>
+      <p class="group-note">Anclados en <span class="mono">fecha_th</span>, no en la fecha de origen: para cada horizonte, se busca el día de los meses previos que ocupa la <b>misma posición respecto al cierre de mes</b> que <span class="mono">t+h</span>, y se agrega sobre esos rezagos. Construidos en <span class="mono">_build_lag_posicion_mes()</span> (línea 1918) y <span class="mono">_build_frec_posicion_mes()</span> (línea 2158). La disponibilidad de rezagos depende de <span class="mono">h</span>: un rezago cuya fecha sea posterior a <span class="mono">t</span> se descarta (h ≤ 21k para el rezago k), lo que evita usar el futuro.</p>
+      <p class="group-note" style="margin-top:-.9rem"><b>Ventana deslizante</b> (nuevo esta pasada): <span class="mono">LAGS_POSICION_MES</span> pasó a ser una lista de <b>candidatos</b> (<span class="mono">[1..8]</span>) y de cada fila entran los <span class="mono">N_REZAGOS_OBJETIVO = 4</span> más recientes que hayan sobrevivido a la máscara. Antes entraban <i>todos</i> los disponibles de una lista de 4, así que el conteo caía de 4 a 1 con el horizonte. Ahora el conteo es fijo y la recencia es máxima a cada h: <span class="mono">h=5 → 1,2,3,4</span>, <span class="mono">h=43 → 3,4,5,6</span>, <span class="mono">h=75 → 4,5,6,7</span>. Ver el hallazgo correspondiente.</p>
+      <div class="cards">
+
+        <article class="feat" id="esc_neto_min_pos">
+          <div class="feat-head"><span class="feat-name">esc_neto_min_pos</span><div class="chips"><span class="chip anchor-th">t+h</span></div></div>
+          <p class="feat-desc">Peor flujo neto <span class="mono">D−R</span> (con signo, el más negativo) en la misma posición del mes que t+h, entre los 4 rezagos más recientes ya observables en t. Predictor natural de la <b>cola BAJA</b>. Complementa a <span class="mono">sigma_22d</span>, que promedia sobre 22 ruedas y borra la variación por posición.</p>
+          <dl class="kv"><dt>Fórmula</dt><dd><span class="mono">min( (D−R)[pos(t+h), mes−k] : los 4 k más recientes disponibles )</span></dd></dl>
+          <pre><span class="ln">1872</span>def _build_lag_posicion_mes(serie_valores, fechas_th, fechas_t, lags_meses,
+<span class="ln">1873</span>                            peru_bday, referencia="cierre"):
+<span class="ln">...</span>   dcm = (_tmp.groupby("ym")["f"].rank(ascending=False, method="first")
+<span class="ln">...</span>                                 .values - 1).astype(int)  # 0 = último hábil</pre>
+          <p class="code-cap"><span class="mono">step001_build_feature_matrix.py:1872-1970</span> — vectorizado sobre clave entera <span class="mono">ym_ord*64 + dcm</span> para evitar construir ~1.2M objetos Python.</p>
+        </article>
+
+        <article class="feat" id="esc_neto_max_pos">
+          <div class="feat-head"><span class="feat-name">esc_neto_max_pos</span><div class="chips"><span class="chip anchor-th">t+h</span></div></div>
+          <p class="feat-desc">El flujo neto más positivo en la misma posición del mes. Predictor natural de la <b>cola ALTA</b>. Separar por signo evita que ambas colas reciban el mismo número — lo que ocurría con un único máximo de valores absolutos.</p>
+          <dl class="kv"><dt>Fórmula</dt><dd><span class="mono">max( (D−R)[pos(t+h), mes−k] : los 4 k más recientes disponibles )</span></dd></dl>
+          <pre><span class="ln">1872</span>def _build_lag_posicion_mes(serie_valores=D−R, ..., referencia="cierre")</pre>
+          <p class="code-cap">Misma función que esc_neto_min_pos, signo positivo del extremo.</p>
+        </article>
+
+        <article class="feat" id="esc_retiro_pos">
+          <div class="feat-head"><span class="feat-name">esc_retiro_pos</span><div class="chips"><span class="chip anchor-th">t+h</span></div></div>
+          <p class="feat-desc">Ídem sobre <span class="mono">R</span> solo (no el neto). Dirige la cola BAJA. En la permutación del modelo aparece por encima de la versión neta: descomponer el flujo en sus componentes aporta señal propia.</p>
+          <dl class="kv"><dt>Fórmula</dt><dd><span class="mono">max( |R[pos(t+h), mes−k]| : los 4 k más recientes disponibles )</span></dd></dl>
+          <pre><span class="ln">1872</span>_build_lag_posicion_mes(serie_valores=R, ...)</pre>
+        </article>
+
+        <article class="feat" id="acum_neto_min_pos">
+          <div class="feat-head"><span class="feat-name">acum_neto_min_pos</span><div class="chips"><span class="chip anchor-th">t+h</span></div></div>
+          <p class="feat-desc">Flujo neto <b>acumulado dentro del mes</b> hasta el día con la misma posición que t+h, el más negativo de los 4 meses previos. A diferencia de esc_neto_min_pos (extremo de un solo día) es una cantidad de trayectoria: cuánto se había construido a esa altura del ciclo. Anclado en la fecha de origen esta señal no era relevante (ver <span class="mono">flujo_neto_acum_mes</span>, excluido).</p>
+          <dl class="kv"><dt>Fórmula</dt><dd><span class="mono">min( acum_mes(D−R)[pos(t+h), mes−k] : los 4 k más recientes )</span></dd></dl>
+        </article>
+
+        <article class="feat" id="acum_neto_max_pos">
+          <div class="feat-head"><span class="feat-name">acum_neto_max_pos</span><div class="chips"><span class="chip anchor-th">t+h</span></div></div>
+          <p class="feat-desc">Ídem, el acumulado más positivo.</p>
+          <dl class="kv"><dt>Fórmula</dt><dd><span class="mono">max( acum_mes(D−R)[pos(t+h), mes−k] : los 4 k más recientes )</span></dd></dl>
+        </article>
+
+        <article class="feat" id="frec_flujo_pos">
+          <div class="feat-head"><span class="feat-name">frec_flujo_pos</span><div class="chips"><span class="chip anchor-th">t+h</span></div></div>
+          <p class="feat-desc">Fracción de los últimos 12 meses en que el día con la misma posición que t+h superó su umbral de <span class="mono">|flujo neto|</span> (mediana móvil de 250 ruedas hasta t, point-in-time). Mide <b>recurrencia</b>, no magnitud: una posición cargada en 8 de 12 meses es distinta de una cargada en 1 con un valor enorme. Con 12 rezagos cubre los 74 horizontes.</p>
+          <dl class="kv"><dt>Fórmula</dt><dd><span class="mono">(1/n) · Σ 1[ |flujo[pos(t+h), mes−k]| &gt; umbral_250d ]</span>, k=1..12</dd></dl>
+          <pre><span class="ln">2057</span>def _build_frec_posicion_mes(serie_valores, fechas_th, fechas_t, lags_meses,
+<span class="ln">...</span>                             peru_bday, umbral_ventana=250)</pre>
+          <p class="code-cap"><span class="mono">step001_build_feature_matrix.py:2057</span> — el umbral se evalúa sobre el calendario hábil <span class="mono">peru_bday</span> (corregido esta sesión; antes usaba un calendario distinto y sesgaba −4.0% en media).</p>
+        </article>
+
+        <article class="feat" id="esc_neto_max_pos_ap">
+          <div class="feat-head"><span class="feat-name">esc_neto_max_pos_ap</span><div class="chips"><span class="chip anchor-th">t+h</span><span class="chip">débil, activa</span></div></div>
+          <p class="feat-desc">Igual que <span class="mono">esc_neto_max_pos</span> pero con <span class="mono">referencia="inicio"</span>: busca el día en meses previos a la misma distancia del <b>primer</b> día hábil del mes, no del último. Apuntaba a la reversión observada al abrir el mes (depósito fuerte seguido de retiro fuerte días después), pero a diferencia de <span class="mono">esc_deposito_pos_ap</span> (que sí confirmó la hipótesis) esta salió débil en el heatmap de importancia por permutación — evidencia de que el extremo del NETO al cierre (<span class="mono">esc_neto_max_pos</span>, que se mantiene activa) capta algo distinto del depósito puro. Se conserva activa por ahora: sin poder predictivo claro pero tampoco perjudicial, y el costo de una columna extra es bajo.</p>
+          <dl class="kv"><dt>Motivación original</dt><dd><span class="mono">aux_importancia_calendario.py</span>: <span class="mono">dias_desde_cierre_mes</span> domina SHAP en q95/q99; la familia <span class="mono">*_pos</span> nunca se había desdoblado así</dd></dl>
+          <pre><span class="ln">2642</span>for _nom, _ser in (("flujo", _serie_flujo), ("deposito", _serie_dep)):
+<span class="ln">2645</span>    referencia="inicio",
+<span class="ln">2653</span>    df["esc_neto_max_pos_ap"] = _mx_s_ap.values</pre>
+          <p class="code-cap"><span class="mono">step001_build_feature_matrix.py:2642-2656</span></p>
+        </article>
+
+        <article class="feat" id="esc_deposito_pos_ap">
+          <div class="feat-head"><span class="feat-name">esc_deposito_pos_ap</span><div class="chips"><span class="chip anchor-th">t+h</span><span class="chip" style="background:var(--accent-soft);color:var(--accent-ink);border-color:transparent">confirmado</span></div></div>
+          <p class="feat-desc">Igual que <span class="mono">esc_deposito_pos</span> pero con <span class="mono">referencia="inicio"</span>. Era el candidato más directo a la hipótesis de reversión, porque es sobre <span class="mono">D</span> específicamente — y se confirmó: en importancia por permutación superó notablemente a la versión anclada al cierre, que se excluyó (ver <a href="#excluidos">Excluidos recientemente</a>). Mecánicamente consistente: los depósitos fuertes ocurren a inicios de mes, así que anclar la búsqueda al cierre desalineaba la posición contra el día donde realmente ocurre el depósito grande.</p>
+          <pre><span class="ln">2656</span>df["esc_deposito_pos_ap"] = _mx_ap.values</pre>
+          <p class="code-cap"><span class="mono">step001_build_feature_matrix.py:2642-2656</span></p>
+        </article>
+
+      </div>
+    </section>
+
+    <section id="g4" class="group">
+      <h2>4 · Encaje BBVA <span class="count">2 features</span></h2>
+      <p class="group-note">Fuente <span class="mono">aux_encaje_2.py</span> vía <span class="mono">bbva_encaje_features_modelo.xlsx</span>, leído en <span class="mono">load_bbva_encaje_features()</span> (línea 1657) e incorporado por <span class="mono">merge_asof</span> hacia el calendario hábil de la matriz. <span class="mono">capacidad_retiro_th</span> vivía aquí — ver <a href="#excluidos">Excluidos recientemente</a>.</p>
+      <div class="cards">
+
+        <article class="feat" id="avance_mes_lag1">
+          <div class="feat-head"><span class="feat-name">avance_mes_lag1</span><div class="chips"><span class="chip anchor-t">t</span><span class="chip">lag 1</span></div></div>
+          <p class="feat-desc"><span class="mono">EncajeAcumMes(t−1) / ExigibleTotalMes_est(t−1)</span>: fracción del requerimiento mensual ya cubierta. Calculado en días calendario en el origen, llevado a días hábiles por <span class="mono">merge_asof</span> backward.</p>
+          <p class="code-cap"><span class="mono">step001_build_feature_matrix.py:2633-2676</span>, columna importada de <span class="mono">aux_encaje_2</span>.</p>
+        </article>
+
+        <article class="feat" id="exceso_abs_lag1">
+          <div class="feat-head"><span class="feat-name">exceso_abs_lag1</span><div class="chips"><span class="chip anchor-t">t</span><span class="chip">lag 1</span></div></div>
+          <p class="feat-desc"><span class="mono">MAX(0, encaje(t−1) − encaje_min_por_dia) + overnight(t−1)</span>: capacidad de retiro real <b>hoy</b> sin incumplir el 100% al cierre, en MM USD. Es el sobreencaje efectivo del día.</p>
+          <p class="code-cap"><span class="mono">step001_build_feature_matrix.py:2633-2676</span>, columna importada de <span class="mono">aux_encaje_2</span>.</p>
+        </article>
+
+      </div>
+    </section>
+
+    <section id="g5" class="group">
+      <h2>5 · CC+OVN en BCR <span class="count">6 features</span></h2>
+      <p class="group-note">Saldo de cuenta corriente + overnight en el Banco Central, fuente <span class="mono">Saldos_CCOVN.xlsx</span>, disponible desde 2010. Anclado en <span class="mono">t</span>, rezago 1 día.</p>
+      <p class="group-note" style="margin-top:-.9rem"><b>v2 — resuelto por entidad, no fijo a BBVA.</b> Antes <span class="mono">ccovn_bbva_lag1</span> era literalmente el saldo de BBVA para <i>todas</i> las entidades por igual, sin importar qué banco se estuviera modelando. Ahora <span class="mono">build_ccovn_features()</span> genera <span class="mono">ccovn_&lt;clave&gt;_lag1</span> genéricamente para cada clave del CCOVN ancho (<span class="mono">sistema</span>, <span class="mono">foco</span>, <span class="mono">resto</span>, <span class="mono">banco_&lt;X&gt;</span>), y <span class="mono">resolver_ccovn_lados()</span> elige, por banco, cuál es su <b>propio</b> saldo y —si es un lado de la partición activa— el de su <b>contraparte</b>. Mismo criterio de composición exacta que <span class="mono">destinos_encaje_bbva()</span>: un banco individual solo hereda contraparte si su composición coincide EXACTO con un lado (ej. BBVA cuando <span class="mono">particion_activa="bbva"</span>). Los headers de <span class="mono">Saldos_CCOVN.xlsx</span> se emparejan contra los bancos canónicos de Transacciones_BancaLocal por subcadena normalizada (sin tildes, sin mayúsculas) — no exigen igualdad exacta de texto.</p>
+      <div class="cards">
+
+        <article class="feat" id="ccovn_sistema_lag1">
+          <div class="feat-head"><span class="feat-name">ccovn_sistema_lag1</span><div class="chips"><span class="chip anchor-t">t</span><span class="chip">lag 1</span></div></div>
+          <p class="feat-desc">Saldo total CC+OVN del sistema en el BCR en t−1 (USD). Igual para todas las entidades — no depende de la partición.</p>
+          <pre><span class="ln">2168</span>for clave in df_bd.columns:
+    resultado[f"ccovn_{clave}_lag1"] = serie.shift(1)</pre>
+        </article>
+
+        <article class="feat" id="ccovn_propio_lag1">
+          <div class="feat-head"><span class="feat-name">ccovn_propio_lag1</span><div class="chips"><span class="chip anchor-t">t</span><span class="chip">lag 1</span><span class="chip" style="background:var(--accent-soft);color:var(--accent-ink);border-color:transparent">renombrado en v2</span></div></div>
+          <p class="feat-desc">Saldo CC+OVN <b>propio</b> de la entidad modelada en t−1 (USD). Antes <span class="mono">ccovn_bbva_lag1</span>. Para <span class="mono">SISTEMA</span> coincide con <span class="mono">ccovn_sistema_lag1</span>; para <span class="mono">FOCO_BBVA</span> es BBVA; para <span class="mono">RESTO_BBVA</span> es el resto del sistema; para un banco individual fuera de la partición activa (ej. <span class="mono">CREDITO</span> con <span class="mono">particion_activa="bbva"</span>) es su propio saldo, sin heredar el del grupo al que pertenece.</p>
+          <pre><span class="ln">3389</span>clave_p, clave_c = resolver_ccovn_lados(banco, nombre_sistema, reporte_particion)</pre>
+          <p class="code-cap"><span class="mono">step001_build_feature_matrix_v2.py:3363-3417</span> (merge + resolución) · <span class="mono">step001_build_feature_matrix_v2.py:1058-1075</span> (<span class="mono">resolver_ccovn_lados</span>)</p>
+        </article>
+
+        <article class="feat" id="var_ccovn_sistema_lag1">
+          <div class="feat-head"><span class="feat-name">var_ccovn_sistema_lag1</span><div class="chips"><span class="chip anchor-t">t</span><span class="chip">lag 1</span></div></div>
+          <p class="feat-desc">Variación diaria del saldo CC+OVN del sistema en t−1.</p>
+          <pre><span class="ln">2169</span>resultado[f"var_ccovn_{clave}_lag1"] = serie.diff().shift(1)</pre>
+        </article>
+
+        <article class="feat" id="var_ccovn_propio_lag1">
+          <div class="feat-head"><span class="feat-name">var_ccovn_propio_lag1</span><div class="chips"><span class="chip anchor-t">t</span><span class="chip">lag 1</span><span class="chip" style="background:var(--accent-soft);color:var(--accent-ink);border-color:transparent">renombrado en v2</span></div></div>
+          <p class="feat-desc">Variación diaria del saldo propio en t−1. Antes <span class="mono">var_ccovn_bbva_lag1</span>.</p>
+        </article>
+
+        <article class="feat" id="ccovn_contraparte_lag1">
+          <div class="feat-head"><span class="feat-name">ccovn_contraparte_lag1</span><div class="chips"><span class="chip anchor-t">t</span><span class="chip">lag 1</span><span class="chip" style="background:var(--accent-soft);color:var(--accent-ink);border-color:transparent">nuevo en v2</span></div></div>
+          <p class="feat-desc">Saldo CC+OVN del <b>otro lado</b> de la partición activa en t−1 (USD). No existía en v1, que no tenía noción de "el resto". <span class="mono">NaN</span> para <span class="mono">SISTEMA</span> y para bancos individuales fuera de la partición activa (ej. <span class="mono">CREDITO</span> con <span class="mono">particion_activa="bbva"</span> — pertenece al resto pero no ES el resto). Con <span class="mono">FOCO_BBVA</span> vale el saldo de <span class="mono">RESTO_BBVA</span> y viceversa: es donde viviría, si existe, la compensación entre BBVA y el resto de la banca que documenta el hallazgo 3 del one-pager.</p>
+          <dl class="kv"><dt>Identidad</dt><dd><span class="mono">ccovn_propio_lag1(FOCO) + ccovn_contraparte_lag1(FOCO) == ccovn_sistema_lag1</span>, verificada en <span class="mono">aux_verificar_ccovn_particion.py</span></dd></dl>
+        </article>
+
+        <article class="feat" id="var_ccovn_contraparte_lag1">
+          <div class="feat-head"><span class="feat-name">var_ccovn_contraparte_lag1</span><div class="chips"><span class="chip anchor-t">t</span><span class="chip">lag 1</span><span class="chip" style="background:var(--accent-soft);color:var(--accent-ink);border-color:transparent">nuevo en v2</span></div></div>
+          <p class="feat-desc">Variación diaria del saldo de la contraparte en t−1. Mismas condiciones de disponibilidad que <span class="mono">ccovn_contraparte_lag1</span>.</p>
+          <pre><span class="ln">3395</span>_renombre[f"var_ccovn_{clave_c}_lag1"] = "var_ccovn_contraparte_lag1"</pre>
+          <p class="code-cap"><span class="mono">step001_build_feature_matrix_v2.py:3363-3417</span></p>
+        </article>
+
+      </div>
+    </section>
+
+    <section id="g6" class="group">
+      <h2>6 · Macro / mercado <span class="count">2 features</span></h2>
+      <p class="group-note">De EMBI/VIX/TC/T10Y/COPPER/CDS —crudos y sus versiones <span class="mono">_frac</span> por diferenciación fraccional— sobreviven dos: <span class="mono">TASA_REF_BCRP</span> (crudo, nunca tuvo versión <span class="mono">_frac</span>) y <span class="mono">CDS_PERU_5Y_frac</span>. <b>Corrección sobre la versión anterior de este documento:</b> decía que <span class="mono">CDS_PERU_5Y_frac</span> estaba excluido; no lo está — es un error de esa revisión, no un cambio de esta.</p>
+      <div class="cards">
+
+        <article class="feat" id="TASA_REF_BCRP">
+          <div class="feat-head"><span class="feat-name">TASA_REF_BCRP</span><div class="chips"><span class="chip">sin ancla</span></div></div>
+          <p class="feat-desc">Tasa de referencia del BCRP, leída directamente del Add-In de Excel.</p>
+          <pre><span class="ln">1107</span>series["TASA_REF_BCRP"] = _leer_bcrp_excel(ruta_bcrp, "TASA_REF_BCRP",
+<span class="ln">1108</span>                                            hoja=params["hoja_bcrp_tasa_ref"])</pre>
+          <p class="code-cap"><span class="mono">step001_build_feature_matrix.py:1107-1108</span></p>
+        </article>
+
+        <article class="feat" id="CDS_PERU_5Y_frac">
+          <div class="feat-head"><span class="feat-name">CDS_PERU_5Y_frac</span><div class="chips"><span class="chip">sin ancla</span></div></div>
+          <p class="feat-desc">CDS Perú 5Y diferenciado fraccionalmente (López de Prado, cap. 5): vuelve estacionaria una serie <span class="mono">I(1)</span> sin destruir tanta memoria como una diferencia entera. <span class="mono">d_opt</span> se calibra una sola vez, solo con datos hasta <span class="mono">_FD_TRAIN_CUTOFF</span> — sin eso sería fuga, porque el óptimo se recalcularía con información del futuro.</p>
+          <dl class="kv"><dt>Fuente</dt><dd>Bloomberg</dd></dl>
+          <pre><span class="ln">1507</span>_ffd_targets = [("EMBI_PERU","EMBI_PERU_frac"), ("T10Y","T10Y_frac"),
+<span class="ln">1510</span>                ("CDS_PERU_5Y","CDS_PERU_5Y_frac"), ("COPPER","COPPER_frac"),
+<span class="ln">1512</span>                ("VIX","VIX_frac")]
+<span class="ln">1517</span>s_train = serie[serie.index &lt;= _fd_cutoff].dropna()
+<span class="ln">1518</span>d_opt   = _find_min_d(s_train) if len(s_train) &gt;= 60 else 0.4
+<span class="ln">1519</span>resultado[col_frac] = _fracdiff_fixed_width(serie, d_opt)</pre>
+          <p class="code-cap"><span class="mono">step001_build_feature_matrix.py:1507-1519</span> — de los 5 objetivos de esta diferenciación (EMBI, T10Y, CDS, COPPER, VIX), solo CDS sobrevive activo; los otros 4 están en <span class="mono">FEATURES_EXCLUIR</span>.</p>
+        </article>
+
+      </div>
+    </section>
+
+    <footer>
+      Generado por lectura directa de <span class="mono">step001_build_feature_matrix.py</span> — el recuento de activos (25) se obtuvo parseando <span class="mono">FEATURES_EXCLUIR</span> con AST y cruzándolo contra las llamadas <span class="mono">add()</span> del registro de documentación en <span class="mono">build_data_dictionary()</span>, incluidas las registradas dinámicamente vía f-string dentro de bucles (<span class="mono">R_t-{l}</span>, <span class="mono">sigma_R_{v}d</span>, <span class="mono">ma_flujo_{v}d</span>, …, resueltas a mano contra los parámetros de cada bucle), con corrección manual del caso <span class="mono">n_lags_pos</span> (gateado por una bandera separada) y verificación de que ninguna coma faltante concatenara literales adyacentes en la lista.
+      <br><br>
+      Arco de esta revisión (segunda pasada de la sesión 2026-08-14): <span class="mono">cf4295a</span> excluye <span class="mono">dias_al_cierre_trim_sin/cos</span> y <span class="mono">dias_al_cierre_anio_sin/cos</span> por baja importancia por permutación; <span class="mono">05e32bb</span> excluye <span class="mono">esc_deposito_pos</span>, superada por su versión anclada a la apertura; <span class="mono">192fe14</span> excluye <span class="mono">mes_sin/cos</span>, <span class="mono">dias_sem_sin/cos</span>, <span class="mono">dias_al_cierre_mes_sin/cos</span> y <span class="mono">dias_cal_al_cierre_mes</span>, revirtiendo la redundancia deliberada de la revisión anterior — con datos, la forma cíclica le restaba aporte a la cruda en vez de sumar señal propia. Con esto la familia cíclica de calendario (grupo 2 de la versión previa) queda excluida por completo.
+    </footer>
+
+  </main>
+</div>
