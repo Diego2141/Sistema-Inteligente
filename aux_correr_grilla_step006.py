@@ -37,6 +37,12 @@ canonicalizar correria el modo conjunto tres veces para pisar su propia salida
 dos veces. Son horas. Ver canonicalizar().
 """
 
+# PEP 604 (`list | None`) necesita Python 3.10+; esto difiere la evaluacion
+# de las anotaciones y lo vuelve valido desde 3.7. Todos los archivos del
+# repo la traen — sin ella el modulo ni siquiera importa en el entorno de
+# Spyder, que es mas viejo.
+from __future__ import annotations
+
 import itertools
 import re
 import subprocess

@@ -38,6 +38,12 @@ comparacion, incluidos los controles negativos.
 Para comparar otros archivos, editar ARCHIVOS.
 """
 
+# PEP 604 (`list | None`) necesita Python 3.10+; esto difiere la evaluacion
+# de las anotaciones y lo vuelve valido desde 3.7. Todos los archivos del
+# repo la traen — sin ella el modulo ni siquiera importa en el entorno de
+# Spyder, que es mas viejo.
+from __future__ import annotations
+
 import sys
 import tempfile
 from pathlib import Path

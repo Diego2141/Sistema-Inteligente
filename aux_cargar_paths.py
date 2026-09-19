@@ -31,6 +31,12 @@ scripts lo siguen. Es el mismo criterio con el que etiqueta_corrida() esta
 definida igual en step006 y en generar_video_fancharts.
 """
 
+# PEP 604 (`list | None`) necesita Python 3.10+; esto difiere la evaluacion
+# de las anotaciones y lo vuelve valido desde 3.7. Todos los archivos del
+# repo la traen — sin ella el modulo ni siquiera importa en el entorno de
+# Spyder, que es mas viejo.
+from __future__ import annotations
+
 from pathlib import Path
 
 import pandas as pd

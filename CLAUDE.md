@@ -360,6 +360,24 @@ Al escribir un checklist nuevo, la convención del repo es:
   es el ordinal de su propia fecha convierte "¿usó información futura?" en una
   comparación aritmética exacta.
 
+**Todo archivo nuevo empieza con `from __future__ import annotations`.** Es la
+convención del repo —la traen los 51 archivos existentes— y no es cosmética: el
+intérprete de Spyder es anterior a Python 3.10, donde `list | None` (PEP 604) en
+una anotación revienta al importar con
+
+```
+TypeError: unsupported operand type(s) for |: 'type' and 'NoneType'
+```
+
+Las anotaciones de una firma se evalúan al definir la función, así que el módulo
+**ni siquiera importa**. El `from __future__` las difiere a string y el archivo
+pasa a ser válido desde 3.7. `step006_simulacion_paths_vf7.py` tiene 28 uniones
+de ese estilo y corre sin problema justamente por eso.
+
+No se detecta desde el contenedor: ahí Python es 3.11 y el archivo importa
+perfecto. Un script que anda en todas las verificaciones locales y falla en la
+primera línea al copiarlo a `H:` es casi siempre esto.
+
 **`py_compile` no detecta `NameError` de runtime.** Un refactor que elimina una
 variable pero deja una referencia viva en una línea de log compila perfecto y
 revienta a mitad de corrida. Usar:
